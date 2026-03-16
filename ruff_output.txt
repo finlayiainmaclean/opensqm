@@ -1,0 +1,461 @@
+D100 Missing docstring in public module
+--> opensqm/mopac.py:1:1
+
+D101 Missing docstring in public class
+  --> opensqm/mopac.py:22:7
+   |
+22 | class MOPACError(Exception):
+   |       ^^^^^^^^^^
+23 |     pass
+   |
+
+D401 First line of docstring should be in imperative mood: "Finds nitro groups in a molecule and adds single bonds between the two oxygens."
+   --> opensqm/mopac.py:101:5
+    |
+100 |   def fix_nitro_groups(mol: Chem.Mol) -> Chem.Mol:
+101 | /     """
+102 | |     Finds nitro groups in a molecule and adds single bonds between the two oxygens.
+103 | |
+104 | |     Args:
+105 | |         mol: RDKit Mol object
+106 | |
+107 | |     Returns
+108 | |     -------
+109 | |         RDKit Mol object with bonds added between nitro group oxygens
+110 | |     """
+    | |_______^
+111 |       # Make a copy to avoid modifying the original molecule
+112 |       mol = Chem.Mol(mol)
+    |
+
+E501 Line too long (114 > 100)
+   --> opensqm/mopac.py:115:101
+    |
+114 |     # Define SMARTS pattern for nitro group: [N+](=O)[O-]
+115 |     # This matches nitrogen with formal charge +1, double bonded to oxygen, single bonded to oxygen with charge -1
+    |                                                                                                     ^^^^^^^^^^^^^^
+116 |     nitro_pattern = Chem.MolFromSmarts("[N;D3](~[O;D1])(~[O;D1])")
+    |
+
+D103 Missing docstring in public function
+   --> opensqm/mopac.py:195:5
+    |
+195 | def check_mopac_was_success(output_str):
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+196 |     if "IMAGINARY FREQUENCIES" in output_str:
+197 |         raise MOPACError(f"IMAGINARY FREQUENCIES: {output_str}")
+    |
+
+PLC0415 `import` should be at the top-level of a file
+   --> opensqm/mopac.py:209:9
+    |
+207 |         raise MOPACError(f"Bad hydrogen: {output_str}")
+208 |     else:
+209 |         import pdb
+    |         ^^^^^^^^^^
+210 |
+211 |         pdb.set_trace()
+    |
+
+F811 Redefinition of unused `fix_nitro_groups` from line 100
+   --> opensqm/mopac.py:230:5
+    |
+230 | def fix_nitro_groups(mol):
+    |     ^^^^^^^^^^^^^^^^
+231 |     """
+232 |     Finds nitro groups in a molecule and adds single bonds between the two oxygens.
+    |
+help: Remove definition: `fix_nitro_groups`
+
+D401 First line of docstring should be in imperative mood: "Finds nitro groups in a molecule and adds single bonds between the two oxygens."
+   --> opensqm/mopac.py:231:5
+    |
+230 |   def fix_nitro_groups(mol):
+231 | /     """
+232 | |     Finds nitro groups in a molecule and adds single bonds between the two oxygens.
+233 | |
+234 | |     Args:
+235 | |         mol: RDKit Mol object
+236 | |
+237 | |     Returns
+238 | |     -------
+239 | |         RDKit Mol object with bonds added between nitro group oxygens
+240 | |     """
+    | |_______^
+241 |       if mol is None:
+242 |           return None
+    |
+
+E501 Line too long (114 > 100)
+   --> opensqm/mopac.py:248:101
+    |
+247 |     # Define SMARTS pattern for nitro group: [N+](=O)[O-]
+248 |     # This matches nitrogen with formal charge +1, double bonded to oxygen, single bonded to oxygen with charge -1
+    |                                                                                                     ^^^^^^^^^^^^^^
+249 |     nitro_pattern = Chem.MolFromSmarts("[N;D3](~[O;D1])(~[O;D1])")
+    |
+
+D103 Missing docstring in public function
+   --> opensqm/mopac.py:288:5
+    |
+288 | def get_mopac_bonds(mol: Chem.Mol):
+    |     ^^^^^^^^^^^^^^^
+289 |     with tempfile.TemporaryDirectory() as tmpdir:
+290 |         tmpdir = Path(tmpdir)
+    |
+
+PLW2901 `with` statement variable `tmpdir` overwritten by assignment target
+   --> opensqm/mopac.py:290:9
+    |
+288 | def get_mopac_bonds(mol: Chem.Mol):
+289 |     with tempfile.TemporaryDirectory() as tmpdir:
+290 |         tmpdir = Path(tmpdir)
+    |         ^^^^^^
+291 |         mol_mop_path = tmpdir / "mol.mop"
+292 |         setpi_path = tmpdir / "setpi.txt"
+    |
+
+PLC0415 `import` should be at the top-level of a file
+   --> opensqm/mopac.py:319:9
+    |
+317 |     """Parse atom connectivity text and return a set of bond tuples (i, j) with i < j."""
+318 |     if "TOPOGRAPHY OF SYSTEM" not in text and "Lewis Structure" not in text:
+319 |         import pdb
+    |         ^^^^^^^^^^
+320 |
+321 |         pdb.set_trace()
+    |
+
+PLR2004 Magic value used in comparison, consider replacing `3` with a constant variable
+   --> opensqm/mopac.py:329:25
+    |
+327 |     for line in text.splitlines():
+328 |         parts = line.split()
+329 |         if len(parts) < 3:
+    |                         ^
+330 |             continue  # skip lines without connectivity info
+    |
+
+D103 Missing docstring in public function
+   --> opensqm/mopac.py:345:5
+    |
+345 | def get_atom_label(mol, atom_idx):
+    |     ^^^^^^^^^^^^^^
+346 |     atom = mol.GetAtomWithIdx(atom_idx)
+347 |     pdb_info = atom.GetPDBResidueInfo()
+    |
+
+D103 Missing docstring in public function
+   --> opensqm/mopac.py:357:5
+    |
+357 | def get_cvb_str(mol: Chem.Mol):
+    |     ^^^^^^^^^^^
+358 |
+359 |     mopac_bonds = get_mopac_bonds(mol)
+    |
+
+PLW2901 `with` statement variable `tmpdir` overwritten by assignment target
+   --> opensqm/mopac.py:387:9
+    |
+385 |     valid_bonds_str = []
+386 |     with tempfile.TemporaryDirectory() as tmpdir:
+387 |         tmpdir = Path(tmpdir)
+    |         ^^^^^^
+388 |         mol_mop_path = tmpdir / "mol.mop"
+389 |         setpi_path = tmpdir / "setpi.txt"
+    |
+
+D103 Missing docstring in public function
+   --> opensqm/mopac.py:448:5
+    |
+448 | def get_opt_mask(complex: Chem.Mol, mode: OptMode = "ligand"):
+    |     ^^^^^^^^^^^^
+449 |
+450 |     opt_mask = np.zeros(complex.GetNumAtoms(), dtype=bool)
+    |
+
+D103 Missing docstring in public function
+   --> opensqm/mopac.py:512:5
+    |
+512 | def get_correct_ligand(ligand):
+    |     ^^^^^^^^^^^^^^^^^^
+513 |
+514 |     with tempfile.TemporaryDirectory() as tmpdir:
+    |
+
+PLW2901 `with` statement variable `tmpdir` overwritten by assignment target
+   --> opensqm/mopac.py:515:9
+    |
+514 |     with tempfile.TemporaryDirectory() as tmpdir:
+515 |         tmpdir = Path(tmpdir)
+    |         ^^^^^^
+516 |         mol_mop_path = tmpdir / "mol.mop"
+517 |         setpi_path = tmpdir / "setpi.txt"
+    |
+
+D103 Missing docstring in public function
+   --> opensqm/mopac.py:580:5
+    |
+580 | def annotate_mopac_formal_charges(mol, formal_charges):
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+581 |     for i, atom in enumerate(mol.GetAtoms()):
+582 |         atom.SetIntProp("mopac_formal_charge", formal_charges.get(i, 0))
+    |
+
+D103 Missing docstring in public function
+   --> opensqm/mopac.py:585:5
+    |
+585 | def rdkit_to_mopac(mol, out_mopac_path, opt_mask=None, conf_id=0):
+    |     ^^^^^^^^^^^^^^
+586 |     # Get the conformer
+587 |     conf = mol.GetConformer(conf_id)
+    |
+
+E501 Line too long (125 > 100)
+   --> opensqm/mopac.py:617:101
+    |
+615 |         # opt can be 1 (optimize) or 0 (freeze)
+616 |         optimise_atom = opt_mask[i]
+617 |         coord_line = f"{symbol:2s} {pos.x:12.6f} {optimise_atom} {pos.y:12.6f} {optimise_atom} {pos.z:12.6f} {optimise_atom}"
+    |                                                                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^
+618 |         mopac_lines.append(coord_line)
+    |
+
+D103 Missing docstring in public function
+   --> opensqm/mopac.py:623:5
+    |
+623 | def get_rdkit_formal_charges(mol):
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+624 |     charges = {}
+625 |     for i, atom in enumerate(mol.GetAtoms()):
+    |
+
+D103 Missing docstring in public function
+   --> opensqm/mopac.py:632:5
+    |
+632 | def all_combinations(items):
+    |     ^^^^^^^^^^^^^^^^
+633 |     result = [{}]
+634 |     for length in range(1, len(items) + 1):
+    |
+
+D205 1 blank line required between summary line and description
+   --> opensqm/mopac.py:641:5
+    |
+640 |   def get_rdkit_pi_bonds(mol):
+641 | /     """
+642 | |     Return list of (1-indexed begin_atom, end_atom) strings
+643 | |     for double bonds where both atoms.
+644 | |     """
+    | |_______^
+645 |       pi_bonds = []
+646 |       for bond in mol.GetBonds():
+    |
+help: Insert single blank line
+
+PLR2004 Magic value used in comparison, consider replacing `2.0` with a constant variable
+   --> opensqm/mopac.py:649:42
+    |
+647 |         a1 = bond.GetBeginAtom()
+648 |         a2 = bond.GetEndAtom()
+649 |         if bond.GetBondTypeAsDouble() == 2.0:
+    |                                          ^^^
+650 |             pi_bonds.append((a1.GetIdx(), a2.GetIdx()))
+651 |     return pi_bonds
+    |
+
+D103 Missing docstring in public function
+   --> opensqm/mopac.py:654:5
+    |
+654 | def write_setpi(pi_bonds, setpi_path):
+    |     ^^^^^^^^^^^
+655 |     pi_bonds_formatted = [f"{a1 + 1} {a2 + 1}" for a1, a2 in pi_bonds]
+656 |     setpi_path.write_text("\n".join(pi_bonds_formatted))
+    |
+
+D103 Missing docstring in public function
+   --> opensqm/mopac.py:685:5
+    |
+685 | def run_opt_from_rdmol(rdmol, /, *, mopac_keywords: list[str], charge=0, opt_mask=None):
+    |     ^^^^^^^^^^^^^^^^^^
+686 |
+687 |     rdmol = Chem.Mol(rdmol)
+    |
+
+PLW2901 `with` statement variable `tmpdir` overwritten by assignment target
+   --> opensqm/mopac.py:690:9
+    |
+689 |     with tempfile.TemporaryDirectory() as tmpdir:
+690 |         tmpdir = Path(tmpdir)
+    |         ^^^^^^
+691 |         mop_path = tmpdir / "mol.mop"
+692 |         setpi_path = tmpdir / "setpi.txt"
+    |
+
+D103 Missing docstring in public function
+   --> opensqm/mopac.py:733:5
+    |
+733 | def run_singlepoint_from_rdmol(
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+734 |     rdmol,
+735 |     /,
+    |
+
+PLW2901 `with` statement variable `tmpdir` overwritten by assignment target
+   --> opensqm/mopac.py:772:9
+    |
+771 |     with tempfile.TemporaryDirectory() as tmpdir:
+772 |         tmpdir = Path(tmpdir)
+    |         ^^^^^^
+773 |         mop_path = tmpdir / "mol.mop"
+774 |         setpi_path = tmpdir / "setpi.txt"
+    |
+
+D103 Missing docstring in public function
+   --> opensqm/mopac.py:817:5
+    |
+817 | def get_mopac_formal_charges(rdmol):
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+818 |
+819 |     with tempfile.TemporaryDirectory() as tmpdir:
+    |
+
+PLW2901 `with` statement variable `tmpdir` overwritten by assignment target
+   --> opensqm/mopac.py:820:9
+    |
+819 |     with tempfile.TemporaryDirectory() as tmpdir:
+820 |         tmpdir = Path(tmpdir)
+    |         ^^^^^^
+821 |         mol_mop_path = tmpdir / "mol.mop"
+822 |         mopac_path = tmpdir / "run.mopac"
+    |
+
+D103 Missing docstring in public function
+   --> opensqm/mopac.py:858:5
+    |
+858 | def run_interaction_energy(*, ligand: Chem.Mol, protein: Chem.Mol) -> dict[str, float]:
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+859 |
+860 |     # Get ligand with annoted formal charges and pi bonds for mopac
+    |
+
+D103 Missing docstring in public function
+   --> opensqm/mopac.py:924:5
+    |
+924 | def run_opt(
+    |     ^^^^^^^
+925 |     *,
+926 |     ligand: Chem.Mol,
+    |
+
+D100 Missing docstring in public module
+--> opensqm/rdkit_utils.py:1:1
+
+D205 1 blank line required between summary line and description
+  --> opensqm/rdkit_utils.py:14:5
+   |
+12 |       mol: Chem.Mol, chain_id: str = "Z", resname: str = "LIG", resnum: int = 999
+13 |   ) -> Chem.Mol:
+14 | /     """
+15 | |     Mutates `mol` in-place so that all atoms belong to the same PDB
+16 | |     residue (number `resnum`) on chain `chain_id`.
+17 | |
+18 | |     RDKit rules / caveats
+19 | |     ---------------------
+20 | |     • Each Atom carries an AtomPDBResidueInfo object; create one if missing.
+21 | |     • `chain_id` must be a single character (PDB allows only 1).
+22 | |     • `resnum` must be 1–9999 to stay within PDB formatting limits.
+23 | |     """
+   | |_______^
+24 |       # Roundtrip to PDB to set the PDB residue info.
+25 |       mol_copy = Chem.MolFromPDBBlock(Chem.MolToPDBBlock(mol), sanitize=False, removeHs=False)
+   |
+help: Insert single blank line
+
+RUF002 Docstring contains ambiguous `–` (EN DASH). Did you mean `-` (HYPHEN-MINUS)?
+  --> opensqm/rdkit_utils.py:22:25
+   |
+20 |     • Each Atom carries an AtomPDBResidueInfo object; create one if missing.
+21 |     • `chain_id` must be a single character (PDB allows only 1).
+22 |     • `resnum` must be 1–9999 to stay within PDB formatting limits.
+   |                         ^
+23 |     """
+24 |     # Roundtrip to PDB to set the PDB residue info.
+   |
+
+D103 Missing docstring in public function
+  --> opensqm/rdkit_utils.py:40:5
+   |
+40 | def get_coordinates(mol: Chem.Mol, conf_id: int | None = 0) -> np.ndarray:
+   |     ^^^^^^^^^^^^^^^
+41 |     coords = mol.GetConformer(conf_id).GetPositions()
+42 |     return coords
+   |
+
+D103 Missing docstring in public function
+  --> opensqm/rdkit_utils.py:45:5
+   |
+45 | def set_random_coordinates(mol: Chem.Mol):
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+46 |     ps = Chem.AllChem.ETKDGv3()
+47 |     ps.useRandomCoords = True
+   |
+
+D205 1 blank line required between summary line and description
+  --> opensqm/rdkit_utils.py:52:5
+   |
+51 |   def set_coordinates(mol: Chem.Mol, coords: np.ndarray, conf_id: int = 0):
+52 | /     """
+53 | |     Overwrites (or creates) conformer `conf_id` with the supplied
+54 | |     Cartesian coordinates (Å).  `coords` must be shape (N_atoms, 3).
+55 | |
+56 | |     Returns `mol` for convenience.
+57 | |     """
+   | |_______^
+58 |       n_atoms = mol.GetNumAtoms()
+59 |       if coords.shape != (n_atoms, 3):
+   |
+help: Insert single blank line
+
+D401 First line of docstring should be in imperative mood: "Overwrites (or creates) conformer `conf_id` with the supplied"
+  --> opensqm/rdkit_utils.py:52:5
+   |
+51 |   def set_coordinates(mol: Chem.Mol, coords: np.ndarray, conf_id: int = 0):
+52 | /     """
+53 | |     Overwrites (or creates) conformer `conf_id` with the supplied
+54 | |     Cartesian coordinates (Å).  `coords` must be shape (N_atoms, 3).
+55 | |
+56 | |     Returns `mol` for convenience.
+57 | |     """
+   | |_______^
+58 |       n_atoms = mol.GetNumAtoms()
+59 |       if coords.shape != (n_atoms, 3):
+   |
+
+D100 Missing docstring in public module
+--> opensqm/sqm.py:1:1
+
+D103 Missing docstring in public function
+  --> opensqm/sqm.py:16:5
+   |
+16 | def run_sqm(protein_file, ligand_file):
+   |     ^^^^^^^
+17 |
+18 |     ligand = Chem.MolFromMolFile(ligand_file, removeHs=False)
+   |
+
+D100 Missing docstring in public module
+--> opensqm/utils.py:1:1
+
+B904 Within an `except` clause, raise exceptions with `raise ... from err` or `raise ... from None` to distinguish them from errors in exception handling
+  --> opensqm/utils.py:26:13
+   |
+24 |       except subprocess.CalledProcessError as e:
+25 |           if not ignore_errors:
+26 | /             raise Exception(
+27 | |                 f"Command failed: {command}\nstdout: {e.stdout.strip()}\nstderr: {e.stderr.strip()}"
+28 | |             )
+   | |_____________^
+   |
+
+Found 46 errors.

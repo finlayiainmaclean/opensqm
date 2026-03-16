@@ -1,1 +1,0 @@
-"""opensqm package."""

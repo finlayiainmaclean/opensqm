@@ -6,7 +6,19 @@ version = "0.0.1"
 readme = "README.md"
 keywords = []
 authors = [{name = "Finlay MacLean"}]
-requires-python = ">=3.14"
+requires-python = ">3.13,<3.15"
+dependencies = [
+    "loguru",
+    "pandas",
+    "numpy",
+    "tqdm",
+    "wget",
+    "rdkit",
+    "mdtraj",
+    "unipka",
+    "rdsl",
+
+]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
@@ -14,6 +26,8 @@ platforms = ["linux-64", "osx-arm64"]
 
 [tool.pixi.dependencies]
 mopac = "*"
+openmm = "*"
+pdbfixer = "*"
 
 [tool.pixi.pypi-dependencies]
 opensqm = { path = ".", editable = true }
@@ -37,6 +51,16 @@ pre-commit = ">=4.2"
 
 [tool.pixi.feature.dev.pypi-dependencies]
 ty = "*"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.11",
+    "pre-commit>=4.2",
+    "ty",
+    "deptry",
+]
 
 [tool.ruff]
 line-length = 100

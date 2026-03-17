@@ -215,6 +215,7 @@ def crop_and_cap_protein(
     # AddHs will now see a methyl group and add 3 hydrogens to the CA
     capped_protein = Chem.AddHs(capped_protein, addCoords=True, onlyOnAtoms=cap_ids)
 
+
     return capped_protein
 
 

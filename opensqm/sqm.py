@@ -15,7 +15,7 @@ from opensqm.mopac import (
     fix_nitro_groups,
     run_interaction_energy,
 )
-from opensqm.rdkit_utils import set_residue_info
+from opensqm.rdkit_utils import set_residue_info, crop_and_cap_protein
 
 project_dir = Path("data/inputs/PL-REX/")
 
@@ -52,7 +52,7 @@ def run_sqm(*, protein_file: Path, ligand_file: Path):
 
     Chem.MolToPDBFile(protein, "/tmp/prot.pdb")
 
-    # protein = crop_and_cap_protein(protein=protein, ligand=ligand, distance_to_ligand=10)
+    protein = crop_and_cap_protein(protein=protein, ligand=ligand, distance_to_ligand=12)
     # capped_protein = Chem.AddHs(protein, addCoords=True, onlyOnAtoms=cap_ids)
 
     Chem.MolToPDBFile(protein, "/tmp/pocket.pdb")
@@ -90,10 +90,10 @@ def run_sqm(*, protein_file: Path, ligand_file: Path):
 
     scores = run_interaction_energy(ligand=complex.ligand, protein=complex.protein)
 
-    scores["G_Hplus"] = 0
+    scores["G_Hplus"] = G_Hplus
     # scores["dE_ligand"] = dE_ligand
 
-    scores["score"] = scores["dE_int"]  # + G_Hplus
+    scores["score"] = scores["dE_int"]  + G_Hplus
 
     print(scores)
 
@@ -102,7 +102,7 @@ def run_sqm(*, protein_file: Path, ligand_file: Path):
 
 if __name__ == "__main__":
     scores = []
-    df = pd.read_csv(target_dir / "pocket.csv")
+    df = pd.read_csv(target_dir / "protein.csv")
 
     for i, row in tqdm(enumerate(df.itertuples()), total=len(df)):
         _scores = run_sqm(protein_file=row.protein, ligand_file=row.ligand)  # type: ignore

@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 from rdkit import Chem
-from rdkit.Chem import AllChem, rdMolAlign, ResonanceMolSupplier
+from rdkit.Chem import AllChem, rdMolAlign
 
 from opensqm.rdkit_utils import set_coordinates
 from opensqm.utils import run_command
@@ -481,18 +481,18 @@ def get_correct_ligand(ligand):
         dEs = []
         successful_ligands = []
 
-   
         for _pi_bonds in pi_bond_combos:
             _ligand = Chem.Mol(ligand)
             annotate_mopac_pi_bonds(_ligand, bonds=_pi_bonds)
             write_setpi(_pi_bonds, setpi_path)
 
-
             _formal_charges = get_rdkit_formal_charges(_ligand)
             annotate_mopac_formal_charges(_ligand, _formal_charges)
             rdkit_to_mopac(_ligand, mol_mop_path)
 
-            mopac_str = f'PM6 MOZYME 1SCF CHARGE={rdkit_formal_charge} GEO_DAT="{mol_mop_path!s}" {cvb_str}'
+            mopac_str = (
+                f'PM6 MOZYME 1SCF CHARGE={rdkit_formal_charge} GEO_DAT="{mol_mop_path!s}" {cvb_str}'
+            )
             if len(_pi_bonds) > 0:
                 mopac_str = f'{mopac_str} SETPI="{setpi_path!s}"'
             mopac_path.write_text(mopac_str)
@@ -502,9 +502,7 @@ def get_correct_ligand(ligand):
             check_mopac_was_success(output_str)
             mozyme_energy = _extract_energy(output_str)
 
-
             mopac_ligand_formal_charge, _ = get_mopac_formal_charges(_ligand)
-
 
             if mopac_ligand_formal_charge != rdkit_formal_charge:
                 logger.info("Formal charge mismatch")
@@ -514,11 +512,11 @@ def get_correct_ligand(ligand):
                 successful_ligands.append(_ligand)
                 dE = abs(mozyme_energy - energy)
                 dEs.append(dE)
-                if dE<10:
+                if dE < 10:
                     break
             else:
                 logger.info("Failed to converge")
-                
+
         if len(dEs) == 0:
             raise ValueError("Failed to find a single converged SCF for the input ligand")
 
@@ -819,12 +817,12 @@ def run_interaction_energy(*, ligand: Chem.Mol, protein: Chem.Mol) -> dict[str, 
     # rdkit_ligand_formal_charges = get_rdkit_formal_charges(ligand)
     mopac_ligand_formal_charge, mopac_ligand_formal_charges = get_mopac_formal_charges(ligand)
 
-  
     if mopac_ligand_formal_charge != rdkit_ligand_charge:
         print("RDKit and MOPAC disagree on ligand charge")
         Chem.MolToMolFile(ligand, "/tmp/ligand.mol")
-        import pdb; pdb.set_trace()
-    
+        import pdb
+
+        pdb.set_trace()
 
     # RDKit does not parse salt bridges well, so use MOPAC to find atom formal charges
     mopac_protein_charge, mopac_protein_formal_charges = get_mopac_formal_charges(protein)

@@ -15,7 +15,7 @@ from opensqm.mopac import (
     fix_nitro_groups,
     run_interaction_energy,
 )
-from opensqm.rdkit_utils import set_residue_info, crop_and_cap_protein
+from opensqm.rdkit_utils import crop_and_cap_protein, set_residue_info
 
 project_dir = Path("data/inputs/PL-REX/")
 
@@ -93,7 +93,7 @@ def run_sqm(*, protein_file: Path, ligand_file: Path):
     scores["G_Hplus"] = G_Hplus
     # scores["dE_ligand"] = dE_ligand
 
-    scores["score"] = scores["dE_int"]  + G_Hplus
+    scores["score"] = scores["dE_int"] + G_Hplus
 
     print(scores)
 

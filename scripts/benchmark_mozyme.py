@@ -30,7 +30,7 @@ def _run(*, ligand_file: Path):
 
     Chem.rdmolops.Kekulize(ligand)
 
-    best_ligand, best_dE = get_correct_ligand(ligand)
+    _best_ligand, best_dE = get_correct_ligand(ligand)
 
     return best_dE
 
@@ -38,16 +38,16 @@ def _run(*, ligand_file: Path):
 if __name__ == "__main__":
     import numpy as np
 
-    dEs = []
+    energies = []
 
     targets_dirs = project_dir.glob("*")
 
     for target_dir in tqdm(list(targets_dirs)):
         df = pd.read_csv(target_dir / "pocket.csv")
 
-        for i, row in enumerate(df.itertuples()):
-            dE = _run(ligand_file=row.ligand)  # type: ignore
-            dEs.append(dE)
+        for _i, row in enumerate(df.itertuples()):
+            energy = _run(ligand_file=row.ligand)  # type: ignore
+            energies.append(energy)
 
-    print(np.mean(dEs))
-    print(np.max(dEs))
+    print(np.mean(energies))
+    print(np.max(energies))

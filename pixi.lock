@@ -5,8 +5,6 @@ environments:
     - url: https://conda.anaconda.org/conda-forge/
     indexes:
     - https://pypi.org/simple
-    options:
-      pypi-prerelease-mode: if-necessary-or-explicit
     packages:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
@@ -231,8 +229,6 @@ environments:
     - url: https://conda.anaconda.org/conda-forge/
     indexes:
     - https://pypi.org/simple
-    options:
-      pypi-prerelease-mode: if-necessary-or-explicit
     packages:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
@@ -2173,7 +2169,7 @@ packages:
 - pypi: ./
   name: opensqm
   version: 0.0.1
-  sha256: c2e8b6e3df99723fcb7f715aafb1ce015ca6ff5be0650011518570d0a5b7624f
+  sha256: cdf32b59b8441c79a9dd459229371f2abec9017b7946215a459e78afb7f3693e
   requires_dist:
   - loguru
   - pandas
@@ -2185,6 +2181,7 @@ packages:
   - unipka
   - rdsl
   requires_python: '>3.13,<3.15'
+  editable: true
 - conda: https://conda.anaconda.org/conda-forge/linux-64/openssl-3.6.1-h35e630c_1.conda
   sha256: 44c877f8af015332a5d12f5ff0fb20ca32f896526a7d0cdb30c769df1144fb5c
   md5: f61eb8cd60ff9057122a3d338b99c00f

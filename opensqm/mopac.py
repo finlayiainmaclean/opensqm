@@ -1,4 +1,4 @@
-# ruff: noqa: D100, D101, D103, D205, D401, PLW2901, PLR2004, E501
+# ruff: noqa: D100, D101, D103, D205, D401, PLW2901, PLR2004, E501, PLC0415
 import copy
 import itertools
 import json
@@ -615,7 +615,10 @@ def _extract_coords(text):
         matches = re.findall(pattern, section)
 
         # Create DataFrame
-        df = pd.DataFrame(matches, columns=["atom_number", "symbol", "x", "y", "z"])
+        df = pd.DataFrame(
+            matches,
+            columns=pd.Index(["atom_number", "symbol", "x", "y", "z"]),
+        )
 
         # Convert coordinates to float
         df[["x", "y", "z"]] = df[["x", "y", "z"]].astype(float)
@@ -907,7 +910,7 @@ def optimise_complex(
     # Build the complex, making sure the ligand is first, as mopac will use the 1-indexed pi bonds
     complex = Chem.CombineMols(ligand, protein)
 
-    AllChem.MMFFOptimizeMolecule(complex)
+    AllChem.MMFFOptimizeMolecule(complex)  # type: ignore[unresolved-attribute]
 
     # Annotate the complex with the rdkit-derived formal charges of the ligand
     # and the mopac-derived charges of the protein.

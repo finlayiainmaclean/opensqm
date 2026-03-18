@@ -1,13 +1,9 @@
 """Convert RDKit molecules to OpenMM topologies and back."""
 
-from typing import TYPE_CHECKING
-
 import numpy as np
 from loguru import logger
+from openmm.app import Modeller, Topology  # type: ignore[unresolved-import]
 from rdkit import Chem
-
-if TYPE_CHECKING:
-    from openmm.app import Modeller, Topology  # type: ignore
 
 
 def get_rdkit_pdb_info(atom: Chem.Atom) -> tuple[str, str, int, str] | None:

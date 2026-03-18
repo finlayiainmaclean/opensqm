@@ -15,7 +15,7 @@ from opensqm.mopac import (
     fix_nitro_groups,
     run_interaction_energy,
 )
-from opensqm.rdkit_utils import set_residue_info
+from opensqm.rdkit_utils import crop_and_cap_protein, set_residue_info
 
 project_dir = Path("data/inputs/PL-REX/")
 
@@ -52,7 +52,7 @@ def run_sqm(*, protein_file: Path, ligand_file: Path):
 
     Chem.MolToPDBFile(protein, "/tmp/prot.pdb")
 
-    # protein = crop_and_cap_protein(protein=protein, ligand=ligand, distance_to_ligand=10)
+    protein = crop_and_cap_protein(protein=protein, ligand=ligand, distance_to_ligand=12)
     # capped_protein = Chem.AddHs(protein, addCoords=True, onlyOnAtoms=cap_ids)
 
     Chem.MolToPDBFile(protein, "/tmp/pocket.pdb")
@@ -82,18 +82,24 @@ def run_sqm(*, protein_file: Path, ligand_file: Path):
     # )
 
     # ligand_charge = Chem.GetFormalCharge(ligand)
-    # ligand_free = run_opt_from_rdmol(ligand, mopac_keywords=["PM6-D3H4X", "EPS=78.5"], charge=ligand_charge)
+    # ligand_free = run_opt_from_rdmol(
+    #     ligand, mopac_keywords=["PM6-D3H4X", "EPS=78.5"], charge=ligand_charge
+    # )
 
-    # E_ligand_bound = run_singlepoint_from_rdmol(ligand, use_mozyme=True, solvent="cosmo2", charge=ligand_charge)
-    # E_ligand_free = run_singlepoint_from_rdmol(ligand_free, use_mozyme=True, solvent="cosmo2", charge=ligand_charge)
+    # E_ligand_bound = run_singlepoint_from_rdmol(
+    #     ligand, use_mozyme=True, solvent="cosmo2", charge=ligand_charge
+    # )
+    # E_ligand_free = run_singlepoint_from_rdmol(
+    #     ligand_free, use_mozyme=True, solvent="cosmo2", charge=ligand_charge
+    # )
     # dE_ligand = E_ligand_bound - E_ligand_free
 
     scores = run_interaction_energy(ligand=complex.ligand, protein=complex.protein)
 
-    scores["G_Hplus"] = 0
+    scores["G_Hplus"] = G_Hplus
     # scores["dE_ligand"] = dE_ligand
 
-    scores["score"] = scores["dE_int"]  # + G_Hplus
+    scores["score"] = scores["dE_int"] + G_Hplus
 
     print(scores)
 
@@ -102,10 +108,10 @@ def run_sqm(*, protein_file: Path, ligand_file: Path):
 
 if __name__ == "__main__":
     scores = []
-    df = pd.read_csv(target_dir / "pocket.csv")
+    df = pd.read_csv(target_dir / "protein.csv")
 
     for i, row in tqdm(enumerate(df.itertuples()), total=len(df)):
-        _scores = run_sqm(protein_file=row.protein, ligand_file=row.ligand)  # type: ignore
+        _scores = run_sqm(protein_file=row.protein, ligand_file=row.ligand)
         scores.append(_scores)
         scores_df = pd.DataFrame(scores)
 

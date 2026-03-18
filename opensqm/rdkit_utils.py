@@ -80,6 +80,7 @@ def set_coordinates(mol: Chem.Mol, /, *, coords: np.ndarray, conf_id: int = 0) -
 
 
 def submol(mol: Chem.Mol, /, *, atom_ids: Sequence[int]) -> Chem.Mol:
+    """Return a new molecule containing only the atoms with the given indices."""
     mol = Chem.RWMol(Chem.Mol(mol))
     to_delete_set = set(range(mol.GetNumAtoms())) - set(atom_ids)
 
@@ -97,6 +98,7 @@ def submol(mol: Chem.Mol, /, *, atom_ids: Sequence[int]) -> Chem.Mol:
 
 
 def refine_caps(mol: Chem.Mol, ace_res_ids: list, nme_res_ids: list):
+    """Refine ACE/NME cap residues: remove non-backbone atoms and tag cap terminals."""
     rw_mol = Chem.RWMol(mol)
     atoms_to_remove = []
     cap_target_indices = []
@@ -152,6 +154,7 @@ def refine_caps(mol: Chem.Mol, ace_res_ids: list, nme_res_ids: list):
 def crop_and_cap_protein(
     *, protein: Chem.Mol, ligand: Chem.Mol, distance_to_ligand: int = 5
 ) -> Chem.Mol:
+    """Crop protein to residues within distance of ligand and add ACE/NME caps."""
     # 1. Selection logic (same as before)
 
     complex = Chem.CombineMols(protein, ligand)
@@ -162,7 +165,7 @@ def crop_and_cap_protein(
         raise ValueError("No pocket found")
 
     pocket_residues = set()
-    for atom in selection.mol.GetAtoms():
+    for atom in pocket.GetAtoms():
         info = atom.GetPDBResidueInfo()
         pocket_residues.add((info.GetChainId(), info.GetResidueNumber()))
 

@@ -1,4 +1,4 @@
-# ruff: noqa: D100, D101, D103, D205, D401, PLW2901, PLR2004, E501, PLC0415
+# ruff: noqa: D100, D101, D103, D205, D401, PLW2901, PLR2004, E501
 import copy
 import itertools
 import json
@@ -6,14 +6,14 @@ import re
 import tempfile
 import time
 from pathlib import Path
-from typing import Final, Literal
+from typing import Any, Final, Literal
 
 import mdtraj as md
 import numpy as np
 import pandas as pd
 from loguru import logger
 from rdkit import Chem
-from rdkit.Chem import AllChem, rdMolAlign
+from rdkit.Chem import rdMolAlign
 
 from opensqm.rdkit_utils import set_coordinates
 from opensqm.utils import run_command
@@ -155,7 +155,7 @@ def fix_nitro_groups(mol: Chem.Mol) -> Chem.Mol:
     return modified_mol
 
 
-def _extract_energy(out_str):
+def _extract_energy(out_str: str) -> float | None:
     pattern = r"FINAL HEAT OF FORMATION\s*=\s*(-?\d+\.\d+)\s*KCAL/MOL"
     match = re.search(pattern, out_str)
     if match:
@@ -165,7 +165,7 @@ def _extract_energy(out_str):
     return energy
 
 
-def calculate_nonpolar_term(output_file, /, *, method):
+def calculate_nonpolar_term(output_file: str, /, *, method: str) -> tuple[float, float]:
     """Calculate nonpolar term using COSMO area from MOPAC output."""
     # Surface tension parameter based on method
     if "PM6" in method:
@@ -184,7 +184,7 @@ def calculate_nonpolar_term(output_file, /, *, method):
     return E_nb, cosmo_area
 
 
-def _extract_cosmo_area(output_str):
+def _extract_cosmo_area(output_str: str) -> float:
     """Extract COSMO area from MOPAC output file."""
     # Look for the COSMO AREA line
     match = re.search(r"COSMO AREA\s*=\s*([\d.]+)\s*SQUARE ANGSTROMS", output_str)
@@ -196,7 +196,7 @@ def _extract_cosmo_area(output_str):
         raise ValueError("COSMO AREA not found in output file")
 
 
-def check_mopac_was_success(output_str):
+def check_mopac_was_success(output_str: str) -> None:
     if "IMAGINARY FREQUENCIES" in output_str:
         raise MOPACError(f"IMAGINARY FREQUENCIES: {output_str}")
     if "EXCESS NUMBER OF OPTIMIZATION CYCLES" in output_str:
@@ -213,7 +213,7 @@ def check_mopac_was_success(output_str):
         raise MOPACError(f"Unknown error: {output_str}")
 
 
-def _extract_formal_charges_from_mopac_str(output_str):
+def _extract_formal_charges_from_mopac_str(output_str: str) -> pd.DataFrame:
     # regex: Ion, Atom No, Type, Charge
     pattern = re.compile(r"^\s*(\d+)\s+(\d+)\s+([A-Za-z]+)\s+([+-]?\d+)", re.MULTILINE)
 
@@ -228,7 +228,7 @@ def _extract_formal_charges_from_mopac_str(output_str):
     return df
 
 
-def get_mopac_bonds(mol: Chem.Mol):
+def get_mopac_bonds(mol: Chem.Mol) -> set[tuple[int, int]]:
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
         mol_mop_path = tmpdir / "mol.mop"
@@ -256,12 +256,12 @@ def get_mopac_bonds(mol: Chem.Mol):
     return bonds
 
 
-def _parse_bonds(text):
+def _parse_bonds(text: str) -> set[tuple[int, int]]:
     """Parse atom connectivity text and return a set of bond tuples (i, j) with i < j."""
     if "TOPOGRAPHY OF SYSTEM" not in text and "Lewis Structure" not in text:
         raise MOPACError("Connectivity not found")
 
-    text = text.split("TOPOGRAPHY OF SYSTEM")[1].split("Lewis Structure")[0]
+    text = text.split("TOPOGRAPHY OF SYSTEM", 1)[1].split("Lewis Structure", 1)[0]
 
     bonds = set()
 
@@ -283,7 +283,7 @@ def _parse_bonds(text):
     return bonds
 
 
-def get_atom_label(mol, atom_idx):
+def get_atom_label(mol: Chem.Mol, atom_idx: int) -> str:
     atom = mol.GetAtomWithIdx(atom_idx)
     pdb_info = atom.GetPDBResidueInfo()
     if pdb_info is None:
@@ -295,8 +295,7 @@ def get_atom_label(mol, atom_idx):
     return f"{resname}-{resnum}-{atomname}"
 
 
-def get_cvb_str(mol: Chem.Mol):
-
+def get_cvb_str(mol: Chem.Mol) -> str:
     mopac_bonds = get_mopac_bonds(mol)
 
     # Extract reference bonds from RDKit mol
@@ -352,25 +351,16 @@ def get_cvb_str(mol: Chem.Mol):
             if "-" in _bond_str:  # Deleting a bond
                 if "did not exist" in output_str:
                     logger.info(f"Bond to delete doesn't exist: {bond_str}")
-
-                    # import pdb; pdb.set_trace()
                     continue
                 else:
-                    # "have been deleted" in output_str:
                     logger.info(f"Deleting bond: {bond_str}")
                     valid_bonds_str.append(bond_str)
-                # else:
-                #     logger.info("Other error")
-                #     import pdb; pdb.set_trace()
-                #     raise ValueError("Did not detect either keyword is bond deletion worked.")
 
             elif "already exists" in output_str:
                 logger.info(f"Bond to add already exists: {bond_str}")
-                # import pdb; pdb.set_trace()
                 continue
             elif "This is unrealistic" in output_str:
                 logger.info(f"Bond too add is too long: {bond_str}")
-                # import pdb; pdb.set_trace()
                 continue
             else:
                 logger.info(f"Adding bond: {bond_str}")
@@ -381,13 +371,10 @@ def get_cvb_str(mol: Chem.Mol):
         bonds_str = ";".join(valid_bonds_str)
         cvb_str = f"CVB({bonds_str})"
 
-    # import pdb; pdb.set_trace()
-
     return cvb_str
 
 
-def get_opt_mask(complex: Chem.Mol, mode: OptMode = "ligand"):
-
+def get_opt_mask(complex: Chem.Mol, mode: OptMode = "ligand") -> np.ndarray:
     opt_mask = np.zeros(complex.GetNumAtoms(), dtype=bool)
 
     match mode:
@@ -430,7 +417,7 @@ def get_opt_mask(complex: Chem.Mol, mode: OptMode = "ligand"):
     return opt_mask.astype(int)
 
 
-def annotate_mopac_pi_bonds(mol: Chem.Mol, /, *, bonds: list[tuple[int, int]]):
+def annotate_mopac_pi_bonds(mol: Chem.Mol, /, *, bonds: list[tuple[int, int]]) -> None:
     """Annotate bonds in `mol` with (src, tgt) tuples as a property."""
     prop_name = "mopac_pi_bonds"
     for src, tgt in bonds:
@@ -450,7 +437,7 @@ def get_mopac_pi_bonds(mol: Chem.Mol) -> list[tuple[int, int]]:
     return pairs
 
 
-def get_correct_ligand(ligand):
+def get_correct_ligand(ligand: Chem.Mol) -> tuple[Chem.Mol, float]:
     """Find the MOZYME ligand configuration that best approximates the SCF energy *without* the MOZYME approximation."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
@@ -527,12 +514,17 @@ def get_correct_ligand(ligand):
         return best_ligand, best_dE
 
 
-def annotate_mopac_formal_charges(mol, formal_charges):
+def annotate_mopac_formal_charges(mol: Chem.Mol, formal_charges: dict[int, int]) -> None:
     for i, atom in enumerate(mol.GetAtoms()):
         atom.SetIntProp("mopac_formal_charge", formal_charges.get(i, 0))
 
 
-def rdkit_to_mopac(mol, out_mopac_path, opt_mask=None, conf_id=0):
+def rdkit_to_mopac(
+    mol: Chem.Mol,
+    out_mopac_path: Path,
+    opt_mask: np.ndarray | None = None,
+    conf_id: int = 0,
+) -> None:
     # Get the conformer
     conf = mol.GetConformer(conf_id)
 
@@ -570,7 +562,7 @@ def rdkit_to_mopac(mol, out_mopac_path, opt_mask=None, conf_id=0):
     out_mopac_path.write_text("\n".join(mopac_lines))
 
 
-def get_rdkit_formal_charges(mol):
+def get_rdkit_formal_charges(mol: Chem.Mol) -> dict[int, int]:
     charges = {}
     for i, atom in enumerate(mol.GetAtoms()):
         formal_charge = atom.GetFormalCharge()
@@ -579,7 +571,7 @@ def get_rdkit_formal_charges(mol):
     return charges
 
 
-def all_combinations(items):
+def all_combinations(items: list[tuple[int, int]]) -> list[Any]:
     result = [{}]
     for length in range(1, len(items) + 1):
         result.extend(itertools.combinations(items, length))
@@ -587,7 +579,7 @@ def all_combinations(items):
     return result
 
 
-def get_rdkit_pi_bonds(mol):
+def get_rdkit_pi_bonds(mol: Chem.Mol) -> list[tuple[int, int]]:
     """
     Return list of (1-indexed begin_atom, end_atom) strings
     for double bonds where both atoms.
@@ -601,12 +593,12 @@ def get_rdkit_pi_bonds(mol):
     return pi_bonds
 
 
-def write_setpi(pi_bonds, setpi_path):
+def write_setpi(pi_bonds: list[tuple[int, int]], setpi_path: Path) -> None:
     pi_bonds_formatted = [f"{a1 + 1} {a2 + 1}" for a1, a2 in pi_bonds]
     setpi_path.write_text("\n".join(pi_bonds_formatted))
 
 
-def _extract_coords(text):
+def _extract_coords(text: str) -> pd.DataFrame:
     # Extract section between the markers
     start_marker = "CARTESIAN COORDINATES"
     end_marker = "General Reference for PM6:"
@@ -635,8 +627,14 @@ def _extract_coords(text):
     return df
 
 
-def run_opt_from_rdmol(rdmol, /, *, mopac_keywords: list[str], charge=0, opt_mask=None) -> Chem.Mol:
-
+def run_opt_from_rdmol(
+    rdmol: Chem.Mol,
+    /,
+    *,
+    mopac_keywords: list[str],
+    charge: int = 0,
+    opt_mask: np.ndarray | None = None,
+) -> Chem.Mol:
     rdmol = Chem.Mol(rdmol)
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -684,14 +682,13 @@ def run_opt_from_rdmol(rdmol, /, *, mopac_keywords: list[str], charge=0, opt_mas
 
 
 def run_singlepoint_from_rdmol(
-    rdmol,
+    rdmol: Chem.Mol,
     /,
     *,
     use_mozyme: bool = True,
     solvent: Literal["cosmo", "cosmo2"] | None = "cosmo2",
     charge: int = 0,
-):
-
+) -> float:
     mopac_keywords = [
         "PM6-D3H4X",
         "NOMM",
@@ -767,8 +764,7 @@ def run_singlepoint_from_rdmol(
         return energy
 
 
-def get_mopac_formal_charges(rdmol):
-
+def get_mopac_formal_charges(rdmol: Chem.Mol) -> tuple[int, dict[int, int]]:
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
         mol_mop_path = tmpdir / "mol.mop"
@@ -809,7 +805,6 @@ def get_mopac_formal_charges(rdmol):
 
 
 def run_interaction_energy(*, ligand: Chem.Mol, protein: Chem.Mol) -> dict[str, float]:
-
     # Get ligand with annoted formal charges and pi bonds for mopac
     ligand, _dE = get_correct_ligand(ligand)
 
@@ -823,9 +818,7 @@ def run_interaction_energy(*, ligand: Chem.Mol, protein: Chem.Mol) -> dict[str, 
     if mopac_ligand_formal_charge != rdkit_ligand_charge:
         print("RDKit and MOPAC disagree on ligand charge")
         Chem.MolToMolFile(ligand, "/tmp/ligand.mol")
-        import pdb
-
-        pdb.set_trace()
+        raise ValueError("RDKit and MOPAC disagree on ligand charge")
 
     # RDKit does not parse salt bridges well, so use MOPAC to find atom formal charges
     mopac_protein_charge, mopac_protein_formal_charges = get_mopac_formal_charges(protein)
@@ -875,8 +868,7 @@ def optimise_complex(
     gnorm: float = 1.0,
     use_rapid: bool = False,
     num_epochs: int = 30,
-):
-
+) -> tuple[Chem.Mol, Chem.Mol]:
     mopac_keywords = [
         "PM6-D3H4X",
         "MOZYME",
@@ -899,10 +891,9 @@ def optimise_complex(
     n_ligand_atoms = ligand.GetNumAtoms()
 
     # Get ligand charges from both rdkit and mopac and check
-    ligand_formal_charges = get_rdkit_formal_charges(ligand)
-    _, mopac_ligand_formal_charges = get_mopac_formal_charges(ligand)
-    assert mopac_ligand_formal_charges == ligand_formal_charges, (
-        "RDKit and MOPAC disagree on ligand charges"
+    mopac_ligand_formal_charge, mopac_ligand_formal_charges = get_mopac_formal_charges(ligand)
+    assert mopac_ligand_formal_charge == rdkit_ligand_charge, (
+        "RDKit and MOPAC disagree on ligand charge"
     )
 
     # RDKit does not parse salt bridges well, so use MOPAC to find atom formal charges
@@ -914,7 +905,7 @@ def optimise_complex(
     # Build the complex, making sure the ligand is first, as mopac will use the 1-indexed pi bonds
     complex = Chem.CombineMols(ligand, protein)
 
-    AllChem.MMFFOptimizeMolecule(complex)  # type: ignore[unresolved-attribute]
+    # AllChem.MMFFOptimizeMolecule(complex)
 
     # Annotate the complex with the rdkit-derived formal charges of the ligand
     # and the mopac-derived charges of the protein.

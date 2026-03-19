@@ -5,9 +5,10 @@ from typing import Final
 
 import pandas as pd
 import wget
-from loguru import logger
 from rdkit import Chem
 from tqdm import tqdm
+
+from opensqm.fix import run_pdbfixer
 
 DATASET = "PL-REX"
 BASE_URL = "https://raw.githubusercontent.com/Honza-R/PL-REX/refs/heads/main"
@@ -54,6 +55,20 @@ def main():
 
             lig_sdf_path = target_dir / f"{pdb_code}.sdf"
 
+            raw_prot_pdb_path = target_dir / f"{pdb_code}.raw.pdb"
+            fixed_prot_pdb_path = target_dir / f"{pdb_code}.fixed.pdb"
+
+            PDB_CODE_LENGTH: Final[int] = 4
+            if len(pdb_code) == PDB_CODE_LENGTH and not fixed_prot_pdb_path.exists():
+                print(url := f"https://files.rcsb.org/download/{pdb_code}.pdb")
+                wget.download(
+                    url,
+                    out=str(raw_prot_pdb_path),
+                )
+                run_pdbfixer(raw_prot_pdb_path, fixed_prot_pdb_path, keep_waters=True)
+            else:
+                fixed_prot_pdb_path = None
+
             if not pocket_pdb_path.exists():
                 wget.download(
                     f"{BASE_URL}/{target_name}/structures_pl-rex/{pdb_code}/receptor.pdb",
@@ -81,6 +96,7 @@ def main():
             inputs.append(
                 {
                     "protein": prot_pdb_path,
+                    "rscb_protein": fixed_prot_pdb_path,
                     "pocket": pocket_pdb_path,
                     "ligand": lig_sdf_path,
                     "target_name": target_name,
@@ -93,18 +109,16 @@ def main():
 
         inputs = pd.DataFrame(inputs)
 
+        _inputs = inputs.drop(columns=["protein"]).rename(columns={"rscb_protein": "protein"})
+        file = target_dir / "rscb_protein.csv"
+        _inputs.to_csv(file)  # Config for RCSB protein
+
         _inputs = inputs.drop(columns=["protein"]).rename(columns={"pocket": "protein"})
         file = target_dir / "pocket.csv"
-
-        logger.info(f"Saving to {file!s}")
-
         _inputs.to_csv(file)  # Config for precropped pocket
 
         file = target_dir / "protein.csv"
-        logger.info(f"Saving to {file!s}")
-
         _inputs = inputs.drop(columns=["pocket"])
-
         _inputs.to_csv(file)  # Config for full protein
 
 

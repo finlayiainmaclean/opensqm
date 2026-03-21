@@ -981,28 +981,6 @@ wheels = [
 ]
 
 [[package]]
-name = "mdtraj"
-version = "1.11.1.post1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-    { name = "packaging" },
-    { name = "pyparsing" },
-    { name = "scipy" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/66/3b/55f24465b9d5905eea28e14173e0a15c3a24d4e85280073f5062fac0d3b7/mdtraj-1.11.1.post1.tar.gz", hash = "sha256:4ccb3daef822096249994bd15247140df0fa4c03c961792522878fc3bf1588e8", size = 2742026, upload-time = "2026-01-26T15:41:12.546Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/0b/4a/227f3a3e4718a84bb9e3977f18ab84537b94441f96f202384af37212197e/mdtraj-1.11.1.post1-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:a6fe241369e5bf4195f8a59ea33144e9128175ca3980d7de6a948f389e7eb44a", size = 2458470, upload-time = "2026-01-26T15:40:48.858Z" },
-    { url = "https://files.pythonhosted.org/packages/8a/b9/4f49381147092bd40fbc101961506088a2a7a5883e6acc85eb5d1f03d210/mdtraj-1.11.1.post1-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:4a3f46ae3eeb83c641f43efd4bb68a411fc39a58f9744abcdc041550c69cfde9", size = 8034516, upload-time = "2026-01-26T15:40:51.265Z" },
-    { url = "https://files.pythonhosted.org/packages/3c/aa/b344aed2d1ec6bc2ac4e5e897ded78148b51b2ee730c5eaccce851d26082/mdtraj-1.11.1.post1-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:095851a681fedc846f66662b217a7da5aa721af552c1a7aa04b709a16054624a", size = 8349291, upload-time = "2026-01-26T15:40:53.201Z" },
-    { url = "https://files.pythonhosted.org/packages/92/13/e017236bd57f4564e0b43b9f1783a5c88f329cf7cf4b75076e1a1e37df03/mdtraj-1.11.1.post1-cp312-cp312-win_amd64.whl", hash = "sha256:e18341f4da3849c078d9141f774fac3a7ace8580109210ffba2c6bd94a1348e3", size = 1342401, upload-time = "2026-01-26T15:40:54.908Z" },
-    { url = "https://files.pythonhosted.org/packages/58/94/3b51167be053a4570a323cb032d83914af37db8a5c82afc13cc7bdd5c46a/mdtraj-1.11.1.post1-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:393d4f6273d31f84316605a360d473f8afbfc143a5290ade4075a7c887061bdd", size = 2449379, upload-time = "2026-01-26T15:40:56.986Z" },
-    { url = "https://files.pythonhosted.org/packages/5b/7a/f719b1921e1941a8eba0e8e9955363db70a321db002c6a4a106f2a3014cf/mdtraj-1.11.1.post1-cp313-cp313-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:5b995272ab6751cc8bf631a124f41f8a08f5efb9c0dcb8c440f38b75856eb7fa", size = 7995729, upload-time = "2026-01-26T15:40:59.392Z" },
-    { url = "https://files.pythonhosted.org/packages/b9/b8/f935b84d5aaceb9ea7f5d3500dd0459076a5ec167aaf66b75c1ffd1b954e/mdtraj-1.11.1.post1-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:93682f0ee9025afe4306251198ca72cb56e4ca064b559b7cceab22e6c816e5ce", size = 8312850, upload-time = "2026-01-26T15:41:01.913Z" },
-    { url = "https://files.pythonhosted.org/packages/65/7d/d7382b474ec378380661cb0827b6ccb528d70af8a1b75dc5f3fc753afb0d/mdtraj-1.11.1.post1-cp313-cp313-win_amd64.whl", hash = "sha256:53537380f111bbcfc8644c181bda33e72c3655fa1ca17f138c7cfa0380eb63f3", size = 1340626, upload-time = "2026-01-26T15:41:03.586Z" },
-]
-
-[[package]]
 name = "mpmath"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1321,7 +1299,6 @@ version = "0.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "loguru" },
-    { name = "mdtraj" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "pydantic" },
@@ -1348,7 +1325,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "loguru" },
-    { name = "mdtraj" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "pydantic", specifier = ">=2" },

@@ -8,10 +8,7 @@ from loguru import logger
 from rdkit import Chem
 from tqdm.auto import tqdm
 
-from opensqm.mopac import (
-    fix_nitro_groups,
-    get_correct_ligand,
-)
+from opensqm.mopac import get_correct_ligand
 from opensqm.rdkit_utils import set_residue_info
 
 project_dir = Path("data/inputs/PL-REX/")
@@ -26,7 +23,6 @@ def _run(*, ligand_file: Path):
     ligand = Chem.MolFromMolFile(str(ligand_file), removeHs=False)
 
     ligand = set_residue_info(ligand)
-    ligand = fix_nitro_groups(ligand)
 
     Chem.rdmolops.Kekulize(ligand)
 

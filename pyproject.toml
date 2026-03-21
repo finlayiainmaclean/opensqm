@@ -14,7 +14,6 @@ dependencies = [
     "tqdm",
     "wget",
     "rdkit",
-    "mdtraj",
     "unipka",
     "rdsl",
     "pymopac>=1.1",
@@ -32,6 +31,8 @@ platforms = ["linux-64", "osx-arm64"]
 mopac = "*"
 openmm = "*"
 pdbfixer = "*"
+openff-toolkit = "*"
+openmmforcefields = "*"
 
 [tool.pixi.pypi-dependencies]
 opensqm = { path = ".", editable = true }

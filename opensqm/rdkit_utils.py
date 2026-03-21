@@ -92,7 +92,7 @@ def submol(mol: Chem.Mol, /, *, atom_ids: Sequence[int]) -> Chem.Mol:
 
     mol = mol.GetMol()
 
-    Chem.SanitizeMol(mol)
+    # Chem.SanitizeMol(mol)
 
     return mol
 
@@ -151,6 +151,76 @@ def refine_caps(mol: Chem.Mol, ace_res_ids: list, nme_res_ids: list):
     return final_mol, cap_target_indices
 
 
+def _pdb_atom_name(raw: str) -> str:
+    """Four-character PDB atom name (RDKit stores the padded field)."""
+    s = raw.strip()
+    return (s[:4] if s else "")[:4].ljust(4)
+
+
+def mol_reordered_contiguous_pdb_residues(mol: Chem.Mol) -> Chem.Mol:
+    """Reorder atoms so each PDB residue forms one contiguous block (RDKit atom index order).
+
+    OpenMM's PDBFile maps residues by scanning sequentially; if heavy atoms and
+    hydrogens for the same (chain, resi) appear far apart in the file, it splits
+    them into separate residues and template matching fails.
+    """
+
+    def sort_key(idx: int) -> tuple:
+        a = mol.GetAtomWithIdx(idx)
+        if (info := a.GetPDBResidueInfo()) is None:
+            return ("\xff", 10**9, " ", True, "", idx)
+        chain = info.GetChainId()
+        resi = info.GetResidueNumber()
+        icode = info.GetInsertionCode() or " "
+        # Preserve original atom order within a residue; only group residues contiguously
+        return (chain, resi, icode, idx)
+
+    new_order = sorted(range(mol.GetNumAtoms()), key=sort_key)
+    return Chem.RenumberAtoms(mol, new_order)
+
+
+def fix_rdkit_added_h_pdb_labels(mol: Chem.Mol) -> None:
+    """Copy ACE/NME residue metadata onto hydrogens RDKit added with AddHs.
+
+    Without this, MolToPDBFile writes those H as HETATM/UNL while cap heavy atoms
+    stay in ACE/NME; OpenMM then reports ACE/NME templates as missing hydrogens.
+    """
+    for heavy in mol.GetAtoms():
+        if heavy.GetAtomicNum() in (1, 0):
+            continue
+        pinfo = heavy.GetPDBResidueInfo()
+        if pinfo is None:
+            continue
+        resname = pinfo.GetResidueName().strip()
+        aname = pinfo.GetName().strip()
+        hs = [n for n in heavy.GetNeighbors() if n.GetAtomicNum() == 1]
+        if not hs:
+            continue
+        hs_sorted = sorted(hs, key=lambda a: a.GetIdx())
+
+        h_names: list[str] | None = None
+        if resname == "ACE" and aname == "CA" and len(hs_sorted) == 3:  # noqa: PLR2004
+            h_names = ["HH31", "HH32", "HH33"]
+        elif resname == "NME" and aname == "CA" and len(hs_sorted) == 3:  # noqa: PLR2004
+            h_names = ["HH31", "HH32", "HH33"]
+        elif resname == "NME" and aname == "N" and len(hs_sorted) == 1:
+            h_names = ["H"]
+
+        if h_names is None:
+            continue
+
+        for h_atom, hname in zip(hs_sorted, h_names, strict=True):
+            hi = Chem.AtomPDBResidueInfo()
+            hi.SetSerialNumber(pinfo.GetSerialNumber())
+            hi.SetAltLoc(pinfo.GetAltLoc())
+            hi.SetChainId(pinfo.GetChainId())
+            hi.SetInsertionCode(pinfo.GetInsertionCode())
+            hi.SetResidueNumber(pinfo.GetResidueNumber())
+            hi.SetResidueName(pinfo.GetResidueName())
+            hi.SetName(_pdb_atom_name(hname))
+            h_atom.SetMonomerInfo(hi)
+
+
 def crop_and_cap_protein(
     *, protein: Chem.Mol, ligand: Chem.Mol, distance_to_ligand: int = 5
 ) -> Chem.Mol:
@@ -169,23 +239,29 @@ def crop_and_cap_protein(
         info = atom.GetPDBResidueInfo()
         pocket_residues.add((info.GetChainId(), info.GetResidueNumber()))
 
-    ace_res_ids = []  # Store as (chain, res_num)
-    nme_res_ids = []
+    # Residues to pull in and mutate into ACE / NME. Use sets so we can find
+    # "bridge" residues: one PDB residue cannot be both caps — refine_caps
+    # checks ACE first and would strip the N needed for the NME-side peptide.
+    ace_res_ids: set[tuple[str, int]] = set()
+    nme_res_ids: set[tuple[str, int]] = set()
 
-    # Identify which residues will become our caps
     for chain, res_num in pocket_residues:
         prev = (chain, res_num - 1)
         if prev not in pocket_residues:
-            ace_res_ids.append(prev)
+            ace_res_ids.add(prev)
 
         nxt = (chain, res_num + 1)
         if nxt not in pocket_residues:
-            nme_res_ids.append(nxt)
+            nme_res_ids.add(nxt)
+
+    bridge_res_ids = ace_res_ids & nme_res_ids
+    ace_res_ids -= bridge_res_ids
+    nme_res_ids -= bridge_res_ids
 
     # Get *all* atom IDs for these residues (Backbone + Sidechains)
     # We need the whole residue first so refine_caps can prune it correctly
     keep_ids = list(selection.atom_mapping.values())
-    for res in ace_res_ids + nme_res_ids:
+    for res in ace_res_ids | nme_res_ids | bridge_res_ids:
         ids = select_atom_ids(complex, f"(chain '{res[0]}') and (resi {res[1]})")
         keep_ids.extend([int(i) for i in ids])
 
@@ -194,29 +270,15 @@ def crop_and_cap_protein(
 
     # Mutate the extra residues into ACE/NME caps
     # This removes sidechains and renames residues
-    capped_protein, cap_ids = refine_caps(capped_protein, ace_res_ids, nme_res_ids)
+    capped_protein, cap_ids = refine_caps(capped_protein, list(ace_res_ids), list(nme_res_ids))
 
-    for atom in capped_protein.GetAtoms():
-        info = atom.GetPDBResidueInfo()
-        if info and info.GetResidueName() == "ACE" and info.GetName() == "CA":
-            atom.SetExplicitValence(3)
-            atom.SetImplicitValence(0)
-
-    for atom in capped_protein.GetAtoms():
-        info = atom.GetPDBResidueInfo()
-        if info and info.GetResidueName() == "NME" and info.GetName() == "CA":
-            atom.SetExplicitValence(3)
-            atom.SetImplicitValence(0)
-
-        if info and info.GetResidueName() == "NME" and info.GetName() == "N":
-            atom.SetExplicitValence(1)
-            atom.SetImplicitValence(0)
-
-    # Chem.SanitizeMol(capped_protein)
+    Chem.SanitizeMol(capped_protein)
 
     # Finalize with hydrogens
     # AddHs will now see a methyl group and add 3 hydrogens to the CA
     capped_protein = Chem.AddHs(capped_protein, addCoords=True, onlyOnAtoms=cap_ids)
+    fix_rdkit_added_h_pdb_labels(capped_protein)
+    capped_protein = mol_reordered_contiguous_pdb_residues(capped_protein)
 
     return capped_protein
 

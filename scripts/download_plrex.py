@@ -59,13 +59,17 @@ def main():
             fixed_prot_pdb_path = target_dir / f"{pdb_code}.fixed.pdb"
 
             PDB_CODE_LENGTH: Final[int] = 4
-            if len(pdb_code) == PDB_CODE_LENGTH and not fixed_prot_pdb_path.exists():
-                print(url := f"https://files.rcsb.org/download/{pdb_code}.pdb")
-                wget.download(
-                    url,
-                    out=str(raw_prot_pdb_path),
-                )
-                run_pdbfixer(raw_prot_pdb_path, fixed_prot_pdb_path, keep_waters=True)
+            if len(pdb_code) == PDB_CODE_LENGTH:
+                raw_prot_pdb_path = target_dir / f"{pdb_code}.raw.pdb"
+                fixed_prot_pdb_path = target_dir / f"{pdb_code}.fixed.pdb"
+
+                if not fixed_prot_pdb_path.exists():
+                    print(url := f"https://files.rcsb.org/download/{pdb_code}.pdb")
+                    wget.download(
+                        url,
+                        out=str(raw_prot_pdb_path),
+                    )
+                    run_pdbfixer(raw_prot_pdb_path, fixed_prot_pdb_path, keep_waters=True)
             else:
                 fixed_prot_pdb_path = None
 

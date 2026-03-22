@@ -6,7 +6,7 @@ version = "0.0.1"
 readme = "README.md"
 keywords = []
 authors = [{name = "Finlay MacLean"}]
-requires-python = ">3.13,<3.15"
+requires-python = ">3.12,<3.14"
 dependencies = [
     "loguru",
     "pandas",
@@ -14,10 +14,13 @@ dependencies = [
     "tqdm",
     "wget",
     "rdkit",
-    "mdtraj",
     "unipka",
     "rdsl",
-
+    "pymopac>=1.1",
+    "pydantic>=2",
+    "xxhash>=3",
+    "ray[default]",
+    
 ]
 
 [tool.pixi.workspace]
@@ -28,6 +31,8 @@ platforms = ["linux-64", "osx-arm64"]
 mopac = "*"
 openmm = "*"
 pdbfixer = "*"
+openff-toolkit = "*"
+openmmforcefields = "*"
 
 [tool.pixi.pypi-dependencies]
 opensqm = { path = ".", editable = true }
@@ -49,8 +54,6 @@ pytest-cov = ">=6.0"
 ruff = ">=0.11"
 pre-commit = ">=4.2"
 
-[tool.pixi.feature.dev.pypi-dependencies]
-ty = "*"
 
 [dependency-groups]
 dev = [
@@ -58,8 +61,8 @@ dev = [
     "pytest-cov>=6.0",
     "ruff>=0.11",
     "pre-commit>=4.2",
-    "ty",
     "deptry",
+    "ty"
 ]
 
 [tool.ruff]
@@ -97,6 +100,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401", "F403"]
+"scripts/sqm.py" = ["N815"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"

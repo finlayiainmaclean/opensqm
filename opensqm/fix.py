@@ -1,9 +1,11 @@
+"""PDBFixer-based preparation of protein structures (add hydrogens, renumber chains)."""
+
 from pathlib import Path
 
 import numpy as np
-from openmm import unit
-from openmm.app import Atom, Modeller, PDBFile, Residue, Topology
-from pdbfixer import PDBFixer
+from openmm import unit  # type: ignore[unresolved-import]
+from openmm.app import Atom, Modeller, PDBFile, Residue, Topology  # type: ignore[unresolved-import]
+from pdbfixer import PDBFixer  # type: ignore[unresolved-import]
 
 # Max allowed distance (nm) before we consider the chain broken
 BREAK_THRESHOLD_NM = 0.25  # ~2.5 Å — generous but catches true breaks
@@ -30,8 +32,9 @@ def _is_chain_break(
     positions,
 ) -> bool:
     """
-    Return True if the bond connecting prev_res → curr_res is missing or
-    longer than a threshold nanometres.
+    Return True if the bond connecting prev_res → curr_res is missing or too long.
+
+    The threshold is BREAK_THRESHOLD_NM (nanometres).
     """
     tail_atom = _get_atom_by_name(prev_res, "C")
     head_atom = _get_atom_by_name(curr_res, "N")
@@ -45,8 +48,10 @@ def _is_chain_break(
 
 def renumber_chains(fixer: PDBFixer) -> PDBFixer:
     """
-    Split chains wherever the geometric distance between consecutive residues'
-    connector atoms exceeds BREAK_THRESHOLD_NM, regardless of residue IDs.
+    Split chains at breaks (large gaps between consecutive residues).
+
+    Chains are split wherever the distance between consecutive residues' connector
+    atoms exceeds BREAK_THRESHOLD_NM, regardless of residue IDs.
     """
     positions = fixer.positions
     old_top = fixer.topology
@@ -82,9 +87,9 @@ def run_pdbfixer(
     output_protein_path: Path,
     keep_waters: bool = True,
     keep_ions: bool = True,
-    pH: float = 7.4,
+    ph: float = 7.4,
 ):
-
+    """Run PDBFixer to add missing hydrogens, renumber chains, and write the result."""
     input_protein_path = Path(input_protein_path)
     output_protein_path = Path(output_protein_path)
 
@@ -125,7 +130,7 @@ def run_pdbfixer(
     # residues = list(fixer.topology.residues())
     # residues_to_remove = [residues[0]]
     # fixer.topology, fixer.positions = crop(fixer.topology, fixer.positions, residues_to_remove)
-    fixer.addMissingHydrogens(pH)
+    fixer.addMissingHydrogens(ph)
 
     # Add ion atoms back to the structure
     if keep_ions and ion_atoms:
@@ -159,4 +164,4 @@ def run_pdbfixer(
 
 
 if __name__ == "__main__":
-    run_pdbfixer("/tmp/7RPZ.pdb", "/tmp/prot.pdb", keep_waters=False)
+    run_pdbfixer(Path("/tmp/7RPZ.pdb"), Path("/tmp/prot.pdb"), keep_waters=False)

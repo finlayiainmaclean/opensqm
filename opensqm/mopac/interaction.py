@@ -1,4 +1,6 @@
 # ruff: noqa: D100, D103
+import tempfile
+
 from loguru import logger
 from rdkit import Chem
 from rdkit.Chem import rdMolAlign
@@ -7,7 +9,6 @@ from opensqm.mopac.charges import get_mopac_formal_charges
 from opensqm.mopac.constants import OptMode
 from opensqm.mopac.geometry import annotate_mopac_formal_charges
 from opensqm.mopac.ligand import get_correct_ligand
-from opensqm.mopac.nitro import strip_mopac_nitro_aux_bonds
 from opensqm.mopac.opt_mask import get_opt_mask
 from opensqm.mopac.optimize import run_opt_from_rdmol
 from opensqm.mopac.singlepoint import run_singlepoint_from_rdmol
@@ -27,7 +28,10 @@ def run_interaction_energy(*, ligand: Chem.Mol, protein: Chem.Mol) -> dict[str, 
 
     if mopac_ligand_formal_charge != rdkit_ligand_charge:
         print("RDKit and MOPAC disagree on ligand charge")
-        Chem.MolToMolFile(ligand, "/tmp/ligand.mol")
+
+        with tempfile.NamedTemporaryFile(suffix=".mol", delete=False) as f:
+            Chem.MolToMolFile(ligand, f.name)
+            logger.info(f"Dumped ligand to scratch file: {f.name}")
         raise ValueError("RDKit and MOPAC disagree on ligand charge")
 
     # RDKit does not parse salt bridges well, so use MOPAC to find atom formal charges
@@ -136,8 +140,6 @@ def optimise_complex(
     complex_optimised = run_opt_from_rdmol(
         complex, opt_mask=opt_mask, mopac_keywords=mopac_keywords, charge=complex_charge
     )
-    # Drop MOPAC-only O-O nitro links so RMSD / RDKit see the same graph as pre-MOPAC.
-    complex_optimised = strip_mopac_nitro_aux_bonds(complex_optimised)
 
     # Extract ligand and protein conformations from the optimised complex
     ligand_idxs = [

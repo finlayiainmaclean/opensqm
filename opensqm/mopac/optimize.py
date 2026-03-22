@@ -29,7 +29,8 @@ def run_opt_from_rdmol(
 ) -> Chem.Mol:
     # MOPAC optimizes the nitro-augmented graph; write coordinates back onto that
     # same mol (atom index order matches GEO_DAT / output table).
-    rdmol = fix_nitro_groups(rdmol)
+
+    rdmol_fixed = fix_nitro_groups(rdmol)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
@@ -38,10 +39,10 @@ def run_opt_from_rdmol(
         mopac_path = tmpdir / "run.mopac"
         out_path = tmpdir / "run    ac.out"
 
-        pi_bonds = _pi_bonds_prepare_setpi_file(rdmol, setpi_path)
-        rdkit_to_mopac(rdmol, mop_path, opt_mask=opt_mask)
+        pi_bonds = _pi_bonds_prepare_setpi_file(rdmol_fixed, setpi_path)
+        rdkit_to_mopac(rdmol_fixed, mop_path, opt_mask=opt_mask)
         _finalize_setpi_after_geometry(pi_bonds, setpi_path, mopac_keywords=mopac_keywords)
-        cvb_str = get_cvb_str(rdmol)
+        cvb_str = get_cvb_str(rdmol_fixed)
 
         mopac_keywords.append(f"CHARGE={charge}")
         mopac_keywords.append(f'GEO_DAT="{mop_path!s}"')
@@ -60,14 +61,14 @@ def run_opt_from_rdmol(
 
         df = _extract_coords(out_path.read_text())
 
-        if len(df) != rdmol.GetNumAtoms():
+        if len(df) != rdmol_fixed.GetNumAtoms():
             raise ValueError(
-                f"MOPAC coordinate rows ({len(df)}) != atoms in mol ({rdmol.GetNumAtoms()})"
+                f"MOPAC coordinate rows ({len(df)}) != atoms in mol ({rdmol_fixed.GetNumAtoms()})"
             )
 
         coords = df[["x", "y", "z"]].to_numpy(dtype=float)
 
-        for a, symbol in zip(rdmol.GetAtoms(), df["symbol"], strict=True):
+        for a, symbol in zip(rdmol_fixed.GetAtoms(), df["symbol"], strict=True):
             if a.GetSymbol() != symbol:
                 raise ValueError(
                     f"atom index {a.GetIdx()}: mol {a.GetSymbol()} vs MOPAC output {symbol}"

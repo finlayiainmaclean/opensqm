@@ -3,6 +3,7 @@
 import os
 import sys
 from pathlib import Path
+from typing import Final
 
 import click
 import pandas as pd
@@ -28,6 +29,8 @@ from opensqm.rdkit_utils import crop_and_cap_protein, set_residue_info
 
 logger.remove()
 logger.add(sys.stderr, level="INFO")
+
+NUM_CPUS: Final[int] = int(os.environ.get("NUM_CPUS", "5"))
 
 
 class OptimisationSettings(BaseModel):
@@ -149,12 +152,7 @@ def run_sqm(inp: SQMConfig) -> SQMOutput:
         ligand, mopac_keywords=["PM6-D3H4X", "EPS=78.5"], charge=ligand_charge
     )
 
-    try:
-        ligand_rmsd = rdMolAlign.CalcRMS(ligand_free, ligand)
-    except Exception as e:
-        Chem.MolToMolFile(ligand_free, "/tmp/ligand_free.sdf")
-        Chem.MolToMolFile(ligand, "/tmp/ligand.sdf")
-        raise ValueError("Could not calculate ligand RMSD") from e
+    ligand_rmsd = rdMolAlign.CalcRMS(ligand_free, ligand)
 
     logger.info(f"Ligand RMSD: {ligand_rmsd}")
 
@@ -211,7 +209,7 @@ def cli(dataframe_path: Path, settings_path: Path | None = None, output_dir: Pat
 
     run_local = _run_local_env()
     if not run_local:
-        ray.init(num_cpus=5, ignore_reinit_error=True)
+        ray.init(num_cpus=NUM_CPUS, ignore_reinit_error=True)
 
     df = pd.read_csv(dataframe_path)
     if "protein" in df.columns:
@@ -220,9 +218,9 @@ def cli(dataframe_path: Path, settings_path: Path | None = None, output_dir: Pat
     inputs = [
         SQMConfig(
             complex=Complex(
-                complex_id=str(row.id),
-                protein_file=Path(row.protein),
-                ligand_file=Path(row.ligand),
+                complex_id=str(row.id),  # type: ignore
+                protein_file=Path(row.protein),  # type: ignore
+                ligand_file=Path(row.ligand),  # type: ignore
             ),
             settings=settings,
         )
@@ -239,8 +237,10 @@ def cli(dataframe_path: Path, settings_path: Path | None = None, output_dir: Pat
         results = ray.get(futures)
 
     scores_df = pd.DataFrame([r.model_dump() for r in results])
+    scores_df["complex_id"] = [inp.complex.complex_id for inp in inputs]
     if len(scores_df) > 1 and "pX" in df.columns:
-        corr = scipy.stats.spearmanr(scores_df["score"], df["pX"])
+        scores_df = scores_df.loc[scores_df.groupby("complex_id")["score"].idxmin()]
+        corr = scipy.stats.spearmanr(scores_df["score"], df.loc[scores_df.index, "pX"])
         logger.info(f"Spearman correlation: {corr}")
 
     scores_csv_path = output_dir / "scores.csv"

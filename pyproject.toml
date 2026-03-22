@@ -20,7 +20,11 @@ dependencies = [
     "pydantic>=2",
     "xxhash>=3",
     "ray[default]",
-    
+    "scikit-learn",
+    "pymbar",
+    "click",
+    "scipy",
+    "pyyaml"
 ]
 
 [tool.pixi.workspace]
@@ -33,6 +37,7 @@ openmm = "*"
 pdbfixer = "*"
 openff-toolkit = "*"
 openmmforcefields = "*"
+mdtraj = "*"
 
 [tool.pixi.pypi-dependencies]
 opensqm = { path = ".", editable = true }
@@ -113,3 +118,6 @@ doctest_optionflags = "NORMALIZE_WHITESPACE"
 [build-system]
 build-backend = "hatchling.build"
 requires = ["hatchling"]
+
+[tool.deptry.per_rule_ignores]
+DEP001 = ["openmm", "openmmforcefields", "openff", "mdtraj", "pytraj", "pdbfixer"]

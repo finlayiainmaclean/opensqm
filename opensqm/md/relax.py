@@ -4,6 +4,7 @@ import io
 import logging
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from openff.toolkit.topology import Molecule  # type: ignore
@@ -20,7 +21,9 @@ logging.getLogger("openff.interchange.smirnoff").setLevel(logging.WARNING)
 logging.getLogger("openmmforcefields.generators.template_generators").setLevel(logging.WARNING)
 
 
-def relax_complex(*, ligand: Chem.Mol, protein: Chem.Mol, simulation_time: float = 60):
+def relax_complex(
+    *, ligand: Chem.Mol, protein: Chem.Mol, simulation_time: float = 60
+) -> tuple[Chem.Mol, Chem.Mol]:
 
     offmol = Molecule.from_rdkit(ligand, allow_undefined_stereo=False)
     offmol.assign_partial_charges("am1bcc", toolkit_registry=AmberToolsToolkitWrapper())
@@ -109,12 +112,12 @@ def relax_complex(*, ligand: Chem.Mol, protein: Chem.Mol, simulation_time: float
 
 
 def anneal_and_minimise(
-    positions,
-    topology,
-    system,
+    positions: unit.Quantity,
+    topology: Any,
+    system: Any,
     integrator_ps_per_step: float = 0.002,
     annealing_time: float = 60.0,
-):
+) -> unit.Quantity:
     system = copy.deepcopy(system)
 
     integrator = LangevinMiddleIntegrator(

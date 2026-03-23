@@ -2,7 +2,7 @@
 
 import numpy as np
 from loguru import logger
-from openmm.app import Modeller, Topology  # type: ignore[unresolved-import]
+from openmm.app import Atom, Modeller, Topology  # type: ignore[unresolved-import]
 from rdkit import Chem
 
 
@@ -18,7 +18,7 @@ def get_rdkit_pdb_info(atom: Chem.Atom) -> tuple[str, str, int, str] | None:
     return chain, res_name, res_num, atom_name
 
 
-def get_openmm_pdb_info(atom: Topology.Atom) -> str:
+def get_openmm_pdb_info(atom: Atom) -> str:
     """Get PDB info string for OpenMM atom."""
     chain = atom.residue.chain.index
     res_name = atom.residue.name.strip()

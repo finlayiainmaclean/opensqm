@@ -5,6 +5,8 @@ environments:
     - url: https://conda.anaconda.org/conda-forge/
     indexes:
     - https://pypi.org/simple
+    options:
+      pypi-prerelease-mode: if-necessary-or-explicit
     packages:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-7_kmp_llvm.conda
@@ -358,6 +360,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/68/fb/bc7f639aed026bca6e7beb1e33f6951e16b7d315594e7635a4f7d21d63f4/py_spy-0.4.1-py2.py3-none-manylinux_2_5_x86_64.manylinux1_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/5d/a0/7d793dce3fa811fe047d6ae2431c672364b462850c6235ae306c0efd025f/pyasn1-0.6.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/47/8d/d529b5d697919ba8c11ad626e835d4039be708a35b0d22de83a269a6682c/pyasn1_modules-0.4.2-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/81/d9/adf833614ea03f92eccd45274dd31eef2e6d06a301216f21dc6cfdc7c17f/pymbar-4.0.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/96/2e/ee093c460ea69a73d1423f98725d1a4d3bf5e97521b621b574daa29b798f/pymopac-1.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/52/60/83430886d17526f4757e298b77268533afeedc74ed934f911d522f191ef2/ray-2.47.1-cp313-cp313-manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/64/e1/417c2408b297aea5a1875a378eae376bf5e4ffeffbac6fec04b1c2ba0c99/rdsl-0.1.2-py3-none-any.whl
@@ -714,6 +717,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/14/e3/3a32500d845bdd94f6a2b4ed6244982f42ec2bc64602ea8fcfe900678ae7/py_spy-0.4.1-py2.py3-none-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl
       - pypi: https://files.pythonhosted.org/packages/5d/a0/7d793dce3fa811fe047d6ae2431c672364b462850c6235ae306c0efd025f/pyasn1-0.6.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/47/8d/d529b5d697919ba8c11ad626e835d4039be708a35b0d22de83a269a6682c/pyasn1_modules-0.4.2-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/81/d9/adf833614ea03f92eccd45274dd31eef2e6d06a301216f21dc6cfdc7c17f/pymbar-4.0.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/96/2e/ee093c460ea69a73d1423f98725d1a4d3bf5e97521b621b574daa29b798f/pymopac-1.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/7b/85/4dbf9a126f080a1114ec7738d9274759c256ff2a1c21662b09123311bbf0/ray-2.47.1-cp313-cp313-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/64/e1/417c2408b297aea5a1875a378eae376bf5e4ffeffbac6fec04b1c2ba0c99/rdsl-0.1.2-py3-none-any.whl
@@ -732,6 +736,8 @@ environments:
     - url: https://conda.anaconda.org/conda-forge/
     indexes:
     - https://pypi.org/simple
+    options:
+      pypi-prerelease-mode: if-necessary-or-explicit
     packages:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-7_kmp_llvm.conda
@@ -1098,6 +1104,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/68/fb/bc7f639aed026bca6e7beb1e33f6951e16b7d315594e7635a4f7d21d63f4/py_spy-0.4.1-py2.py3-none-manylinux_2_5_x86_64.manylinux1_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/5d/a0/7d793dce3fa811fe047d6ae2431c672364b462850c6235ae306c0efd025f/pyasn1-0.6.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/47/8d/d529b5d697919ba8c11ad626e835d4039be708a35b0d22de83a269a6682c/pyasn1_modules-0.4.2-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/81/d9/adf833614ea03f92eccd45274dd31eef2e6d06a301216f21dc6cfdc7c17f/pymbar-4.0.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/96/2e/ee093c460ea69a73d1423f98725d1a4d3bf5e97521b621b574daa29b798f/pymopac-1.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/52/60/83430886d17526f4757e298b77268533afeedc74ed934f911d522f191ef2/ray-2.47.1-cp313-cp313-manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/64/e1/417c2408b297aea5a1875a378eae376bf5e4ffeffbac6fec04b1c2ba0c99/rdsl-0.1.2-py3-none-any.whl
@@ -1469,6 +1476,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/14/e3/3a32500d845bdd94f6a2b4ed6244982f42ec2bc64602ea8fcfe900678ae7/py_spy-0.4.1-py2.py3-none-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl
       - pypi: https://files.pythonhosted.org/packages/5d/a0/7d793dce3fa811fe047d6ae2431c672364b462850c6235ae306c0efd025f/pyasn1-0.6.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/47/8d/d529b5d697919ba8c11ad626e835d4039be708a35b0d22de83a269a6682c/pyasn1_modules-0.4.2-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/81/d9/adf833614ea03f92eccd45274dd31eef2e6d06a301216f21dc6cfdc7c17f/pymbar-4.0.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/96/2e/ee093c460ea69a73d1423f98725d1a4d3bf5e97521b621b574daa29b798f/pymopac-1.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/7b/85/4dbf9a126f080a1114ec7738d9274759c256ff2a1c21662b09123311bbf0/ray-2.47.1-cp313-cp313-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/64/e1/417c2408b297aea5a1875a378eae376bf5e4ffeffbac6fec04b1c2ba0c99/rdsl-0.1.2-py3-none-any.whl
@@ -6314,7 +6322,7 @@ packages:
 - pypi: ./
   name: opensqm
   version: 0.0.1
-  sha256: 7665d4620da9da033a902a57676bbd783fdab2f326de09328be1185b8293d3d7
+  sha256: 1a4a4063619c471b399782e5bd5e93daf965c1dced38fc11475138a6db88cb29
   requires_dist:
   - loguru
   - pandas
@@ -6328,8 +6336,12 @@ packages:
   - pydantic>=2
   - xxhash>=3
   - ray[default]
+  - scikit-learn
+  - pymbar
+  - click
+  - scipy
+  - pyyaml
   requires_python: '>3.12,<3.14'
-  editable: true
 - conda: https://conda.anaconda.org/conda-forge/linux-64/openssl-3.6.1-h35e630c_1.conda
   sha256: 44c877f8af015332a5d12f5ff0fb20ca32f896526a7d0cdb30c769df1144fb5c
   md5: f61eb8cd60ff9057122a3d338b99c00f
@@ -7133,6 +7145,17 @@ packages:
   - pkg:pypi/pygments?source=hash-mapping
   size: 889287
   timestamp: 1750615908735
+- pypi: https://files.pythonhosted.org/packages/81/d9/adf833614ea03f92eccd45274dd31eef2e6d06a301216f21dc6cfdc7c17f/pymbar-4.0.3-py3-none-any.whl
+  name: pymbar
+  version: 4.0.3
+  sha256: 302bc12199ab8bb234cac381ed11c63b2c1376f57ff8550cb6ecdb34276d9ef8
+  requires_dist:
+  - numpy>=1.12
+  - scipy
+  - numexpr
+  - jaxlib ; sys_platform != 'win32' and extra == 'jax'
+  - jax ; sys_platform != 'win32' and extra == 'jax'
+  requires_python: '>=3.6'
 - pypi: https://files.pythonhosted.org/packages/96/2e/ee093c460ea69a73d1423f98725d1a4d3bf5e97521b621b574daa29b798f/pymopac-1.1-py3-none-any.whl
   name: pymopac
   version: '1.1'

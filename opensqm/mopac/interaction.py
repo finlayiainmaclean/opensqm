@@ -62,10 +62,10 @@ def run_interaction_energy(*, ligand: Chem.Mol, protein: Chem.Mol) -> dict[str, 
     E_complex = run_singlepoint_from_rdmol(
         complex, use_mozyme=True, solvent="cosmo2", charge=complex_charge
     )
-    dE_int = E_complex - E_protein - E_ligand
+    interaction_energy = E_complex - E_protein - E_ligand
 
     scores = {
-        "dE_int": dE_int,
+        "interaction_energy": interaction_energy,
         "E_complex": E_complex,
         "E_protein": E_protein,
         "E_ligand": E_ligand,

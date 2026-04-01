@@ -1339,7 +1339,6 @@ dependencies = [
     { name = "pandas" },
     { name = "pydantic" },
     { name = "pymbar" },
-    { name = "pymopac" },
     { name = "pyyaml" },
     { name = "ray", extra = ["default"] },
     { name = "rdkit" },
@@ -1370,7 +1369,6 @@ requires-dist = [
     { name = "pandas" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pymbar" },
-    { name = "pymopac", specifier = ">=1.1" },
     { name = "pyyaml" },
     { name = "ray", extras = ["default"] },
     { name = "rdkit" },
@@ -1866,20 +1864,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ff/25/9d149a5bb62a55792ceeb9058fa75996490141017a2a6a1f6a8978540026/pymbar-4.0.3.tar.gz", hash = "sha256:d38868e515631eb6bbf306448bfdf166bd82f7b887935eaf4b681f40628be9ff", size = 115955, upload-time = "2024-03-21T17:25:58.344Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/81/d9/adf833614ea03f92eccd45274dd31eef2e6d06a301216f21dc6cfdc7c17f/pymbar-4.0.3-py3-none-any.whl", hash = "sha256:302bc12199ab8bb234cac381ed11c63b2c1376f57ff8550cb6ecdb34276d9ef8", size = 107398, upload-time = "2024-03-21T17:25:57.109Z" },
-]
-
-[[package]]
-name = "pymopac"
-version = "1.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "matplotlib" },
-    { name = "numpy" },
-    { name = "rdkit" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/bf/18/43bc03a7491903e62fbb483ae623c0b7d5a1c5b42085d4e8e5ba1654fe99/pymopac-1.1.tar.gz", hash = "sha256:6530a6b35d3964b9db639b1997302e485c1a72e63e0fc5b25edaa9d057170eb3", size = 113124, upload-time = "2025-02-09T16:38:42.594Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/96/2e/ee093c460ea69a73d1423f98725d1a4d3bf5e97521b621b574daa29b798f/pymopac-1.1-py3-none-any.whl", hash = "sha256:60d38541829946f8633e6842c8203f23ce616fae26394a3e8b76ec5294db6b45", size = 41559, upload-time = "2025-02-09T16:38:40.219Z" },
 ]
 
 [[package]]

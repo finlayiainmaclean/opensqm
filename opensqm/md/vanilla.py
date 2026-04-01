@@ -24,12 +24,13 @@ from openmmforcefields.generators import SMIRNOFFTemplateGenerator  # type: igno
 from rdkit import Chem
 from tqdm import tqdm
 
+from opensqm.md.rest import apply_rest
 from opensqm.md.restraints import add_distal_restraints, add_restraints
 
 logging.getLogger("openff.interchange.smirnoff").setLevel(logging.WARNING)
 
 
-def create_system(forcefield: ForceField, topology: Topology) -> System:
+def create_system(forcefield: ForceField, topology: Topology, rest_ligand: bool = False) -> System:
     """Create an OpenMM System from the forcefield and topology."""
     system = forcefield.createSystem(
         topology,
@@ -40,6 +41,12 @@ def create_system(forcefield: ForceField, topology: Topology) -> System:
         rigidWater=True,
         hydrogenMass=1.5,
     )
+
+    if rest_ligand:
+        ligand_idxs = {atom.index for atom in topology.atoms() if atom.residue.name == "LIG"}
+        if ligand_idxs:
+            apply_rest(system, ligand_idxs)
+
     return system
 
 
@@ -127,8 +134,7 @@ def equilibrate(
     # ========================================
     # PHASE 1: NVT WARMUP (with restraints)
     # ========================================
-    print("Setting up NVT warmup...")
-    system = create_system(forcefield, topology)
+    system = create_system(forcefield, topology, rest_ligand=False)
 
     # Use small timestep for initial warmup
     integrator = create_integrator(0.001)
@@ -144,18 +150,12 @@ def equilibrate(
     simulation.context.setPositions(positions)
 
     # Energy minimization
-    print("Minimizing energy...")
-    state = simulation.context.getState(getEnergy=True)
-    print(f"Initial energy: {state.getPotentialEnergy()}")
     simulation.minimizeEnergy()
-    state = simulation.context.getState(getEnergy=True)
-    print(f"Minimized energy: {state.getPotentialEnergy()}")
 
     # Set initial low temperature
     simulation.context.setVelocitiesToTemperature(10 * unit.kelvin)
 
     # Gradual heating from 10K to 300K
-    print("Starting NVT warmup phase...")
     with tqdm(total=N, desc="Warmup", unit="iter") as pbar:
         for _i, current_temperature in enumerate(np.linspace(10, 300, N)):
             iter_start = time.time()
@@ -175,15 +175,8 @@ def equilibrate(
     warmup_positions = warmup_state.getPositions()
     warmup_box = warmup_state.getPeriodicBoxVectors()
 
-    print(f"Warmup complete. Box vectors: {warmup_box}")
-
-    # ========================================
-    # PHASE 2: NPT EQUILIBRATION (gradually release restraints)
-    # ========================================
-    print("\nSetting up NPT equilibration...")
-
     # Create new system with barostat
-    system = create_system(forcefield, topology)
+    system = create_system(forcefield, topology, rest_ligand=False)
     integrator = create_integrator(integrator_ps_per_step)
 
     # Add restraints (will be gradually reduced)
@@ -220,7 +213,6 @@ def equilibrate(
     simulation.reporters.append(density_reporter)
 
     # NPT equilibration with gradual restraint release
-    print("Starting NPT equilibration...")
     with tqdm(total=N, desc="NPT Equil", unit="iter") as pbar:
         for _i, k in enumerate(np.linspace(4.0, 1.0, N)):
             iter_start = time.time()
@@ -243,10 +235,6 @@ def equilibrate(
     npt_state = simulation.context.getState(
         getPositions=True, getVelocities=True, getEnergy=True, enforcePeriodicBox=True
     )
-
-    final_box = npt_state.getPeriodicBoxVectors()
-    print(f"\nEquilibration complete. Final box vectors: {final_box}")
-    print(f"Final energy: {npt_state.getPotentialEnergy()}")
 
     topology.setPeriodicBoxVectors(npt_state.getPeriodicBoxVectors())
 
@@ -324,6 +312,7 @@ def production(
     integrator_ps_per_step: float = 0.004,
     log_ps: int = 100,
     run_time_ps: int = 1000,
+    rest_ligand: bool = True,
 ) -> State:
     """
     Run production MD simulation with restraints.
@@ -340,8 +329,7 @@ def production(
     num_steps_per_log = int(log_ps // integrator_ps_per_step)
     steps = int(run_time_ps / integrator_ps_per_step)
 
-    print("Setting up production simulation...")
-    system = create_system(forcefield, topology)
+    system = create_system(forcefield, topology, rest_ligand=rest_ligand)
 
     # Add distal restraints to prevent protein unfolding
     add_distal_restraints(
@@ -358,12 +346,10 @@ def production(
     simulation = app.Simulation(topology, system, integrator)
 
     # Set box vectors before positions
-    print(topology.getPeriodicBoxVectors())
     simulation.context.setPeriodicBoxVectors(*topology.getPeriodicBoxVectors())
     simulation.context.setPositions(positions)
 
     # Quick minimization with production system
-    print("Minimizing energy...")
     simulation.minimizeEnergy()
 
     # Set velocities at production temperature
@@ -374,7 +360,6 @@ def production(
     simulation.reporters.append(reporter)
 
     # Production run with progress bar
-    print(f"Starting production run ({run_time_ps} ps)...")
     steps_per_update = num_steps_per_log
     total_updates = steps // steps_per_update
 
@@ -394,10 +379,16 @@ def production(
             pbar.set_postfix({"Time": f"{current_time_ps:.0f}ps", "ns/day": f"{ns_per_day:.2f}"})
             pbar.update(1)
 
-    print("Production simulation completed!")
+    # Close reporters to prevent file handle leaks and double-free segfaults
+    # when subsequent tools read/write to the same DCD file
+    for r in simulation.reporters:
+        try:
+            r.close()
+        except Exception:
+            pass
+    simulation.reporters.clear()
 
     # Optionally return final state
     final_state = simulation.context.getState(getPositions=True, getEnergy=True)
-    print(f"Final energy: {final_state.getPotentialEnergy()}")
 
     return final_state

@@ -4,19 +4,26 @@ from typing import Any
 
 import mdtraj as md  # type: ignore
 import numpy as np
-import pytraj  # type: ignore
 from openff.toolkit.topology import Molecule  # type: ignore
 from openff.toolkit.utils.toolkits import AmberToolsToolkitWrapper  # type: ignore
 from openmm import Context, LangevinMiddleIntegrator, unit  # type: ignore
-from openmm.app import CutoffNonPeriodic, ForceField, HBonds, Modeller, PDBFile  # type: ignore
+from openmm.app import (  # type: ignore
+    CutoffNonPeriodic,
+    ForceField,
+    HBonds,
+    Modeller,
+    PDBFile,
+    Topology,
+)
 from openmmforcefields.generators import SMIRNOFFTemplateGenerator  # type: ignore
 from pymbar import timeseries
 from rdkit import Chem
+from scipy.spatial.distance import cdist
 from tqdm import tqdm
 
 
 # --- Create Systems for complex, protein, ligand ---
-def make_system(topology: Any, forcefield: ForceField) -> Any:
+def make_system(topology: Topology, forcefield: ForceField) -> Any:
     """
     Create an OpenMM System from the given topology and forcefield.
 
@@ -36,9 +43,6 @@ def make_system(topology: Any, forcefield: ForceField) -> Any:
         topology,
         nonbondedMethod=CutoffNonPeriodic,
         constraints=HBonds,
-        # implicitSolvent=OBC2,
-        # soluteDielectric=1.0,
-        # solventDielectric=80.0
     )
     return system
 
@@ -79,8 +83,6 @@ def get_interaction_energy(
     """
     complex = PDBFile(str(pdb_path))
 
-    print(complex.topology.getPeriodicBoxVectors())
-
     # Find all water residues
     modeller = Modeller(positions=complex.positions, topology=complex.topology)
     water_residues = []
@@ -98,33 +100,65 @@ def get_interaction_energy(
     ligand_rdmol = Chem.AddHs(Chem.MolFromMolFile(ligand_path, removeHs=False), addCoords=True)
 
     # Image in mdtraj
+    imaged_traj_path = str(traj_path).replace(".dcd", "_imaged.dcd")
     ref = md.load(str(pdb_path))
-    traj = md.load(str(traj_path), top=str(pdb_path))
+    traj_md = md.load(str(traj_path), top=str(pdb_path))
     protein_idxs = ref.topology.select("protein and name CA")
-    traj = traj.image_molecules()
-    traj = traj.superpose(traj[0], atom_indices=protein_idxs, ref_atom_indices=protein_idxs)
-    traj.save(str(traj_path))
-
-    # Get closest in pytraj
-    traj = pytraj.load(str(traj_path), top=str(pdb_path))
-    traj = pytraj.center(traj)  # centers protein in box
-    traj = traj.strip(":NA,CL")  # remove ions
-    traj = pytraj.align(traj, ref=0, mask="@CA")  # optional alignment
-    traj_closest = pytraj.closest(
-        traj,
-        mask=f":{ligand_resname}",
-        n_solvents=n_closest_waters,
-        dtype="trajectory",
-        top=traj.topology,
+    traj_md = traj_md.image_molecules()
+    traj_md = traj_md.superpose(
+        traj_md[0], atom_indices=protein_idxs, ref_atom_indices=protein_idxs
     )
+    traj_md.save(imaged_traj_path)
 
-    rmsd = pytraj.rmsd(traj, mask=f":{ligand_resname}", ref=0)
+    # Clean up protein/ligand
+    # We want: protein, the ligand, and all waters.
+    water_res = [
+        r for r in ref.topology.residues if r.name in ("HOH", "WAT", "TIP3", "TIP4", "TIP5")
+    ]
+    water_atom_idxs = np.array([[a.index for a in r.atoms] for r in water_res])
 
-    traj_closest.top.save(str(close_top_path))
-    pytraj.write_traj(str(close_traj_path), traj_closest, overwrite=True)
+    keep_base_idxs = [
+        a.index
+        for a in ref.topology.atoms
+        if a.residue.name not in ("HOH", "WAT", "TIP3", "TIP4", "TIP5", "NA", "CL")
+    ]
 
-    lig_mask = traj_closest.top.select(f":{ligand_resname}")
-    prot_mask = traj_closest.top.select(f"!:{ligand_resname}")
+    ligand_idxs = ref.topology.select(f"resname {ligand_resname}")
+    rmsd = md.rmsd(traj_md, traj_md[0], atom_indices=ligand_idxs)
+
+    closest_xyz = []
+
+    if len(water_atom_idxs) > 0:
+        water_O_idxs = water_atom_idxs[:, 0]
+        for i in range(traj_md.n_frames):
+            lig_coords = traj_md.xyz[i, ligand_idxs, :]
+            wat_coords = traj_md.xyz[i, water_O_idxs, :]
+
+            dists = cdist(wat_coords, lig_coords)
+            min_dists = dists.min(axis=1)
+
+            closest_wat = np.argsort(min_dists)[:n_closest_waters]
+            closest_wat_atoms = water_atom_idxs[closest_wat].flatten()
+
+            frame_atoms = np.concatenate([keep_base_idxs, closest_wat_atoms])
+            frame_xyz = traj_md.xyz[i, frame_atoms, :]
+            closest_xyz.append(frame_xyz)
+    else:
+        for i in range(traj_md.n_frames):
+            closest_xyz.append(traj_md.xyz[i, keep_base_idxs, :])
+
+    closest_xyz = np.array(closest_xyz)
+
+    # Save the processed topology and DCD using MDTraj directly
+    openmm_top_mdtraj = md.Topology.from_openmm(modeller.topology)
+    traj_closest = md.Trajectory(xyz=closest_xyz, topology=openmm_top_mdtraj)
+
+    # Save a PDB as the topology and DCD for the trajectory
+    traj_closest[0].save_pdb(str(close_top_path).replace(".prmtop", ".pdb"))
+    traj_closest.save_dcd(str(close_traj_path))
+
+    lig_mask = traj_closest.topology.select(f"resname {ligand_resname}")
+    prot_mask = traj_closest.topology.select(f"not resname {ligand_resname}")
 
     offmol = Molecule.from_rdkit(ligand_rdmol, allow_undefined_stereo=False)
     offmol.assign_partial_charges(
@@ -175,8 +209,8 @@ def get_interaction_energy(
     context_ligand = Context(system_ligand, integrator_ligand)
 
     energies = []
-    for frame in tqdm(traj_closest):
-        pos = frame.xyz * unit.angstrom
+    for frame_xyz in tqdm(closest_xyz):
+        pos = frame_xyz * unit.nanometers
 
         # Set positions for each system
         context_complex.setPositions(pos)
@@ -206,26 +240,16 @@ def get_interaction_energy(
     energy = np.array(energies)
 
     # Find equilibrated and decorrelated frames/energies
-    t0, g, Neff_max = timeseries.detect_equilibration(energy)
+    t0, g, _Neff_max = timeseries.detect_equilibration(energy)
 
-    print("Neff_max", Neff_max)
     energy_eq = energy[t0:]
-    traj_closest_eq = traj_closest[t0:]
+    closest_xyz_eq = closest_xyz[t0:]
     idx = timeseries.subsample_correlated_data(energy_eq, g=g)
     energy = energy_eq[idx]
-    traj_closest = traj_closest_eq[idx]
-    pytraj.write_traj(str(close_traj_path), traj_closest, overwrite=True)
 
-    return energies, rmsd, close_top_path, close_traj_path
+    # Update the final exported closest trajectory with decorrelated frames
+    final_eq_xyz = closest_xyz_eq[idx]
+    traj_final = md.Trajectory(xyz=final_eq_xyz, topology=openmm_top_mdtraj)
+    traj_final.save_dcd(str(close_traj_path))
 
-
-if __name__ == "__main__":
-    energies = get_interaction_energy(
-        pdb_path="data/trajectories/Glue/CDC34-UBB/UM0131538/replica_0/com.pdb",
-        traj_path="data/trajectories/Glue/CDC34-UBB/UM0131538/replica_0/com.nc",
-        ligand_path="data/trajectories/Glue/CDC34-UBB/UM0131538/replica_0/lig.sdf",
-        close_traj_path="data/trajectories/Glue/CDC34-UBB/UM0131538/replica_0/close_traj.nc",
-        close_top_path="data/trajectories/Glue/CDC34-UBB/UM0131538/replica_0/close_top.prmtop",
-    )
-
-    print(energies)
+    return energies, rmsd, str(close_top_path).replace(".prmtop", ".pdb"), str(close_traj_path)

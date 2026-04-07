@@ -4,7 +4,7 @@ import io
 import logging
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import numpy as np
 from openff.toolkit.topology import Molecule  # type: ignore
@@ -31,7 +31,7 @@ def relax_complex(
 
     smirnoff = SMIRNOFFTemplateGenerator(forcefield="openff-2.2.0.offxml", molecules=offmol)
 
-    files = [
+    files: Final[list[str]] = [
         "amber/ff14SB.xml",
         "amber/phosaa10.xml",
         "amber/tip3p_standard.xml",

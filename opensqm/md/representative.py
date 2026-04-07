@@ -2,6 +2,7 @@
 
 import mdtraj as md  # type: ignore
 import numpy as np
+from loguru import logger
 from openmm.app import Modeller  # type: ignore
 from sklearn.cluster import DBSCAN
 
@@ -34,6 +35,7 @@ def get_representative_frame(
     all_trajs: list[str],
     all_energies: list[float] | np.ndarray,
     lig_resname: str = "LIG",
+    cluster_eps: float = 1.0,
 ) -> tuple[Modeller, float]:
     """
     Get the most representative MD frame based on RMSD clustering and lowest energy.
@@ -71,8 +73,9 @@ def get_representative_frame(
 
     rmsd_matrix = calculate_rmsd_matrix(traj.xyz[:, lig_atoms, :])
 
-    # 4. Cluster using DBSCAN on precomputed RMSD
-    clusterer = DBSCAN(eps=1.0, min_samples=2, metric="precomputed")
+    # 4. Cluster using DBSCAN on precomputed RMSD in nm
+    cluster_eps_nm = cluster_eps / 10.0
+    clusterer = DBSCAN(eps=cluster_eps_nm, min_samples=2, metric="precomputed")
 
     labels = clusterer.fit_predict(rmsd_matrix)
 
@@ -81,7 +84,8 @@ def get_representative_frame(
     if len(cluster_ids) == 0:
         raise ValueError("No clusters found — adjust eps or min_samples.")
 
-    print(counts)
+    for cid, count in zip(cluster_ids, counts, strict=False):
+        logger.info(f"  Cluster {cid}: {count} samples")
 
     largest_cluster = cluster_ids[counts.argmax()]
     in_cluster = labels == largest_cluster
@@ -103,4 +107,6 @@ def get_representative_frame(
     best_energy = energy[best_idx]
 
     best_modeller = Modeller(traj.top.to_openmm(), best_positions)
+
+    logger.info(f"Best energy: {best_energy}")
     return best_modeller, best_energy

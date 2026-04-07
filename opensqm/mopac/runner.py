@@ -1,22 +1,17 @@
 # ruff: noqa: D100, D103, E501
+import os
 import subprocess
 from pathlib import Path
 
 from opensqm.mopac.exceptions import MOPACError
 
-
-def _mopac_executable() -> str:
-    """Resolve MOPAC CLI the same way pymopac's MopacInput does (see pymopac.input.silentRun)."""
-    from pymopac.helpers import get_mopac  # noqa: PLC0415
-
-    return get_mopac() or "mopac"
+MOPAC_BIN = os.getenv("MOPAC_BIN", "mopac")
 
 
 def _run_mopac_input_file(mopac_input: Path, *, cwd: Path) -> None:
     """Run MOPAC on a control file using list subprocess (no shell), matching pymopac.MopacInput.silentRun."""
-    exe = _mopac_executable()
     result = subprocess.run(
-        [exe, str(mopac_input)],
+        [MOPAC_BIN, str(mopac_input)],
         cwd=str(cwd),
         capture_output=True,
         text=True,
@@ -24,7 +19,7 @@ def _run_mopac_input_file(mopac_input: Path, *, cwd: Path) -> None:
     )
     if result.returncode != 0:
         raise MOPACError(
-            f"MOPAC failed (exit {result.returncode}, exe={exe!r})\n"
+            f"MOPAC failed (exit {result.returncode}, exe={MOPAC_BIN!r})\n"
             f"stdout:\n{result.stdout}\nostderr:\n{result.stderr}"
         )
 

@@ -65,8 +65,8 @@ class SQMOutput(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    dE_int: float
-    dE_ligand_strain: float
+    interaction_energy: float
+    ligand_strain: float
     E_complex: float
     E_protein: float
     E_ligand: float
@@ -152,23 +152,23 @@ def run_sqm(inp: SQMConfig) -> SQMOutput:
         ligand_free, use_mozyme=True, solvent="cosmo2", charge=ligand_charge
     )
 
-    dE_ligand_strain = E_ligand_bound - E_ligand_free
+    ligand_strain = E_ligand_bound - E_ligand_free
 
     scores = run_interaction_energy(ligand=ligand, protein=protein)
-    score = scores["dE_int"] + G_Hplus + dE_ligand_strain
+    score = scores["interaction_energy"] + G_Hplus + ligand_strain
 
     logger.info(
-        f"dE_int: {scores['dE_int']:.2f}, G_Hplus: {G_Hplus:.2f}, "
-        f"dE_ligand_strain: {dE_ligand_strain:.2f}, score: {score:.2f}"
+        f"interaction_energy: {scores['interaction_energy']:.2f}, G_Hplus: {G_Hplus:.2f}, "
+        f"ligand_strain: {ligand_strain:.2f}, score: {score:.2f}"
     )
 
     return SQMOutput(
-        dE_int=scores["dE_int"],
+        interaction_energy=scores["interaction_energy"],
         E_complex=scores["E_complex"],
         E_protein=scores["E_protein"],
         E_ligand=scores["E_ligand"],
         G_Hplus=G_Hplus,
-        dE_ligand_strain=dE_ligand_strain,
+        ligand_strain=ligand_strain,
         score=score,
     )
 

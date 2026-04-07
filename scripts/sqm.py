@@ -3,7 +3,7 @@
 import os
 import sys
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import click
 import pandas as pd
@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict
 from rdkit import Chem
 from rdkit.Chem import rdMolAlign
 from tqdm.auto import tqdm
+from sqlitedict import SqliteDict
 from unipka import UnipKa
 
 from opensqm.md.relax import relax_complex
@@ -35,6 +36,7 @@ NUM_CPUS: Final[int] = int(os.environ.get("NUM_CPUS", "5"))
 
 class OptimisationSettings(BaseModel):
     """Settings for the optimisation process."""
+    model_config = ConfigDict(frozen=True)
 
     sqm_optimise: bool = True
     mm_optimise: bool = True
@@ -56,16 +58,6 @@ class SQMConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
     complex: Complex
     settings: OptimisationSettings
-
-    def __hash__(self) -> int:
-        """xxHash-64 of complex id and both paths (POSIX), in order."""
-        h = xxhash.xxh64()
-        h.update(self.complex.complex_id.encode("utf-8"))
-        h.update(b"\0")
-        for path in (self.complex.protein_file, self.complex.ligand_file):
-            h.update(path.expanduser().as_posix().encode("utf-8"))
-            h.update(b"\0")
-        return h.intdigest()
 
 
 class SQMOutput(BaseModel):
@@ -181,6 +173,22 @@ def run_sqm(inp: SQMConfig) -> SQMOutput:
     )
 
 
+def process_ray_futures(futures: list[ray.ObjectRef], desc: str = "Processing") -> list[Any]:
+    """Process ray futures with a tqdm progress bar, returning results in original order."""
+    results: dict[int, Any] = {}
+    future_to_idx = {f: i for i, f in enumerate(futures)}
+    unready = list(futures)
+
+    with tqdm(total=len(futures), desc=desc) as pbar:
+        while unready:
+            ready, unready = ray.wait(unready, num_returns=1)
+            for f in ready:
+                results[future_to_idx[f]] = ray.get(f)
+                pbar.update(1)
+
+    return [results[i] for i in range(len(futures))]
+
+
 def _run_local_env() -> bool:
     v = os.environ.get("RUN_LOCAL", "").strip()
     return v == "1" or v.lower() == "true"
@@ -195,7 +203,12 @@ def _run_local_env() -> bool:
     default="data/outputs",
     help="Directory to save outputs",
 )
-def cli(dataframe_path: Path, settings_path: Path | None = None, output_dir: Path | None = None):
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    help="Overwrite existing results in the database",
+)
+def cli(dataframe_path: Path, settings_path: Path | None = None, output_dir: Path | None = None, overwrite: bool = False):
     """Run the SQM CLI."""
     output_dir = output_dir or Path("data/outputs")
     output_dir.mkdir(exist_ok=True, parents=True)
@@ -211,33 +224,50 @@ def cli(dataframe_path: Path, settings_path: Path | None = None, output_dir: Pat
     if not run_local:
         ray.init(num_cpus=NUM_CPUS, ignore_reinit_error=True)
 
-    df = pd.read_csv(dataframe_path)
+    df = pd.read_csv(dataframe_path).head(10)
     if "protein" in df.columns:
         df = df.dropna(subset=["protein"])
 
-    inputs = [
-        SQMConfig(
-            complex=Complex(
-                complex_id=str(row.id),  # type: ignore
-                protein_file=Path(row.protein),  # type: ignore
-                ligand_file=Path(row.ligand),  # type: ignore
-            ),
-            settings=settings,
+    db = SqliteDict("data/outputs/results.sqlite", autocommit=True)
+
+    inputs_to_run = []
+    all_results = {}
+
+    for row in df.itertuples():
+        complex_id = str(row.id)  # type: ignore
+        if not overwrite and complex_id in db:
+            result_json = db[complex_id]
+            all_results[complex_id] = SQMOutput.model_validate_json(result_json)
+            continue
+
+        inputs_to_run.append(
+            SQMConfig(
+                complex=Complex(
+                    complex_id=complex_id,
+                    protein_file=Path(row.protein),  # type: ignore
+                    ligand_file=Path(row.ligand),  # type: ignore
+                ),
+                settings=settings,
+            )
         )
-        for row in df.itertuples()
-    ]
 
-    if run_local:
-        results = [run_sqm(inp) for inp in tqdm(inputs, desc="SQM")]
-    else:
-        futures = [
-            run_sqm_wrapper.remote(inp, output_dir)
-            for inp in tqdm(inputs, total=len(inputs), desc="Submitting")
-        ]
-        results = ray.get(futures)
+    if inputs_to_run:
+        if run_local:
+            new_results = [run_sqm(inp) for inp in tqdm(inputs_to_run, desc="SQM")]
+        else:
+            futures = [run_sqm_wrapper.remote(inp, output_dir) for inp in inputs_to_run]
+            new_results = process_ray_futures(futures, desc="Processing")
 
-    scores_df = pd.DataFrame([r.model_dump() for r in results])
-    scores_df["complex_id"] = [inp.complex.complex_id for inp in inputs]
+        for inp, result in zip(inputs_to_run, new_results):
+            all_results[inp.complex.complex_id] = result
+            db[inp.complex.complex_id] = result.model_dump_json()
+
+    db.close()
+
+    results_list = [all_results[str(row.id)] for row in df.itertuples() if str(row.id) in all_results]
+
+    scores_df = pd.DataFrame([r.model_dump() for r in results_list])
+    scores_df["complex_id"] = [str(row.id) for row in df.itertuples() if str(row.id) in all_results]
     if len(scores_df) > 1 and "pX" in df.columns:
         scores_df = scores_df.loc[scores_df.groupby("complex_id")["score"].idxmin()]
         corr = scipy.stats.spearmanr(scores_df["score"], df.loc[scores_df.index, "pX"])

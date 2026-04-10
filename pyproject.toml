@@ -23,7 +23,8 @@ dependencies = [
     "pymbar",
     "click",
     "scipy",
-    "pyyaml"
+    "pyyaml",
+    "sqlitedict>=2.1.0",
 ]
 
 [tool.pixi.workspace]

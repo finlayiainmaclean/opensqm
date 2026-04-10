@@ -21,6 +21,7 @@ logging.getLogger("openff.interchange.smirnoff").setLevel(logging.WARNING)
 logging.getLogger("openmmforcefields.generators.template_generators").setLevel(logging.WARNING)
 
 
+
 def relax_complex(
     *, ligand: Chem.Mol, protein: Chem.Mol, simulation_time: float = 60
 ) -> tuple[Chem.Mol, Chem.Mol]:

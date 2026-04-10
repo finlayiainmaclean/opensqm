@@ -72,6 +72,10 @@ dev = [
     "ty"
 ]
 
+[tool.ty.analysis]
+# OpenMM stack is a Pixi/conda dependency; uv's default venv often lacks these packages.
+allowed-unresolved-imports = ["openmm.**", "openmmforcefields.**", "pdbfixer.**"]
+
 [tool.ruff]
 line-length = 100
 extend-exclude = ["*.ipynb"]

@@ -4,9 +4,9 @@ from pathlib import Path
 
 import click
 import numpy as np
-from openmm import unit  # type: ignore[unresolved-import]
-from openmm.app import Atom, Modeller, PDBFile, Residue, Topology  # type: ignore[unresolved-import]
-from pdbfixer import PDBFixer  # type: ignore[unresolved-import]
+from openmm import unit
+from openmm.app import Atom, Modeller, PDBFile, Residue, Topology
+from pdbfixer import PDBFixer
 
 # Max allowed distance (nm) before we consider the chain broken
 BREAK_THRESHOLD_NM = 0.25  # ~2.5 Å — generous but catches true breaks

@@ -2,12 +2,12 @@
 
 from typing import Any
 
-import mdtraj as md  # type: ignore
+import mdtraj as md
 import numpy as np
 from openff.toolkit.topology import Molecule  # type: ignore
 from openff.toolkit.utils.toolkits import AmberToolsToolkitWrapper  # type: ignore
-from openmm import Context, LangevinMiddleIntegrator, unit  # type: ignore
-from openmm.app import (  # type: ignore
+from openmm import Context, LangevinMiddleIntegrator, unit
+from openmm.app import (
     CutoffNonPeriodic,
     ForceField,
     HBonds,
@@ -15,11 +15,33 @@ from openmm.app import (  # type: ignore
     PDBFile,
     Topology,
 )
-from openmmforcefields.generators import SMIRNOFFTemplateGenerator  # type: ignore
+from openmmforcefields.generators import SMIRNOFFTemplateGenerator
 from pymbar import timeseries
 from rdkit import Chem
 from scipy.spatial.distance import cdist
 from tqdm import tqdm
+
+
+def _openmm_atom_lookup_key(atom: Any) -> tuple[Any, ...]:
+    rid = atom.residue.id
+    try:
+        rid_i = int(rid)
+    except (TypeError, ValueError):
+        rid_i = rid
+    return (atom.residue.chain.id, rid_i, atom.residue.name.strip(), atom.name.strip())
+
+
+def _mdtraj_atom_lookup_key(atom: Any) -> tuple[Any, ...]:
+    ch = atom.residue.chain
+    cid = getattr(ch, "chain_id", None)
+    if cid is None:
+        cid = str(ch.index)
+    return (
+        str(cid).strip(),
+        int(atom.residue.resSeq),
+        atom.residue.name.strip(),
+        atom.name.strip(),
+    )
 
 
 # --- Create Systems for complex, protein, ligand ---
@@ -117,35 +139,50 @@ def get_interaction_energy(
     ]
     water_atom_idxs = np.array([[a.index for a in r.atoms] for r in water_res])
 
-    keep_base_idxs = [
-        a.index
-        for a in ref.topology.atoms
-        if a.residue.name not in ("HOH", "WAT", "TIP3", "TIP4", "TIP5", "NA", "CL")
-    ]
-
     ligand_idxs = ref.topology.select(f"resname {ligand_resname}")
     rmsd = md.rmsd(traj_md, traj_md[0], atom_indices=ligand_idxs)
+
+    # Map each OpenMM modeller atom (protein → retained waters → ligand) to a static
+    # mdtraj index in the full trajectory. Waters use -1 and are filled per-frame from
+    # the closest n water molecules so coordinates match modeller.topology order.
+    ref_key_to_idx = {_mdtraj_atom_lookup_key(a): a.index for a in ref.topology.atoms}
+    n_omm = modeller.topology.getNumAtoms()
+    ref_by_omm = np.full(n_omm, -1, dtype=np.int64)
+    for omm_atom in modeller.topology.atoms():
+        if omm_atom.residue.name in ("HOH", "WAT", "TIP3", "TIP4", "TIP5"):
+            continue
+        ref_by_omm[omm_atom.index] = ref_key_to_idx[_openmm_atom_lookup_key(omm_atom)]
+    water_omm_indices = np.flatnonzero(ref_by_omm < 0)
+    if (
+        len(water_atom_idxs) > 0
+        and len(water_omm_indices) != n_closest_waters * water_atom_idxs.shape[1]
+    ):
+        raise ValueError(
+            "Water atom count in modeller does not match "
+            "n_closest_waters * atoms per water residue."
+        )
 
     closest_xyz = []
 
     if len(water_atom_idxs) > 0:
         water_O_idxs = water_atom_idxs[:, 0]
+        static_mask = ref_by_omm >= 0
         for i in range(traj_md.n_frames):
-            lig_coords = traj_md.xyz[i, ligand_idxs, :]
-            wat_coords = traj_md.xyz[i, water_O_idxs, :]
+            full = traj_md.xyz[i]
+            frame_xyz = np.empty((n_omm, 3), dtype=np.float64)
+            frame_xyz[static_mask] = full[ref_by_omm[static_mask]]
 
+            lig_coords = full[ligand_idxs, :]
+            wat_coords = full[water_O_idxs, :]
             dists = cdist(wat_coords, lig_coords)
             min_dists = dists.min(axis=1)
-
             closest_wat = np.argsort(min_dists)[:n_closest_waters]
-            closest_wat_atoms = water_atom_idxs[closest_wat].flatten()
-
-            frame_atoms = np.concatenate([keep_base_idxs, closest_wat_atoms])
-            frame_xyz = traj_md.xyz[i, frame_atoms, :]
+            closest_flat = water_atom_idxs[closest_wat].flatten()
+            frame_xyz[water_omm_indices] = full[closest_flat, :]
             closest_xyz.append(frame_xyz)
     else:
         for i in range(traj_md.n_frames):
-            closest_xyz.append(traj_md.xyz[i, keep_base_idxs, :])
+            closest_xyz.append(traj_md.xyz[i][ref_by_omm, :])
 
     closest_xyz = np.array(closest_xyz)
 

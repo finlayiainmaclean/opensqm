@@ -2,7 +2,7 @@
 
 import numpy as np
 from loguru import logger
-from openmm.app import Atom, Modeller, Topology  # type: ignore[unresolved-import]
+from openmm.app import Atom, Modeller, Topology
 from rdkit import Chem
 
 

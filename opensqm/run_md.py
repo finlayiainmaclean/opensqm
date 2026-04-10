@@ -7,9 +7,9 @@ import click
 import numpy as np
 import pandas as pd
 from loguru import logger
-from openmm import unit  # type: ignore
-from openmm.app import Modeller  # type: ignore
-from openmm.app.pdbfile import PDBFile  # type: ignore
+from openmm import unit
+from openmm.app import Modeller
+from openmm.app.pdbfile import PDBFile
 from rdkit import Chem
 from tqdm import tqdm
 

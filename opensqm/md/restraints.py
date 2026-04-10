@@ -4,13 +4,13 @@ from collections.abc import Generator, Sequence
 from typing import Literal
 
 import numpy as np
-from openmm import (  # type: ignore
+from openmm import (
     CustomExternalForce,
     unit,
 )
-from openmm.app.topology import Atom  # type: ignore
-from openmm.openmm import System  # type: ignore
-from openmm.unit import Quantity  # type: ignore
+from openmm.app.topology import Atom
+from openmm.openmm import System
+from openmm.unit import Quantity
 
 
 def add_distal_restraints(

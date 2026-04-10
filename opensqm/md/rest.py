@@ -5,7 +5,7 @@ import copy
 import typing
 
 import numpy as np
-from openmm import (  # type: ignore
+from openmm import (
     CustomNonbondedForce,
     CustomTorsionForce,
     HarmonicAngleForce,

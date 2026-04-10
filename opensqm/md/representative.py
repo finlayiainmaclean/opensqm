@@ -1,9 +1,9 @@
 """Module for obtaining a representative structural frame from MD trajectories."""
 
-import mdtraj as md  # type: ignore
+import mdtraj as md
 import numpy as np
 from loguru import logger
-from openmm.app import Modeller  # type: ignore
+from openmm.app import Modeller
 from sklearn.cluster import DBSCAN
 
 

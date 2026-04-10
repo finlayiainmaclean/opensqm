@@ -1,6 +1,6 @@
 """Module for running energy minimization on OpenMM Modeller objects."""
 
-from openmm import LangevinIntegrator, app, unit  # type: ignore
+from openmm import LangevinIntegrator, app, unit
 
 
 def minimize(

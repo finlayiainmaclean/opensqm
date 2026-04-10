@@ -9,9 +9,9 @@ from typing import Any, Final
 import numpy as np
 from openff.toolkit.topology import Molecule  # type: ignore
 from openff.toolkit.utils.toolkits import AmberToolsToolkitWrapper  # type: ignore
-from openmm import LangevinMiddleIntegrator, app, unit  # type: ignore
-from openmm.app import Modeller, PDBFile  # type: ignore
-from openmmforcefields.generators import SMIRNOFFTemplateGenerator  # type: ignore
+from openmm import LangevinMiddleIntegrator, app, unit
+from openmm.app import Modeller, PDBFile
+from openmmforcefields.generators import SMIRNOFFTemplateGenerator
 from rdkit import Chem
 
 from opensqm.md.restraints import add_distal_restraints, add_restraints

@@ -7,9 +7,9 @@ import click
 import numpy as np
 import pandas as pd
 from loguru import logger
-from openmm import unit  # type: ignore
-from openmm.app import Modeller  # type: ignore
-from openmm.app.pdbfile import PDBFile  # type: ignore
+from openmm import unit
+from openmm.app import Modeller
+from openmm.app.pdbfile import PDBFile
 from rdkit import Chem
 from tqdm import tqdm
 
@@ -59,7 +59,7 @@ def main(
     topology, positions, forcefield = prepare_complex(ligand_rdmol, protein)
     PDBFile.writeFile(topology, positions, open(topology_path, "w"), keepIds=True)
     logger.info("Equilibrating complex")
-    topology, positions = equilibrate(topology, positions, forcefield, npt_ps=200, warmup_ps=60)
+    topology, positions = equilibrate(topology, positions, forcefield, npt_ps=30, warmup_ps=10)
     PDBFile.writeFile(topology, positions, open(equil_pdb_path, "w"), keepIds=True)
 
     all_trajs = []
@@ -84,6 +84,8 @@ def main(
             log_ps=1,
         )
 
+        print(equil_pdb_path, trajectory_path, close_top_path, close_trajectory_path)
+
         energies, rmsd, close_top_path, close_traj_path = get_interaction_energy(
             pdb_path=str(equil_pdb_path),
             traj_path=str(trajectory_path),
@@ -92,6 +94,8 @@ def main(
             ligand_path=ligand,
             n_closest_waters=n_closest_waters,
         )
+
+        print(energies)
 
         logger.info(f"Ligand RMSD: {rmsd.mean()}")
 

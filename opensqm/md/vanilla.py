@@ -6,10 +6,11 @@ import time
 from pathlib import Path
 
 import numpy as np
-from mdtraj.reporters import DCDReporter  # type: ignore
+from mdtraj.reporters import DCDReporter
 from openff.toolkit.topology import Molecule  # type: ignore
 from openff.toolkit.utils.toolkits import AmberToolsToolkitWrapper  # type: ignore
-from openmm import (  # type: ignore
+from openmm import (
+    CMMotionRemover,
     LangevinMiddleIntegrator,
     MonteCarloBarostat,
     State,
@@ -17,10 +18,10 @@ from openmm import (  # type: ignore
     app,
     unit,
 )
-from openmm.app import Modeller  # type: ignore
-from openmm.app.forcefield import ForceField  # type: ignore
-from openmm.app.topology import Topology  # type: ignore
-from openmmforcefields.generators import SMIRNOFFTemplateGenerator  # type: ignore
+from openmm.app import Modeller
+from openmm.app.forcefield import ForceField
+from openmm.app.topology import Topology
+from openmmforcefields.generators import SMIRNOFFTemplateGenerator
 from rdkit import Chem
 from tqdm import tqdm
 
@@ -47,6 +48,7 @@ def create_system(forcefield: ForceField, topology: Topology, rest_ligand: bool 
         if ligand_idxs:
             apply_rest(system, ligand_idxs)
 
+    system.addForce(CMMotionRemover())
     return system
 
 

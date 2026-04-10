@@ -6539,7 +6539,7 @@ packages:
 - pypi: ./
   name: opensqm
   version: 0.0.1
-  sha256: 42fced7f7d97a595cf8dbf61bf5591682255b47c1f010d66c6e8dee1d330ffab
+  sha256: 061c102da243144e1cae4f44f144d8de192a654da9e0c9e4c5dd12ad79b9fe67
   requires_dist:
   - loguru
   - pandas

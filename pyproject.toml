@@ -39,6 +39,7 @@ openmmforcefields = "*"
 mdtraj = "*"
 ase = ">=3.23.0"
 pymbar = ">=4.2.0,<5"
+xmltodict = ">=1.0.2,<2"
 
 [tool.pixi.pypi-dependencies]
 opensqm = { path = ".", editable = true }
@@ -50,7 +51,7 @@ dev = { features = ["dev"], solve-group = "default"}
 [tool.pixi.feature.dev.tasks]
 fmt = { cmd="ruff format ." }
 lint = { cmd="ruff check . --fix" }
-types = { cmd="ty check" }
+types = { cmd="ty check --exclude '*.ipynb'" }
 test = { cmd="pytest" }
 all = { depends-on = ["fmt", "lint", "types", "test"] }
 
@@ -73,6 +74,7 @@ dev = [
 
 [tool.ruff]
 line-length = 100
+extend-exclude = ["*.ipynb"]
 
 [tool.ruff.lint]
 select = [

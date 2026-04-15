@@ -16,11 +16,15 @@ dependencies = [
     "rdkit",
     "unipka",
     "rdsl",
-    "pymopac>=1.1",
     "pydantic>=2",
     "xxhash>=3",
     "ray[default]",
-    
+    "scikit-learn",
+    "pymbar",
+    "click",
+    "scipy",
+    "pyyaml",
+    "sqlitedict>=2.1.0",
 ]
 
 [tool.pixi.workspace]
@@ -33,6 +37,10 @@ openmm = "*"
 pdbfixer = "*"
 openff-toolkit = "*"
 openmmforcefields = "*"
+mdtraj = "*"
+ase = ">=3.23.0"
+pymbar = ">=4.2.0,<5"
+xmltodict = ">=1.0.2,<2"
 
 [tool.pixi.pypi-dependencies]
 opensqm = { path = ".", editable = true }
@@ -44,7 +52,7 @@ dev = { features = ["dev"], solve-group = "default"}
 [tool.pixi.feature.dev.tasks]
 fmt = { cmd="ruff format ." }
 lint = { cmd="ruff check . --fix" }
-types = { cmd="ty check" }
+types = { cmd="ty check --exclude '*.ipynb'" }
 test = { cmd="pytest" }
 all = { depends-on = ["fmt", "lint", "types", "test"] }
 
@@ -65,8 +73,13 @@ dev = [
     "ty"
 ]
 
+[tool.ty.analysis]
+# OpenMM stack is a Pixi/conda dependency; uv's default venv often lacks these packages.
+allowed-unresolved-imports = ["openmm.**", "openmmforcefields.**", "pdbfixer.**"]
+
 [tool.ruff]
 line-length = 100
+extend-exclude = ["*.ipynb"]
 
 [tool.ruff.lint]
 select = [
@@ -113,3 +126,6 @@ doctest_optionflags = "NORMALIZE_WHITESPACE"
 [build-system]
 build-backend = "hatchling.build"
 requires = ["hatchling"]
+
+[tool.deptry.per_rule_ignores]
+DEP001 = ["openmm", "openmmforcefields", "openff", "mdtraj", "pytraj", "pdbfixer"]

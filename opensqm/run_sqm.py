@@ -3,6 +3,7 @@
 import os
 import sys
 from pathlib import Path
+from typing import Any, Final
 
 import click
 import pandas as pd
@@ -15,6 +16,7 @@ from pydantic import BaseModel, ConfigDict
 from rdkit import Chem
 from rdkit.Chem import rdMolAlign
 from tqdm.auto import tqdm
+from sqlitedict import SqliteDict
 from unipka import UnipKa
 
 from opensqm.md.relax import relax_complex
@@ -29,9 +31,12 @@ from opensqm.rdkit_utils import crop_and_cap_protein, set_residue_info
 logger.remove()
 logger.add(sys.stderr, level="INFO")
 
+NUM_CPUS: Final[int] = int(os.environ.get("NUM_CPUS", "5"))
+
 
 class OptimisationSettings(BaseModel):
     """Settings for the optimisation process."""
+    model_config = ConfigDict(frozen=True)
 
     sqm_optimise: bool = True
     mm_optimise: bool = True
@@ -54,24 +59,14 @@ class SQMConfig(BaseModel):
     complex: Complex
     settings: OptimisationSettings
 
-    def __hash__(self) -> int:
-        """xxHash-64 of complex id and both paths (POSIX), in order."""
-        h = xxhash.xxh64()
-        h.update(self.complex.complex_id.encode("utf-8"))
-        h.update(b"\0")
-        for path in (self.complex.protein_file, self.complex.ligand_file):
-            h.update(path.expanduser().as_posix().encode("utf-8"))
-            h.update(b"\0")
-        return h.intdigest()
-
 
 class SQMOutput(BaseModel):
     """Interaction energies and combined score from one SQM run."""
 
     model_config = ConfigDict(frozen=True)
 
-    dE_int: float
-    dE_ligand_strain: float
+    interaction_energy: float
+    ligand_strain: float
     E_complex: float
     E_protein: float
     E_ligand: float
@@ -149,12 +144,7 @@ def run_sqm(inp: SQMConfig) -> SQMOutput:
         ligand, mopac_keywords=["PM6-D3H4X", "EPS=78.5"], charge=ligand_charge
     )
 
-    try:
-        ligand_rmsd = rdMolAlign.CalcRMS(ligand_free, ligand)
-    except Exception as e:
-        Chem.MolToMolFile(ligand_free, "/tmp/ligand_free.sdf")
-        Chem.MolToMolFile(ligand, "/tmp/ligand.sdf")
-        raise ValueError("Could not calculate ligand RMSD") from e
+    ligand_rmsd = rdMolAlign.CalcRMS(ligand_free, ligand)
 
     logger.info(f"Ligand RMSD: {ligand_rmsd}")
 
@@ -162,25 +152,41 @@ def run_sqm(inp: SQMConfig) -> SQMOutput:
         ligand_free, use_mozyme=True, solvent="cosmo2", charge=ligand_charge
     )
 
-    dE_ligand_strain = E_ligand_bound - E_ligand_free
+    ligand_strain = E_ligand_bound - E_ligand_free
 
     scores = run_interaction_energy(ligand=ligand, protein=protein)
-    score = scores["dE_int"] + G_Hplus + dE_ligand_strain
+    score = scores["interaction_energy"] + G_Hplus + ligand_strain
 
     logger.info(
-        f"dE_int: {scores['dE_int']:.2f}, G_Hplus: {G_Hplus:.2f}, "
-        f"dE_ligand_strain: {dE_ligand_strain:.2f}, score: {score:.2f}"
+        f"interaction_energy: {scores['interaction_energy']:.2f}, G_Hplus: {G_Hplus:.2f}, "
+        f"ligand_strain: {ligand_strain:.2f}, score: {score:.2f}"
     )
 
     return SQMOutput(
-        dE_int=scores["dE_int"],
+        interaction_energy=scores["interaction_energy"],
         E_complex=scores["E_complex"],
         E_protein=scores["E_protein"],
         E_ligand=scores["E_ligand"],
         G_Hplus=G_Hplus,
-        dE_ligand_strain=dE_ligand_strain,
+        ligand_strain=ligand_strain,
         score=score,
     )
+
+
+def process_ray_futures(futures: list[ray.ObjectRef], desc: str = "Processing") -> list[Any]:
+    """Process ray futures with a tqdm progress bar, returning results in original order."""
+    results: dict[int, Any] = {}
+    future_to_idx = {f: i for i, f in enumerate(futures)}
+    unready = list(futures)
+
+    with tqdm(total=len(futures), desc=desc) as pbar:
+        while unready:
+            ready, unready = ray.wait(unready, num_returns=1)
+            for f in ready:
+                results[future_to_idx[f]] = ray.get(f)
+                pbar.update(1)
+
+    return [results[i] for i in range(len(futures))]
 
 
 def _run_local_env() -> bool:
@@ -197,7 +203,12 @@ def _run_local_env() -> bool:
     default="data/outputs",
     help="Directory to save outputs",
 )
-def cli(dataframe_path: Path, settings_path: Path | None = None, output_dir: Path | None = None):
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    help="Overwrite existing results in the database",
+)
+def cli(dataframe_path: Path, settings_path: Path | None = None, output_dir: Path | None = None, overwrite: bool = False):
     """Run the SQM CLI."""
     output_dir = output_dir or Path("data/outputs")
     output_dir.mkdir(exist_ok=True, parents=True)
@@ -211,36 +222,55 @@ def cli(dataframe_path: Path, settings_path: Path | None = None, output_dir: Pat
 
     run_local = _run_local_env()
     if not run_local:
-        ray.init(num_cpus=5, ignore_reinit_error=True)
+        ray.init(num_cpus=NUM_CPUS, ignore_reinit_error=True)
 
-    df = pd.read_csv(dataframe_path)
+    df = pd.read_csv(dataframe_path).head(10)
     if "protein" in df.columns:
         df = df.dropna(subset=["protein"])
 
-    inputs = [
-        SQMConfig(
-            complex=Complex(
-                complex_id=str(row.id),
-                protein_file=Path(row.protein),
-                ligand_file=Path(row.ligand),
-            ),
-            settings=settings,
+    db = SqliteDict("data/outputs/results.sqlite", autocommit=True)
+
+    inputs_to_run = []
+    all_results = {}
+
+    for row in df.itertuples():
+        complex_id = str(row.id)  # type: ignore
+        if not overwrite and complex_id in db:
+            result_json = db[complex_id]
+            all_results[complex_id] = SQMOutput.model_validate_json(result_json)
+            continue
+
+        inputs_to_run.append(
+            SQMConfig(
+                complex=Complex(
+                    complex_id=complex_id,
+                    protein_file=Path(row.protein),  # type: ignore
+                    ligand_file=Path(row.ligand),  # type: ignore
+                ),
+                settings=settings,
+            )
         )
-        for row in df.itertuples()
-    ]
 
-    if run_local:
-        results = [run_sqm(inp) for inp in tqdm(inputs, desc="SQM")]
-    else:
-        futures = [
-            run_sqm_wrapper.remote(inp, output_dir)
-            for inp in tqdm(inputs, total=len(inputs), desc="Submitting")
-        ]
-        results = ray.get(futures)
+    if inputs_to_run:
+        if run_local:
+            new_results = [run_sqm(inp) for inp in tqdm(inputs_to_run, desc="SQM")]
+        else:
+            futures = [run_sqm_wrapper.remote(inp, output_dir) for inp in inputs_to_run]
+            new_results = process_ray_futures(futures, desc="Processing")
 
-    scores_df = pd.DataFrame([r.model_dump() for r in results])
+        for inp, result in zip(inputs_to_run, new_results):
+            all_results[inp.complex.complex_id] = result
+            db[inp.complex.complex_id] = result.model_dump_json()
+
+    db.close()
+
+    results_list = [all_results[str(row.id)] for row in df.itertuples() if str(row.id) in all_results]
+
+    scores_df = pd.DataFrame([r.model_dump() for r in results_list])
+    scores_df["complex_id"] = [str(row.id) for row in df.itertuples() if str(row.id) in all_results]
     if len(scores_df) > 1 and "pX" in df.columns:
-        corr = scipy.stats.spearmanr(scores_df["score"], df["pX"])
+        scores_df = scores_df.loc[scores_df.groupby("complex_id")["score"].idxmin()]
+        corr = scipy.stats.spearmanr(scores_df["score"], df.loc[scores_df.index, "pX"])
         logger.info(f"Spearman correlation: {corr}")
 
     scores_csv_path = output_dir / "scores.csv"

@@ -2,10 +2,11 @@
 
 from pathlib import Path
 
+import click
 import numpy as np
-from openmm import unit  # type: ignore[unresolved-import]
-from openmm.app import Atom, Modeller, PDBFile, Residue, Topology  # type: ignore[unresolved-import]
-from pdbfixer import PDBFixer  # type: ignore[unresolved-import]
+from openmm import unit
+from openmm.app import Atom, Modeller, PDBFile, Residue, Topology
+from pdbfixer import PDBFixer
 
 # Max allowed distance (nm) before we consider the chain broken
 BREAK_THRESHOLD_NM = 0.25  # ~2.5 Å — generous but catches true breaks
@@ -163,5 +164,28 @@ def run_pdbfixer(
     return fixer
 
 
+@click.command()
+@click.argument("input_protein_path", type=click.Path(exists=True, path_type=Path))
+@click.argument("output_protein_path", type=click.Path(path_type=Path))
+@click.option("--keep-waters", is_flag=True, help="Keep water molecules.")
+@click.option("--keep-ions/--no-keep-ions", default=True, help="Keep ion molecules.")
+@click.option("--ph", type=float, default=7.4, help="pH for adding missing hydrogens.")
+def main(
+    input_protein_path: Path,
+    output_protein_path: Path,
+    keep_waters: bool,
+    keep_ions: bool,
+    ph: float,
+):
+    """Run PDBFixer to prepare protein structures."""
+    run_pdbfixer(
+        input_protein_path,
+        output_protein_path,
+        keep_waters=keep_waters,
+        keep_ions=keep_ions,
+        ph=ph,
+    )
+
+
 if __name__ == "__main__":
-    run_pdbfixer(Path("/tmp/7RPZ.pdb"), Path("/tmp/prot.pdb"), keep_waters=False)
+    main()

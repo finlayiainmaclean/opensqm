@@ -284,6 +284,8 @@ def crop_and_cap_protein(
 
 
 if __name__ == "__main__":
+    from openmm import app
+
     protein = Chem.MolFromPDBFile(
         "data/inputs/PL-REX/003-CK2/1ZOH.prot.pdb", removeHs=False, sanitize=False
     )
@@ -291,4 +293,26 @@ if __name__ == "__main__":
 
     ligand = set_residue_info(ligand)
     capped_protein = crop_and_cap_protein(protein=protein, ligand=ligand, distance_to_ligand=10)
-    Chem.MolToPDBFile(capped_protein, "/tmp/capped_protein.pdb")
+
+    pdb_path = "/tmp/capped_protein.pdb"
+    Chem.MolToPDBFile(capped_protein, pdb_path)
+
+    # Validate that the cropped protein can be parameterised for MD
+    print("Validating cropped protein with OpenMM forcefield...")
+    files = [
+        "amber/ff14SB.xml",
+        "amber/phosaa10.xml",
+        "implicit/gbn2.xml",
+    ]
+    forcefield = app.ForceField(*files)
+
+    pdb = app.PDBFile(pdb_path)
+    modeller = app.Modeller(pdb.topology, pdb.positions)
+
+    try:
+        system = forcefield.createSystem(
+            modeller.topology, nonbondedMethod=app.NoCutoff, constraints=app.HBonds
+        )
+        print("Success! The cropped protein is valid for MD.")
+    except Exception as e:
+        print(f"Validation failed: {e}")

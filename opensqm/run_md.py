@@ -57,9 +57,10 @@ def main(
     protein = PDBFile(protein)
 
     topology, positions, forcefield = prepare_complex(ligand_rdmol, protein)
+    terminal_dihedrals = None
     PDBFile.writeFile(topology, positions, open(topology_path, "w"), keepIds=True)
     logger.info("Equilibrating complex")
-    topology, positions = equilibrate(topology, positions, forcefield, npt_ps=30, warmup_ps=10)
+    topology, positions = equilibrate(topology, positions, forcefield, npt_ps=60, warmup_ps=10)
     PDBFile.writeFile(topology, positions, open(equil_pdb_path, "w"), keepIds=True)
 
     all_trajs = []
@@ -82,6 +83,7 @@ def main(
             trajectory_path,
             run_time_ps=int(run_time * 1000),
             log_ps=1,
+            terminal_dihedrals=terminal_dihedrals,
         )
 
         print(equil_pdb_path, trajectory_path, close_top_path, close_trajectory_path)
@@ -94,8 +96,6 @@ def main(
             ligand_path=ligand,
             n_closest_waters=n_closest_waters,
         )
-
-        print(energies)
 
         logger.info(f"Ligand RMSD: {rmsd.mean()}")
 

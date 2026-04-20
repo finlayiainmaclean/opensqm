@@ -28,7 +28,7 @@ def _openmm_atom_lookup_key(atom: Any) -> tuple[Any, ...]:
         rid_i = int(rid)
     except (TypeError, ValueError):
         rid_i = rid
-    return (atom.residue.chain.id, rid_i, atom.residue.name.strip(), atom.name.strip())
+    return (str(atom.residue.chain.id).strip(), rid_i, atom.residue.name.strip(), atom.name.strip())
 
 
 def _mdtraj_atom_lookup_key(atom: Any) -> tuple[Any, ...]:

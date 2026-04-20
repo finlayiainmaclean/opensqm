@@ -21,7 +21,6 @@ logging.getLogger("openff.interchange.smirnoff").setLevel(logging.WARNING)
 logging.getLogger("openmmforcefields.generators.template_generators").setLevel(logging.WARNING)
 
 
-
 def relax_complex(
     *, ligand: Chem.Mol, protein: Chem.Mol, simulation_time: float = 60
 ) -> tuple[Chem.Mol, Chem.Mol]:
@@ -134,7 +133,7 @@ def anneal_and_minimise(
     )
     simulation = app.Simulation(topology, system0, integrator0)
     simulation.context.setPositions(positions)
-    simulation.minimizeEnergy()
+    simulation.minimizeEnergy(maxIterations=1000)
     simulation.context.setVelocitiesToTemperature(50 * unit.kelvin)
 
     annealing_steps = annealing_time / integrator_ps_per_step
@@ -158,14 +157,14 @@ def anneal_and_minimise(
     integrator1 = copy.deepcopy(integrator)
     simulation = app.Simulation(topology, system1, integrator1)
     simulation.context.setPositions(positions)
-    simulation.minimizeEnergy()
+    simulation.minimizeEnergy(maxIterations=1000)
     positions = simulation.context.getState(getPositions=True).getPositions()
 
     # Minimise the system without restraints
     integrator2 = copy.deepcopy(integrator)
     simulation = app.Simulation(topology, system, integrator2)
     simulation.context.setPositions(positions)
-    simulation.minimizeEnergy()
+    simulation.minimizeEnergy(maxIterations=1000)
 
     positions = simulation.context.getState(getPositions=True).getPositions()
 

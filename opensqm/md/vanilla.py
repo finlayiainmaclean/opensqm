@@ -27,6 +27,7 @@ from tqdm import tqdm
 
 from opensqm.md.rest import apply_rest
 from opensqm.md.restraints import add_distal_restraints, add_restraints
+from opensqm.md.terminal_ring_mc import TerminalRingMC, find_terminal_group
 
 logging.getLogger("openff.interchange.smirnoff").setLevel(logging.WARNING)
 
@@ -50,6 +51,39 @@ def create_system(forcefield: ForceField, topology: Topology, rest_ligand: bool 
 
     system.addForce(CMMotionRemover())
     return system
+
+
+def create_implicit_system(
+    forcefield: ForceField, topology: Topology, positions: unit.Quantity, rest_ligand: bool = False
+) -> tuple[System, Topology, unit.Quantity]:
+    """Create an OpenMM System in implicit solvent by removing explicit solvent and ions."""
+    forcefield.loadFile("implicit/obc2.xml")
+
+    modeller = Modeller(topology, positions)
+    to_delete = [
+        r
+        for r in modeller.topology.residues()
+        if r.name in ("HOH", "WAT", "NA", "CL", "K", "MG", "Na+", "Cl-")
+    ]
+    modeller.delete(to_delete)
+
+    system = forcefield.createSystem(
+        modeller.topology,
+        nonbondedMethod=app.NoCutoff,
+        constraints=app.HBonds,
+        rigidWater=True,
+        hydrogenMass=1.5,
+    )
+
+    if rest_ligand:
+        ligand_idxs = {
+            atom.index for atom in modeller.topology.atoms() if atom.residue.name == "LIG"
+        }
+        if ligand_idxs:
+            apply_rest(system, ligand_idxs)
+
+    system.addForce(CMMotionRemover())
+    return system, modeller.topology, modeller.positions
 
 
 def create_integrator(integrator_ps_per_step: float) -> LangevinMiddleIntegrator:
@@ -315,6 +349,7 @@ def production(
     log_ps: int = 100,
     run_time_ps: int = 1000,
     rest_ligand: bool = True,
+    terminal_dihedrals: list[tuple[int, int]] | None = None,
 ) -> State:
     """
     Run production MD simulation with restraints.
@@ -332,6 +367,10 @@ def production(
     steps = int(run_time_ps / integrator_ps_per_step)
 
     system = create_system(forcefield, topology, rest_ligand=rest_ligand)
+
+    implicit_system, implicit_top, implicit_pos = create_implicit_system(
+        forcefield, topology, positions, rest_ligand=rest_ligand
+    )
 
     # Add distal restraints to prevent protein unfolding
     add_distal_restraints(
@@ -361,6 +400,21 @@ def production(
     reporter = DCDReporter(str(traj_path), num_steps_per_log)
     simulation.reporters.append(reporter)
 
+    # Initialize TerminalRingMC if dihedrals are provided
+    flipper = None
+    if terminal_dihedrals:
+        terminal_list = []
+        for bond in terminal_dihedrals:
+            terminal_list.append(find_terminal_group(topology, bond[0], bond[1], angle=180.0))
+
+        k_bt = 300 * unit.kelvin * unit.MOLAR_GAS_CONSTANT_R
+        flipper = TerminalRingMC(
+            simulation=simulation,
+            topology=topology,
+            k_bt=k_bt,
+            terminal_list=terminal_list,
+        )
+
     # Production run with progress bar
     steps_per_update = num_steps_per_log
     total_updates = steps // steps_per_update
@@ -368,6 +422,12 @@ def production(
     with tqdm(total=total_updates, desc="Production", unit="frames") as pbar:
         for i in range(total_updates):
             iter_start = time.time()
+
+            # Attempt flips before progressing simulation block
+            if flipper is not None:
+                for _ in range(len(terminal_dihedrals) * 2):
+                    flipper.move_dihe()
+
             simulation.step(steps_per_update)
 
             # Calculate performance

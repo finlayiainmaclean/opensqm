@@ -1,8 +1,70 @@
 """Monte Carlo moves that rigidly rotate terminal groups (e.g. ring flips)."""
 
+from dataclasses import dataclass
+
 import numpy as np
 from loguru import logger
 from openmm import app, unit
+
+
+@dataclass
+class TerminalGroup:
+    """Structure representing a terminal group for MC rotation."""
+
+    angle: float
+    bond: tuple[int, int]
+    rotatable_group: list[int]
+
+
+def find_terminal_group(
+    topology: app.Topology, bond_atom_a: int, bond_atom_b: int, angle: float = 180.0
+) -> TerminalGroup:
+    """
+    Given an OpenMM Topology and a bond defined by two atom indices, splits the molecule
+    at the bond and robustly returns the atom indices formatted as a TerminalGroup.
+    """
+    # Build adjacency list from topology bonds
+    adj = {atom.index: set() for atom in topology.atoms()}
+    for bond in topology.bonds():
+        adj[bond[0].index].add(bond[1].index)
+        adj[bond[1].index].add(bond[0].index)
+
+    if bond_atom_b not in adj[bond_atom_a]:
+        raise ValueError(f"No bond found between atoms {bond_atom_a} and {bond_atom_b}")
+
+    # Temporarily slice the bond to partition the graph
+    adj[bond_atom_a].remove(bond_atom_b)
+    adj[bond_atom_b].remove(bond_atom_a)
+
+    def get_component(start_node):
+        visited = {start_node}
+        queue = [start_node]
+        while queue:
+            current = queue.pop(0)
+            for neighbor in adj[current]:
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+        return visited
+
+    comp_a = get_component(bond_atom_a)
+    comp_b = get_component(bond_atom_b)
+
+    # Identify which side is smaller
+    if len(comp_a) < len(comp_b):
+        smaller_side = comp_a
+        pivot = bond_atom_a
+        anchor = bond_atom_b
+    else:
+        smaller_side = comp_b
+        pivot = bond_atom_b
+        anchor = bond_atom_a
+
+    # Process the mobile atoms exclusively
+    mobile_atoms = sorted(list(smaller_side))
+    mobile_atoms.remove(pivot)
+
+    return TerminalGroup(angle=float(angle), bond=(anchor, pivot), rotatable_group=mobile_atoms)
 
 
 class TerminalRingMC:
@@ -13,7 +75,7 @@ class TerminalRingMC:
         simulation: app.Simulation,
         topology: app.Topology,
         k_bt: unit.Quantity,
-        terminal_list: list[tuple[float, list[int]]] | None = None,
+        terminal_list: list[TerminalGroup] | None = None,
     ) -> None:
         """
         Configure the MC mover for the given simulation and thermal energy.
@@ -27,10 +89,7 @@ class TerminalRingMC:
         k_bt :
             Thermal energy in energy units, e.g. ``unit.MOLAR_GAS_CONSTANT_R * 300 * unit.kelvin``.
         terminal_list :
-            Definitions of terminal groups to flip. Each entry is
-            ``(angle_degrees, [axis_atom, pivot_atom, mobile_atom, ...])``:
-            rotation axis is the bond from ``axis_atom`` to ``pivot_atom``; ``pivot_atom`` is the
-            fixed point and all ``mobile_atom`` indices are rigidly rotated.
+            A list of TerminalGroup dataclass instances detailing the rotation axis and mobile atoms.
         """
         self.simulation = simulation
         self.topology = topology
@@ -42,7 +101,7 @@ class TerminalRingMC:
         """
         Rotate one terminal group by ``±angle_degrees`` (sign random).
 
-        Uses Rodrigues' rotation about the axis from ``axis_atom`` to ``pivot_atom``,
+        Uses Rodrigues' rotation about the axis from ``anchor`` to ``pivot``,
         with the pivot fixed.
 
         Parameters
@@ -50,23 +109,23 @@ class TerminalRingMC:
         terminal_res_index :
             Index into ``self.terminal_list``.
         """
-        angle, atom_indices = self.terminal_list[terminal_res_index]
-        angle = float(np.random.choice([-1, 1])) * angle
+        group = self.terminal_list[terminal_res_index]
+        angle_rad = float(np.random.choice([-1, 1])) * group.angle
 
         state = self.simulation.context.getState(getPositions=True)
         positions = state.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
 
-        p0 = positions[atom_indices[0]]
-        p1 = positions[atom_indices[1]]
+        p0 = positions[group.bond[0]]
+        p1 = positions[group.bond[1]]
 
         axis = p1 - p0
         axis = axis / np.linalg.norm(axis)
 
-        theta = np.deg2rad(angle)
+        theta = np.deg2rad(angle_rad)
         cos_t = np.cos(theta)
         sin_t = np.sin(theta)
 
-        for idx in atom_indices[2:]:
+        for idx in group.rotatable_group:
             v = positions[idx] - p1
             v_rot = v * cos_t + np.cross(axis, v) * sin_t + axis * np.dot(axis, v) * (1.0 - cos_t)
             positions[idx] = p1 + v_rot

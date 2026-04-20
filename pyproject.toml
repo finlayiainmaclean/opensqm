@@ -16,7 +16,7 @@ dependencies = [
     "rdkit",
     "unipka",
     "rdsl",
-    "pydantic>=2",
+    "pydantic",
     "xxhash>=3",
     "ray[default]",
     "scikit-learn",
@@ -25,6 +25,8 @@ dependencies = [
     "scipy",
     "pyyaml",
     "sqlitedict>=2.1.0",
+    "aimnet[ase]>=0.1.1",
+    "nvalchemi-toolkit-ops[torch]>=0.3.1",
 ]
 
 [tool.pixi.workspace]
@@ -37,10 +39,14 @@ openmm = "*"
 pdbfixer = "*"
 openff-toolkit = "*"
 openmmforcefields = "*"
+openff-bespokefit = "*"
+xtb-python = "*"
+ambertools = "*"
 mdtraj = "*"
 ase = ">=3.23.0"
-pymbar = ">=4.2.0,<5"
+pymbar = "<4"
 xmltodict = ">=1.0.2,<2"
+pytest = ">=9.0.3,<10"
 
 [tool.pixi.pypi-dependencies]
 opensqm = { path = ".", editable = true }

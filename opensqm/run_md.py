@@ -14,9 +14,11 @@ from rdkit import Chem
 from tqdm import tqdm
 
 from opensqm.md.mmgbsa import get_interaction_energy
+from opensqm.md.prepare import prepare_complex
 from opensqm.md.representative import get_representative_frame
-from opensqm.md.vanilla import equilibrate, prepare_complex, production
+from opensqm.md.vanilla import equilibrate, production
 from opensqm.rdkit_utils import set_coordinates
+from opensqm.torsion_scanner import autodetect_flip_dihedrals
 
 
 @click.command()
@@ -56,11 +58,14 @@ def main(
     ligand_rdmol = Chem.AddHs(Chem.MolFromMolFile(ligand, removeHs=False), addCoords=True)
     protein = PDBFile(protein)
 
+    bonds = autodetect_flip_dihedrals(ligand_rdmol)
+    print(bonds)
+
     topology, positions, forcefield = prepare_complex(ligand_rdmol, protein)
-    terminal_dihedrals = None
+    terminal_dihedrals = list(bonds)
     PDBFile.writeFile(topology, positions, open(topology_path, "w"), keepIds=True)
     logger.info("Equilibrating complex")
-    topology, positions = equilibrate(topology, positions, forcefield, npt_ps=60, warmup_ps=10)
+    topology, positions = equilibrate(topology, positions, forcefield, npt_ps=10, warmup_ps=10)
     PDBFile.writeFile(topology, positions, open(equil_pdb_path, "w"), keepIds=True)
 
     all_trajs = []

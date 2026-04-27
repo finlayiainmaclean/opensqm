@@ -1,3 +1,5 @@
+"""Module for plotting energy barriers."""
+
 import sys
 from pathlib import Path
 
@@ -8,10 +10,11 @@ import numpy as np
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
-from opensqm.torsion_scanner import get_barrier_kcal
+from opensqm.torsion_scanner import get_barrier_kcal  # noqa: E402
 
 
 def main():
+    """Run the main plot generation script."""
     half_lives = {
         "1 picosecond": 1e-12,
         "1 nanosecond": 1e-9,
@@ -34,7 +37,7 @@ def main():
     barriers = [get_barrier_kcal(t) for t in t_points]
 
     # Create the plot
-    fig, ax = plt.subplots(figsize=(10, 7))
+    _fig, ax = plt.subplots(figsize=(10, 7))
 
     # Plot the full line
     ax.plot(barriers, t_points, "k-", alpha=0.5, linewidth=2, zorder=1)
@@ -42,7 +45,7 @@ def main():
     # Plot dots and labels for specific timeframes
     colors = plt.cm.tab10(np.linspace(0, 1, len(half_lives)))
 
-    for (label, t), color in zip(half_lives.items(), colors):
+    for (label, t), color in zip(half_lives.items(), colors, strict=False):
         barrier = get_barrier_kcal(t)
         ax.scatter(
             barrier,

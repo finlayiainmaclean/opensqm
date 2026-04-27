@@ -1,11 +1,11 @@
 """Module for calculating MMGBSA interaction energies."""
 
+import copy
 from typing import Any
 
 import mdtraj as md
 import numpy as np
 from openff.toolkit.topology import Molecule  # type: ignore
-from openff.toolkit.utils.toolkits import AmberToolsToolkitWrapper  # type: ignore
 from openmm import Context, LangevinMiddleIntegrator, unit
 from openmm.app import (
     CutoffNonPeriodic,
@@ -15,11 +15,12 @@ from openmm.app import (
     PDBFile,
     Topology,
 )
-from openmmforcefields.generators import SMIRNOFFTemplateGenerator
 from pymbar import timeseries
 from rdkit import Chem
 from scipy.spatial.distance import cdist
 from tqdm import tqdm
+
+from opensqm.md.prepare import get_ligand_forcefield
 
 
 def _openmm_atom_lookup_key(atom: Any) -> tuple[Any, ...]:
@@ -198,27 +199,20 @@ def get_interaction_energy(
     prot_mask = traj_closest.topology.select(f"not resname {ligand_resname}")
 
     offmol = Molecule.from_rdkit(ligand_rdmol, allow_undefined_stereo=False)
-    offmol.assign_partial_charges(
-        "am1bcc", toolkit_registry=AmberToolsToolkitWrapper(), use_conformers=offmol.conformers
-    )
+    forcefield_complex = get_ligand_forcefield(offmol, True)
+    forcefield_ligand = copy.deepcopy(forcefield_complex)
+    forcefield_ligand.loadFile("implicit/obc1.xml")
 
-    smirnoff = SMIRNOFFTemplateGenerator(
-        forcefield="openff-2.2.0.offxml", molecules=offmol, cache="smirnoff.json"
-    )
-    files = [
+    files = (
         "amber/ff14SB.xml",
         "amber/phosaa10.xml",
+        "amber/tip3p_HFE_multivalent.xml",
         "amber/tip3p_standard.xml",
         "implicit/obc1.xml",
-    ]
-
-    forcefield_complex = ForceField(*files)
-    forcefield_complex.registerTemplateGenerator(smirnoff.generator)
+    )
+    forcefield_complex.loadFile(files)
 
     forcefield_protein = ForceField(*files)
-
-    forcefield_ligand = ForceField("implicit/obc1.xml")
-    forcefield_ligand.registerTemplateGenerator(smirnoff.generator)
 
     complex = Modeller(positions=modeller.positions, topology=modeller.topology)
     protein = Modeller(positions=modeller.positions, topology=modeller.topology)
@@ -277,11 +271,11 @@ def get_interaction_energy(
     energy = np.array(energies)
 
     # Find equilibrated and decorrelated frames/energies
-    t0, g, _Neff_max = timeseries.detect_equilibration(energy)
+    t0, g, _Neff_max = timeseries.detectEquilibration(energy)
 
     energy_eq = energy[t0:]
     closest_xyz_eq = closest_xyz[t0:]
-    idx = timeseries.subsample_correlated_data(energy_eq, g=g)
+    idx = timeseries.subsampleCorrelatedData(energy_eq, g=g)
     energy = energy_eq[idx]
 
     # Update the final exported closest trajectory with decorrelated frames
@@ -290,3 +284,29 @@ def get_interaction_energy(
     traj_final.save_dcd(str(close_traj_path))
 
     return energies, rmsd, str(close_top_path).replace(".prmtop", ".pdb"), str(close_traj_path)
+
+
+if __name__ == "__main__":
+    from opensqm.md.prepare import prepare_complex
+
+    ligand = "data/inputs/PL-REX/003-CK2/1F0Q.sdf"
+    protein = "data/inputs/PL-REX/003-CK2/1F0Q.prot.fixed.pdb"
+
+    ligand_rdmol = Chem.MolFromMolFile(ligand, removeHs=False)
+    protein = PDBFile(protein)
+
+    topology, positions, forcefield = prepare_complex(
+        ligand_rdmol, protein, bespoke_ligand_forcefield=True
+    )
+
+    PDBFile.writeFile(topology, positions, open("/tmp/com.pdb", "w"), keepIds=True)
+
+    energies, rmsd, close_top_path, close_traj_path = get_interaction_energy(
+        ligand_path=ligand,
+        pdb_path="/tmp/com.pdb",
+        traj_path="/tmp/com.pdb",
+        close_traj_path="/tmp/com.close.dcd",
+        close_top_path="/tmp/com.close.prmtop",
+    )
+    print(energies)
+    print(rmsd)

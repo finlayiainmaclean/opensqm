@@ -1,3 +1,5 @@
+"""Tests for the terminal ring MC flipping module."""
+
 from pathlib import Path
 from typing import Tuple, Union
 
@@ -7,7 +9,7 @@ from openmm import app, openmm, unit
 
 from opensqm.md.terminal_ring_mc import TerminalRingMC, find_terminal_group
 
-nonbonded_Amber = {
+nonbonded_amber = {
     "nonbondedMethod": app.PME,
     "nonbondedCutoff": 1.0 * unit.nanometer,
     "constraints": app.HBonds,
@@ -19,9 +21,7 @@ platform_ref = openmm.Platform.getPlatformByName("Reference")
 def load_amber_sys(
     inpcrd_file: Union[str, Path], prmtop_file: Union[str, Path], nonbonded_settings: dict
 ) -> Tuple[app.AmberInpcrdFile, app.AmberPrmtopFile, openmm.System]:
-    """
-    Load Amber system from inpcrd and prmtop file.
-    """
+    """Load Amber system from inpcrd and prmtop file."""
     inpcrd = app.AmberInpcrdFile(str(inpcrd_file))
     prmtop = app.AmberPrmtopFile(str(prmtop_file), periodicBoxVectors=inpcrd.boxVectors)
     sys = prmtop.createSystem(**nonbonded_settings)
@@ -29,8 +29,11 @@ def load_amber_sys(
 
 
 class TestRotateTerminal:
+    """Tests for the MC terminal rotation logic."""
+
     @pytest.fixture(autouse=True)
     def setup_system(self):
+        """Set up OpenMM system for testing."""
         self.base = Path(__file__).resolve().parent
         self.output = self.base / "output"
         self.output.mkdir(exist_ok=True)
@@ -38,7 +41,7 @@ class TestRotateTerminal:
         inpcrd, prmtop, system = load_amber_sys(
             self.base / "data" / "07_tip3p.inpcrd",
             self.base / "data" / "07_tip3p.prmtop",
-            nonbonded_Amber,
+            nonbonded_amber,
         )
         self.topology = prmtop.topology
 
@@ -77,10 +80,11 @@ class TestRotateTerminal:
         print(f"  Saved: {path}")
 
     def test_rotate_terminal(self):
+        """Test that rotate_terminal executes correctly."""
         print("\n# Test rotate_terminal: 180° rotation around C15-C16 bond")
         group = self.flipmc.terminal_list[0]
-        pivot_idx = group.bond[1]  # C16 – rotation centre
-        axis_idx = group.bond[0]  # C15 – axis start
+        pivot_idx = group.bond[1]  # C16 - rotation centre
+        axis_idx = group.bond[0]  # C15 - axis start
         mobile = group.rotatable_group  # phenyl ring atoms
 
         pos_before = self._get_positions()

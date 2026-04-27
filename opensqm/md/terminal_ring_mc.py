@@ -20,8 +20,10 @@ def find_terminal_group(
     topology: app.Topology, bond_atom_a: int, bond_atom_b: int, angle: float = 180.0
 ) -> TerminalGroup:
     """
-    Given an OpenMM Topology and a bond defined by two atom indices, splits the molecule
-    at the bond and robustly returns the atom indices formatted as a TerminalGroup.
+    Given an OpenMM Topology and a bond defined by two atom indices.
+
+    Splits the molecule at the bond and robustly returns the atom indices
+    formatted as a TerminalGroup.
     """
     # Build adjacency list from topology bonds
     adj = {atom.index: set() for atom in topology.atoms()}
@@ -61,7 +63,7 @@ def find_terminal_group(
         anchor = bond_atom_a
 
     # Process the mobile atoms exclusively
-    mobile_atoms = sorted(list(smaller_side))
+    mobile_atoms = sorted(smaller_side)
     mobile_atoms.remove(pivot)
 
     return TerminalGroup(angle=float(angle), bond=(anchor, pivot), rotatable_group=mobile_atoms)
@@ -89,7 +91,7 @@ class TerminalRingMC:
         k_bt :
             Thermal energy in energy units, e.g. ``unit.MOLAR_GAS_CONSTANT_R * 300 * unit.kelvin``.
         terminal_list :
-            A list of TerminalGroup dataclass instances detailing the rotation axis and mobile atoms.
+            A list of TerminalGroup dataclasses detailing the rotation axis and mobile atoms.
         """
         self.simulation = simulation
         self.topology = topology

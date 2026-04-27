@@ -1,16 +1,12 @@
 """Module containing vanilla MD protocols."""
 
 import copy
-import logging
 import time
 from pathlib import Path
 
 import numpy as np
 from mdtraj.reporters import DCDReporter
-from openff.toolkit.topology import Molecule  # type: ignore
-from openff.toolkit.utils.toolkits import AmberToolsToolkitWrapper  # type: ignore
 from openmm import (
-    CMMotionRemover,
     LangevinMiddleIntegrator,
     MonteCarloBarostat,
     State,
@@ -18,124 +14,13 @@ from openmm import (
     app,
     unit,
 )
-from openmm.app import Modeller
 from openmm.app.forcefield import ForceField
 from openmm.app.topology import Topology
-from openmmforcefields.generators import SMIRNOFFTemplateGenerator
-from rdkit import Chem
 from tqdm import tqdm
 
-from opensqm.md.rest import apply_rest
+from opensqm.md.prepare import create_integrator, create_system
 from opensqm.md.restraints import add_distal_restraints, add_restraints
 from opensqm.md.terminal_ring_mc import TerminalRingMC, find_terminal_group
-
-logging.getLogger("openff.interchange.smirnoff").setLevel(logging.WARNING)
-
-
-def create_system(forcefield: ForceField, topology: Topology, rest_ligand: bool = False) -> System:
-    """Create an OpenMM System from the forcefield and topology."""
-    system = forcefield.createSystem(
-        topology,
-        nonbondedMethod=app.PME,
-        nonbondedCutoff=12.0 * unit.angstroms,
-        switchDistance=10.0 * unit.angstroms,
-        constraints=app.HBonds,
-        rigidWater=True,
-        hydrogenMass=1.5,
-    )
-
-    if rest_ligand:
-        ligand_idxs = {atom.index for atom in topology.atoms() if atom.residue.name == "LIG"}
-        if ligand_idxs:
-            apply_rest(system, ligand_idxs)
-
-    system.addForce(CMMotionRemover())
-    return system
-
-
-def create_implicit_system(
-    forcefield: ForceField, topology: Topology, positions: unit.Quantity, rest_ligand: bool = False
-) -> tuple[System, Topology, unit.Quantity]:
-    """Create an OpenMM System in implicit solvent by removing explicit solvent and ions."""
-    forcefield.loadFile("implicit/obc2.xml")
-
-    modeller = Modeller(topology, positions)
-    to_delete = [
-        r
-        for r in modeller.topology.residues()
-        if r.name in ("HOH", "WAT", "NA", "CL", "K", "MG", "Na+", "Cl-")
-    ]
-    modeller.delete(to_delete)
-
-    system = forcefield.createSystem(
-        modeller.topology,
-        nonbondedMethod=app.NoCutoff,
-        constraints=app.HBonds,
-        rigidWater=True,
-        hydrogenMass=1.5,
-    )
-
-    if rest_ligand:
-        ligand_idxs = {
-            atom.index for atom in modeller.topology.atoms() if atom.residue.name == "LIG"
-        }
-        if ligand_idxs:
-            apply_rest(system, ligand_idxs)
-
-    system.addForce(CMMotionRemover())
-    return system, modeller.topology, modeller.positions
-
-
-def create_integrator(integrator_ps_per_step: float) -> LangevinMiddleIntegrator:
-    """Create a Langevin Middle Integrator."""
-    return LangevinMiddleIntegrator(
-        300 * unit.kelvin,
-        1 / unit.picosecond,
-        integrator_ps_per_step * unit.picoseconds,
-    )
-
-
-def prepare_complex(
-    ligand: Chem.Mol, protein_modeller: Modeller
-) -> tuple[Topology, unit.Quantity, ForceField]:
-    """Prepare the complex by building ligand and protein into a modeller."""
-    files = [
-        "amber/ff14SB.xml",
-        "amber/phosaa10.xml",
-        "amber/tip3p_HFE_multivalent.xml",
-        "amber/tip3p_standard.xml",
-    ]
-
-    forcefield = app.ForceField(*files)
-
-    offmol = Molecule.from_rdkit(ligand, allow_undefined_stereo=False)
-    offmol.assign_partial_charges("am1bcc", toolkit_registry=AmberToolsToolkitWrapper())
-
-    smirnoff = SMIRNOFFTemplateGenerator(
-        forcefield="openff-2.2.0.offxml", molecules=offmol, cache="smirnoff.json"
-    )
-    forcefield.registerTemplateGenerator(smirnoff.generator)
-
-    lig_top = offmol.to_topology().to_openmm()
-    lig_pos = (offmol.conformers[0].m * unit.angstrom).in_units_of(unit.nanometer)
-
-    for chain in lig_top.chains():
-        for res in chain.residues():
-            res.name = "LIG"
-
-    modeller = Modeller(protein_modeller.topology, protein_modeller.positions)
-    modeller.add(lig_top, lig_pos)
-
-    modeller.addSolvent(
-        forcefield,
-        ionicStrength=0.15 * unit.molar,
-        padding=1.0 * unit.nanometers,
-        boxShape="cube",
-        positiveIon="Na+",
-        negativeIon="Cl-",
-    )
-
-    return modeller.topology, modeller.positions, forcefield
 
 
 def equilibrate(
@@ -367,10 +252,6 @@ def production(
     steps = int(run_time_ps / integrator_ps_per_step)
 
     system = create_system(forcefield, topology, rest_ligand=rest_ligand)
-
-    implicit_system, implicit_top, implicit_pos = create_implicit_system(
-        forcefield, topology, positions, rest_ligand=rest_ligand
-    )
 
     # Add distal restraints to prevent protein unfolding
     add_distal_restraints(

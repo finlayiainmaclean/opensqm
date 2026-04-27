@@ -5,6 +5,10 @@ from pathlib import Path
 
 from loguru import logger
 
+DATA_DIR = Path(__file__).parent.parent / "data"
+LIGAND_FORCEFIELD_DIR = DATA_DIR / "ligand_forcefields"
+LIGAND_FORCEFIELD_DIR.mkdir(parents=True, exist_ok=True)
+
 
 def run_command(
     command: str,
@@ -29,3 +33,7 @@ def run_command(
             raise Exception(
                 f"Command failed: {command}\nstdout: {e.stdout.strip()}\nstderr: {e.stderr.strip()}"
             ) from e
+
+
+if __name__ == "__main__":
+    print(DATA_DIR)

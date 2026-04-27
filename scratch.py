@@ -1,3 +1,5 @@
+"""Scratch module for testing openmm."""
+
 from openmm.app import ForceField
 
 ff = ForceField("amber/ff14SB.xml", "amber/tip3p_standard.xml")

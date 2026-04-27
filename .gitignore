@@ -181,3 +181,6 @@ pyrightconfig.json
 # Data folder
 data/
 sqm/
+bespoke-executor/
+
+.model.pt

@@ -25,8 +25,7 @@ dependencies = [
     "scipy",
     "pyyaml",
     "sqlitedict>=2.1.0",
-    "aimnet[ase]>=0.1.1",
-    "nvalchemi-toolkit-ops[torch]>=0.3.1",
+
 ]
 
 [tool.pixi.workspace]
@@ -43,10 +42,10 @@ openff-bespokefit = "*"
 xtb-python = "*"
 ambertools = "*"
 mdtraj = "*"
-ase = ">=3.23.0"
 pymbar = "<4"
 xmltodict = ">=1.0.2,<2"
 pytest = ">=9.0.3,<10"
+espaloma_charge = "*"
 
 [tool.pixi.pypi-dependencies]
 opensqm = { path = ".", editable = true }

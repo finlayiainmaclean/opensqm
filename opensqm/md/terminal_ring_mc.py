@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 
 import numpy as np
-from loguru import logger
 from openmm import app, unit
 
 
@@ -11,13 +10,13 @@ from openmm import app, unit
 class TerminalGroup:
     """Structure representing a terminal group for MC rotation."""
 
-    angle: float
+    angles: list[float]
     bond: tuple[int, int]
     rotatable_group: list[int]
 
 
 def find_terminal_group(
-    topology: app.Topology, bond_atom_a: int, bond_atom_b: int, angle: float = 180.0
+    topology: app.Topology, bond_atom_a: int, bond_atom_b: int, angles: list[float] | None = None
 ) -> TerminalGroup:
     """
     Given an OpenMM Topology and a bond defined by two atom indices.
@@ -66,7 +65,9 @@ def find_terminal_group(
     mobile_atoms = sorted(smaller_side)
     mobile_atoms.remove(pivot)
 
-    return TerminalGroup(angle=float(angle), bond=(anchor, pivot), rotatable_group=mobile_atoms)
+    if angles is None:
+        angles = [180.0]
+    return TerminalGroup(angles=angles, bond=(anchor, pivot), rotatable_group=mobile_atoms)
 
 
 class TerminalRingMC:
@@ -98,6 +99,18 @@ class TerminalRingMC:
         self.k_bt = k_bt
         self.terminal_list = terminal_list or []
         self.temperature = k_bt / unit.MOLAR_GAS_CONSTANT_R
+        self.n_attempts = 0
+        self.n_accepted = 0
+
+    @property
+    def acceptance_rate(self) -> float:
+        """Return the fraction of accepted moves (0.0 if no attempts yet)."""
+        return self.n_accepted / self.n_attempts if self.n_attempts > 0 else 0.0
+
+    def reset_stats(self) -> None:
+        """Reset the acceptance counters."""
+        self.n_attempts = 0
+        self.n_accepted = 0
 
     def rotate_terminal(self, terminal_res_index: int) -> None:
         """
@@ -112,7 +125,8 @@ class TerminalRingMC:
             Index into ``self.terminal_list``.
         """
         group = self.terminal_list[terminal_res_index]
-        angle_rad = float(np.random.choice([-1, 1])) * group.angle
+        angle_deg = float(np.random.choice(group.angles))
+        angle_rad = float(np.random.choice([-1, 1])) * angle_deg
 
         state = self.simulation.context.getState(getPositions=True)
         positions = state.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
@@ -151,17 +165,9 @@ class TerminalRingMC:
         e_new = self.simulation.context.getState(getEnergy=True).getPotentialEnergy() / self.k_bt
 
         delta_e = e_new - e_old
+        self.n_attempts += 1
         if delta_e <= 0.0 or np.random.random() < np.exp(-delta_e):
-            logger.info(
-                "TerminalRingMC: dihe_{idx}, {exp:.2f}, Accepted.",
-                idx=terminal_res_index,
-                exp=float(np.exp(-delta_e)),
-            )
+            self.n_accepted += 1
             self.simulation.context.setVelocitiesToTemperature(self.temperature)
         else:
             self.simulation.context.setPositions(old_positions)
-            logger.info(
-                "TerminalRingMC: dihe_{idx}, {exp:.2f}, Rejected.",
-                idx=terminal_res_index,
-                exp=float(np.exp(-delta_e)),
-            )

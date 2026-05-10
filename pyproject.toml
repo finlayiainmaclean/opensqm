@@ -46,6 +46,7 @@ pymbar = "<4"
 xmltodict = ">=1.0.2,<2"
 pytest = ">=9.0.3,<10"
 espaloma_charge = "*"
+mdtop = "*"
 
 [tool.pixi.pypi-dependencies]
 opensqm = { path = ".", editable = true }
@@ -80,7 +81,15 @@ dev = [
 
 [tool.ty.analysis]
 # OpenMM stack is a Pixi/conda dependency; uv's default venv often lacks these packages.
-allowed-unresolved-imports = ["openmm.**", "openmmforcefields.**", "pdbfixer.**"]
+allowed-unresolved-imports = ["openmm", "openmm.**", "openmmforcefields", "openmmforcefields.**", "pdbfixer", "pdbfixer.**", "simtk", "simtk.**"]
+
+[tool.pyrefly]
+python-interpreter = ".pixi/envs/default/bin/python"
+
+[tool.pyrefly.errors]
+missing-attribute = false
+unsupported-operation = false
+missing-module-attribute = false
 
 [tool.ruff]
 line-length = 100

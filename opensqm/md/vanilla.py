@@ -17,7 +17,7 @@ from openmm import (
 from openmm.app.forcefield import ForceField
 from openmm.app.topology import Topology
 from tqdm import tqdm
-
+from loguru import logger
 from opensqm.md.prepare import create_integrator, create_system
 from opensqm.md.restraints import add_distal_restraints, add_restraints
 from opensqm.md.terminal_ring_mc import TerminalRingMC, find_terminal_group
@@ -283,10 +283,12 @@ def production(
 
     # Initialize TerminalRingMC if dihedrals are provided
     flipper = None
+
     if terminal_dihedrals:
+        angles = list(np.arange(30, 210, 30))
         terminal_list = []
         for bond in terminal_dihedrals:
-            terminal_list.append(find_terminal_group(topology, bond[0], bond[1], angle=180.0))
+            terminal_list.append(find_terminal_group(topology, int(bond[0]), int(bond[1]), angles=angles))
 
         k_bt = 300 * unit.kelvin * unit.MOLAR_GAS_CONSTANT_R
         flipper = TerminalRingMC(
@@ -299,6 +301,7 @@ def production(
     # Production run with progress bar
     steps_per_update = num_steps_per_log
     total_updates = steps // steps_per_update
+    ps_per_update = steps_per_update * integrator_ps_per_step
 
     with tqdm(total=total_updates, desc="Production", unit="frames") as pbar:
         for i in range(total_updates):
@@ -309,16 +312,28 @@ def production(
                 for _ in range(len(terminal_dihedrals) * 2):
                     flipper.move_dihe()
 
+                if i % 100 == 0:
+                    logger.info(
+                        "TerminalRingMC: acceptance {rate:.1%} ({acc}/{att})",
+                        rate=flipper.acceptance_rate,
+                        acc=flipper.n_accepted,
+                        att=flipper.n_attempts,
+                    )
+
+
+
+
             simulation.step(steps_per_update)
 
             # Calculate performance
             iter_time = time.time() - iter_start
-            sim_time_ns = steps_per_update * integrator_ps_per_step / 1000.0
+            sim_time_ns = ps_per_update / 1000.0
             ns_per_day = sim_time_ns * 86400 / iter_time if iter_time > 0 else 0
 
             # Get current simulation time
-            current_time_ps = (i + 1) * steps_per_update * integrator_ps_per_step
+            current_time_ps = (i + 1) * ps_per_update
 
+  
             pbar.set_postfix({"Time": f"{current_time_ps:.0f}ps", "ns/day": f"{ns_per_day:.2f}"})
             pbar.update(1)
 

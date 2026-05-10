@@ -9,6 +9,7 @@ from openff.toolkit.topology import Molecule
 from openmm import CustomTorsionForce, LangevinMiddleIntegrator, app, unit
 from openmm.app import Simulation
 from rdkit import Chem
+from rdkit.Chem import AllChem
 
 from opensqm.md.prepare import get_ligand_forcefield
 
@@ -163,7 +164,7 @@ def torsion_barriers(
                     "ts_energy": ts_energy,
                     "barrier_from_min1": ts_energy - float(energies[i1]),
                     "barrier_from_min2": ts_energy - float(energies[i2]),
-                    "angle_delta": abs(float(angles[i1]) - float(angles[i2])),
+                    "angle_delta": abs((float(angles[i2]) - float(angles[i1]) + 180) % 360 - 180),
                 }
             )
 
@@ -275,7 +276,15 @@ def run_torsion_scan_omm(
 
     result = torsion_barriers(valid_angles, valid_energies)
 
-    return result, valid_angles, energies
+    # Group barriers by sorted minima pair; keep only the lowest ts_energy
+    # (the kinetically relevant pathway between each pair of minima).
+    best_barriers: dict[tuple[float, float], dict] = {}
+    for barrier in result["barriers"]:
+        key = tuple(sorted((barrier["min1_angle"], barrier["min2_angle"])))
+        if key not in best_barriers or barrier["ts_energy"] < best_barriers[key]["ts_energy"]:
+            best_barriers[key] = barrier
+
+    return best_barriers, valid_angles, energies
 
 
 def autodetect_flip_dihedrals(
@@ -288,21 +297,22 @@ def autodetect_flip_dihedrals(
     if not candidate_bonds:
         return []
 
+    print(candidate_bonds)
+
     logger.info(f"Identified {len(candidate_bonds)} potential rotatable topology seeds.")
 
     for bond in candidate_bonds:
-        result, angles, _energies = run_torsion_scan_omm(rdmol, bond)
+        best_barriers, angles, _energies = run_torsion_scan_omm(rdmol, bond)
         if not angles:
             continue
 
-        print(result)
-
         MIN_TS_ENERGY = 5
-        MAX_TS_ENERGY = 20
+        MAX_TS_ENERGY = 30
 
-        for barrier in result["barriers"]:
-            if barrier["ts_energy"] > MIN_TS_ENERGY and barrier["ts_energy"] < MAX_TS_ENERGY:
-                # angle_delta = abs(barrier["min2_angle"] - barrier["min1_angle"])
+        print(best_barriers)
+
+        for barrier in best_barriers.values():
+            if MIN_TS_ENERGY < barrier["ts_energy"] < MAX_TS_ENERGY:
                 logger.info(
                     f"--> [SUCCESS] Type 2 isolated! Adding {bond} to MC rotation handler list."
                 )
@@ -313,3 +323,14 @@ def autodetect_flip_dihedrals(
                 )
 
     return identified_flips
+
+
+if __name__ == "__main__":
+    # rdmol = Chem.MolFromMolFile("data/inputs/PL-REX/003-CK2/1ZOE.sdf")
+    rdmol = Chem.MolFromSmiles("c1cccc(Cl)[1c]1-[1c]1c(Br)cccc1")
+    rdmol = Chem.AddHs(rdmol, addCoords=True)
+    AllChem.EmbedMolecule(rdmol, randomSeed=42)
+    AllChem.MMFFOptimizeMolecule(rdmol)
+
+    identified_flips = autodetect_flip_dihedrals(rdmol)
+    print(identified_flips)

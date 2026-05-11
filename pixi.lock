@@ -237,6 +237,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/matplotlib-inline-0.2.1-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/mctc-lib-0.4.2-h3b12eaf_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/mda-xdrlib-0.2.0-pyhd8ed1ab_1.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/mdtop-0.0.3-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/mdtraj-1.11.1-np2py312h8baca0b_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/mdurl-0.1.2-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/metis-5.1.1-h59595ed_2.conda
@@ -694,6 +695,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/matplotlib-inline-0.2.1-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/mctc-lib-0.4.1-hdbc710d_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/mda-xdrlib-0.2.0-pyhd8ed1ab_1.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/mdtop-0.0.3-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/mdtraj-1.11.1-np2py312h2df5d9b_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/mdurl-0.1.2-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/metis-5.1.1-hebf3989_2.conda
@@ -1169,6 +1171,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/matplotlib-inline-0.2.1-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/mctc-lib-0.4.2-h3b12eaf_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/mda-xdrlib-0.2.0-pyhd8ed1ab_1.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/mdtop-0.0.3-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/mdtraj-1.11.1-np2py312h8baca0b_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/mdurl-0.1.2-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/metis-5.1.1-h59595ed_2.conda
@@ -1637,6 +1640,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/matplotlib-inline-0.2.1-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/mctc-lib-0.4.1-hdbc710d_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/mda-xdrlib-0.2.0-pyhd8ed1ab_1.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/mdtop-0.0.3-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/mdtraj-1.11.1-np2py312h2df5d9b_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/mdurl-0.1.2-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/metis-5.1.1-hebf3989_2.conda
@@ -7066,6 +7070,23 @@ packages:
   - pkg:pypi/mda-xdrlib?source=hash-mapping
   size: 16535
   timestamp: 1734100847370
+- conda: https://conda.anaconda.org/conda-forge/noarch/mdtop-0.0.3-pyhd8ed1ab_0.conda
+  sha256: 3ac2c9ec632b589c46b52152a765e6eba643db57fffe526fceee6213275173f8
+  md5: 6de7f5d3769919352ca8340bb1f18e9c
+  depends:
+  - numpy
+  - openmm >=8.0.0
+  - pandas
+  - pyparsing
+  - python >=3.10
+  - rdkit
+  - scipy
+  license: MIT
+  license_family: MIT
+  purls:
+  - pkg:pypi/mdtop?source=hash-mapping
+  size: 31802
+  timestamp: 1739044291061
 - conda: https://conda.anaconda.org/conda-forge/linux-64/mdtraj-1.11.1-np2py312h8baca0b_1.conda
   sha256: 66f32f08a8769482f1fae72051dccd74beaf4916cc33bffc9ad5b13db2d49066
   md5: a4c60c0060137d103145b33cdd8001c2
@@ -8098,7 +8119,7 @@ packages:
 - pypi: ./
   name: opensqm
   version: 0.0.1
-  sha256: ba5b22313a941445d679f5f60ccd60e262cd94b146c2204dfbadc098bc43818b
+  sha256: 18eeba037bf99547858bf3f529ea24224d4524a653a361b2eb6688cbae01dd00
   requires_dist:
   - loguru
   - pandas

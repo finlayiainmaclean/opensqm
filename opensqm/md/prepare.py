@@ -3,11 +3,16 @@
 import logging
 from typing import Literal
 
+# pyrefly: ignore [missing-import]
 from espaloma_charge.openff_wrapper import (
     EspalomaChargeToolkitWrapper,  # type: ignore
 )
+# from mdtop import Topology as MDTopology
+# pyrefly: ignore [missing-import]
 from openff.toolkit.topology import Molecule  # type: ignore
+# pyrefly: ignore [missing-import]
 from openff.toolkit.utils.toolkits import AmberToolsToolkitWrapper  # type: ignore
+# pyrefly: ignore [missing-import]
 from openmm import (
     CMMotionRemover,
     LangevinMiddleIntegrator,
@@ -15,15 +20,21 @@ from openmm import (
     app,
     unit,
 )
+# pyrefly: ignore [missing-import]
 from openmm.app import Modeller
+# pyrefly: ignore [missing-import]
 from openmm.app.forcefield import ForceField
+# pyrefly: ignore [missing-import]
 from openmm.app.topology import Topology
+# pyrefly: ignore [missing-import]
 from openmmforcefields.generators import SMIRNOFFTemplateGenerator
+# pyrefly: ignore [missing-import]
 from rdkit import Chem
 
 from opensqm.md.bespokefit import generate_bespoke_offxml
 from opensqm.md.rest import apply_rest
 from opensqm.utils import LIGAND_FORCEFIELD_DIR
+from pathlib import Path
 
 logging.getLogger("openff.interchange.smirnoff").setLevel(logging.WARNING)
 
@@ -47,7 +58,7 @@ def get_ligand_forcefield(
     ligand: Molecule,
     bespoke_ligand_forcefield: bool = True,
     partial_charge_method: Literal["am1bcc", "espaloma-am1bcc"] = "espaloma-am1bcc",
-) -> str | None:
+) -> ForceField | None:
     """Get the ligand forcefield."""
     assign_ligand_charges(ligand, partial_charge_method)
 
@@ -57,7 +68,7 @@ def get_ligand_forcefield(
     if bespoke_ligand_forcefield:
         ligand_forcefield_file = generate_bespoke_offxml(ligand)
         ligand_forcefield_file = (
-            str(ligand_forcefield_file.resolve()) if ligand_forcefield_file else None
+            str(Path(ligand_forcefield_file).resolve()) if ligand_forcefield_file else None
         )
 
     forcefield = app.ForceField()
@@ -78,6 +89,9 @@ def prepare_complex(
     offmol = Molecule.from_rdkit(ligand, allow_undefined_stereo=False)
 
     forcefield = get_ligand_forcefield(offmol, bespoke_ligand_forcefield)
+
+    if forcefield is None:
+        raise ValueError(f"Failed to create ligand forcefield for {Chem.MolToSmiles(ligand)}")
 
     files = (
         "amber/ff14SB.xml",

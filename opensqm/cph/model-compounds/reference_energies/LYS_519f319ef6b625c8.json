@@ -1,0 +1,28 @@
+{
+  "residue_name": "LYS",
+  "main_variant": "LYS",
+  "variant_names": [
+    "LYS",
+    "LYN"
+  ],
+  "variants": [
+    "LYS",
+    "LYN"
+  ],
+  "charges": [
+    1,
+    0
+  ],
+  "reference_energies_kj_per_mole": [
+    0.0,
+    -86.2319527716933
+  ],
+  "transitions": [
+    {
+      "parent": 0,
+      "child": 1,
+      "pka": 10.4
+    }
+  ],
+  "ring_flip_bonds": []
+}

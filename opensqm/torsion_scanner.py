@@ -287,6 +287,41 @@ def run_torsion_scan_omm(
     return best_barriers, valid_angles, energies
 
 
+def autodetect_flip_dihedrals_named(
+    rdmol: Chem.Mol,
+) -> list[tuple[str, str]]:
+    """Like :func:`autodetect_flip_dihedrals` but returns PDB atom-name pairs.
+
+    Each input bond is mapped from rdkit atom index to the atom's
+    ``GetPDBResidueInfo().GetName()`` (stripped of whitespace), so the
+    returned list is directly usable as a ``TitratableResidueReference.ring_flip_bonds``
+    value (which keys atoms by name, not by index, for stability across
+    OpenMM's ``Modeller.addHydrogens`` and rdkit/OpenFF conversions).
+
+    ``rdmol`` must carry PDB residue info on every flagged atom; this is
+    the case after
+    :func:`opensqm.cph.reference_energy.protonation_states._assign_ligand_atom_names`
+    (which :func:`opensqm.cph.reference_energy.protonation_states.build_protonation_states`
+    calls internally) or :func:`opensqm.rdkit_utils.set_residue_info`.
+    """
+    bonds = autodetect_flip_dihedrals(rdmol)
+    named: list[tuple[str, str]] = []
+    for a, b in bonds:
+        atom_a = rdmol.GetAtomWithIdx(int(a))
+        atom_b = rdmol.GetAtomWithIdx(int(b))
+        info_a = atom_a.GetPDBResidueInfo()
+        info_b = atom_b.GetPDBResidueInfo()
+        if info_a is None or info_b is None:
+            missing = a if info_a is None else b
+            raise ValueError(
+                f"rdkit atom {missing} has no PDB residue info; call "
+                f"_assign_ligand_atom_names or set_residue_info before "
+                f"autodetect_flip_dihedrals_named"
+            )
+        named.append((info_a.GetName().strip(), info_b.GetName().strip()))
+    return named
+
+
 def autodetect_flip_dihedrals(
     rdmol: Chem.Mol,
 ) -> set[tuple[int, int]]:

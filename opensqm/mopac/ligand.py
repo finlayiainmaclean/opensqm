@@ -49,6 +49,7 @@ def get_correct_ligand(ligand: Chem.Mol) -> tuple[Chem.Mol, float]:
         check_mopac_was_success(output_str)
         energy = _extract_energy(output_str)
         if energy is None:
+            Chem.MolToMolFile(ligand, "/tmp/ligand.mol")
             raise ValueError("Failed to extract energy from MOPAC output")
 
         pi_bonds = get_rdkit_pi_bonds(ligand)

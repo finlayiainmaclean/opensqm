@@ -25,7 +25,7 @@ def relax_complex(
     *, ligand: Chem.Mol, protein: Chem.Mol, simulation_time: float = 60
 ) -> tuple[Chem.Mol, Chem.Mol]:
 
-    offmol = Molecule.from_rdkit(ligand, allow_undefined_stereo=False)
+    offmol = Molecule.from_rdkit(ligand, allow_undefined_stereo=True)
     offmol.assign_partial_charges("am1bcc", toolkit_registry=AmberToolsToolkitWrapper())
 
     smirnoff = SMIRNOFFTemplateGenerator(forcefield="openff-2.2.0.offxml", molecules=offmol)

@@ -1,0 +1,71 @@
+{
+  "residue_name": "LIG",
+  "main_variant": "LIG",
+  "variant_names": [
+    "LIG"
+  ],
+  "variants": [
+    [
+      [
+        "H1",
+        "C1"
+      ],
+      [
+        "H2",
+        "C1"
+      ],
+      [
+        "H3",
+        "C1"
+      ],
+      [
+        "H4",
+        "C2"
+      ],
+      [
+        "H5",
+        "C2"
+      ],
+      [
+        "H6",
+        "N1"
+      ],
+      [
+        "H7",
+        "C5"
+      ],
+      [
+        "H8",
+        "N2"
+      ],
+      [
+        "H9",
+        "C10"
+      ],
+      [
+        "H10",
+        "C11"
+      ],
+      [
+        "H11",
+        "C12"
+      ],
+      [
+        "H12",
+        "C14"
+      ],
+      [
+        "H13",
+        "C15"
+      ]
+    ]
+  ],
+  "charges": [
+    0
+  ],
+  "reference_energies_kj_per_mole": [
+    0.0
+  ],
+  "transitions": [],
+  "ring_flip_bonds": []
+}

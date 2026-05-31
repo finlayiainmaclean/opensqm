@@ -8,7 +8,6 @@ import numpy as np
 from mdtraj.reporters import DCDReporter
 from openmm import (
     LangevinMiddleIntegrator,
-    MonteCarloBarostat,
     State,
     System,
     app,
@@ -18,150 +17,21 @@ from openmm.app.forcefield import ForceField
 from openmm.app.topology import Topology
 from tqdm import tqdm
 from loguru import logger
+from pydantic import BaseModel, ConfigDict
+from pydantic_units import OpenMMQuantity
 from opensqm.md.prepare import create_integrator, create_system
 from opensqm.md.restraints import add_distal_restraints, add_restraints
 from opensqm.md.terminal_ring_mc import TerminalRingMC, find_terminal_group
 
 
-def equilibrate(
-    topology: Topology,
-    positions: unit.Quantity,
-    forcefield: ForceField,
-    integrator_ps_per_step: float = 0.004,
-    npt_ps: float = 200,
-    warmup_ps: float = 100,
-) -> tuple[Topology, unit.Quantity]:
-    """
-    Equilibrate a molecular system through NVT warmup and NPT equilibration.
+class ProductionSettings(BaseModel):
+    """Settings for production MD."""
 
-    Args:
-        topology: OpenMM topology
-        positions: Initial positions
-        forcefield: OpenMM forcefield
-        integrator_ps_per_step: Timestep in picoseconds (default: 0.004 ps = 4 fs)
-        npt_ps: NPT equilibration time in picoseconds
-        warmup_ps: NVT warmup time in picoseconds
-
-    Returns
-    -------
-        tuple: (equilibrated_positions, equilibrated_box_vectors)
-    """
-    N = 30
-    warmup_steps = int(warmup_ps / integrator_ps_per_step)
-    warmup_steps_per_iteration = int(warmup_steps / N)
-    npt_steps = int(npt_ps / integrator_ps_per_step)
-    npt_steps_per_iteration = int(npt_steps / N)
-
-    # ========================================
-    # PHASE 1: NVT WARMUP (with restraints)
-    # ========================================
-    system = create_system(forcefield, topology, rest_ligand=False)
-
-    # Use small timestep for initial warmup
-    integrator = create_integrator(0.001)
-
-    # Add restraints to backbone and ligand
-    system, _ = add_restraints(
-        system, positions, topology.atoms(), 4.0, restraints=("backbone", "ligand")
-    )
-
-    # Create simulation
-    simulation = app.Simulation(topology, system, integrator)
-    simulation.context.setPeriodicBoxVectors(*topology.getPeriodicBoxVectors())
-    simulation.context.setPositions(positions)
-
-    # Energy minimization
-    simulation.minimizeEnergy()
-
-    # Set initial low temperature
-    simulation.context.setVelocitiesToTemperature(10 * unit.kelvin)
-
-    # Gradual heating from 10K to 300K
-    with tqdm(total=N, desc="Warmup", unit="iter") as pbar:
-        for _i, current_temperature in enumerate(np.linspace(10, 300, N)):
-            iter_start = time.time()
-            integrator.setTemperature(current_temperature * unit.kelvin)
-            simulation.step(warmup_steps_per_iteration)
-
-            # Calculate performance
-            iter_time = time.time() - iter_start
-            sim_time_ns = warmup_steps_per_iteration * 0.001 / 1000.0  # 0.001 ps timestep
-            ns_per_day = sim_time_ns * 86400 / iter_time if iter_time > 0 else 0
-
-            pbar.set_postfix({"Temp": f"{current_temperature:.1f}K", "ns/day": f"{ns_per_day:.2f}"})
-            pbar.update(1)
-
-    # Save warmup state including box vectors
-    warmup_state = simulation.context.getState(getPositions=True, enforcePeriodicBox=True)
-    warmup_positions = warmup_state.getPositions()
-    warmup_box = warmup_state.getPeriodicBoxVectors()
-
-    # Create new system with barostat
-    system = create_system(forcefield, topology, rest_ligand=False)
-    integrator = create_integrator(integrator_ps_per_step)
-
-    # Add restraints (will be gradually reduced)
-    system, _ = add_restraints(
-        system, warmup_positions, topology.atoms(), 4.0, restraints=("backbone", "ligand")
-    )
-
-    # Add Monte Carlo barostat for NPT
-    system.addForce(MonteCarloBarostat(1 * unit.atmosphere, 300 * unit.kelvin))
-
-    # Create new simulation
-    simulation = app.Simulation(topology, system, integrator)
-
-    # CRITICAL: Set box vectors from warmup BEFORE setting positions
-    simulation.context.setPeriodicBoxVectors(*warmup_box)
-    simulation.context.setPositions(warmup_positions)
-
-    # Quick minimization with new system
-    simulation.minimizeEnergy()
-
-    # Set velocities at target temperature
-    simulation.context.setVelocitiesToTemperature(300 * unit.kelvin)
-
-    # Add reporter to track density and volume
-    density_reporter = app.StateDataReporter(
-        "/tmp/npt_equilibration.log",
-        100,
-        step=True,
-        volume=True,
-        density=True,
-        temperature=True,
-        potentialEnergy=True,
-    )
-    simulation.reporters.append(density_reporter)
-
-    # NPT equilibration with gradual restraint release
-    with tqdm(total=N, desc="NPT Equil", unit="iter") as pbar:
-        for _i, k in enumerate(np.linspace(4.0, 1.0, N)):
-            iter_start = time.time()
-            simulation.step(npt_steps_per_iteration)
-
-            # Gradually reduce restraint strength
-            simulation.context.setParameter(
-                "k", float(k) * unit.kilocalories_per_mole / unit.angstroms**2
-            )
-
-            # Calculate performance
-            iter_time = time.time() - iter_start
-            sim_time_ns = npt_steps_per_iteration * integrator_ps_per_step / 1000.0
-            ns_per_day = sim_time_ns * 86400 / iter_time if iter_time > 0 else 0
-
-            pbar.set_postfix({"k": f"{k:.2f}", "ns/day": f"{ns_per_day:.2f}"})
-            pbar.update(1)
-
-    # Save final equilibrated state with box vectors
-    npt_state = simulation.context.getState(
-        getPositions=True, getVelocities=True, getEnergy=True, enforcePeriodicBox=True
-    )
-
-    topology.setPeriodicBoxVectors(npt_state.getPeriodicBoxVectors())
-
-    positions = npt_state.getPositions()
-
-    return topology, positions
+    model_config = ConfigDict(frozen=True)
+    integrator_step_size: OpenMMQuantity[unit.picosecond] = 0.004 * unit.picoseconds
+    log_interval: OpenMMQuantity[unit.picosecond] = 1 * unit.picoseconds
+    run_time: OpenMMQuantity[unit.picosecond] = 0.5 * unit.nanoseconds
+    rest_ligand: bool = True
 
 
 def anneal_and_minimise(
@@ -230,10 +100,7 @@ def production(
     positions: unit.Quantity,
     forcefield: ForceField,
     traj_path: str | Path,
-    integrator_ps_per_step: float = 0.004,
-    log_ps: int = 100,
-    run_time_ps: int = 1000,
-    rest_ligand: bool = True,
+    config: ProductionSettings,
     terminal_dihedrals: list[tuple[int, int]] | None = None,
 ) -> State:
     """
@@ -244,14 +111,13 @@ def production(
         positions: Equilibrated positions
         forcefield: OpenMM forcefield
         traj_path: Path to save trajectory (NetCDF format)
-        integrator_ps_per_step: Timestep in picoseconds
-        log_ps: Logging interval in picoseconds
-        run_time_ps: Total production time in picoseconds
+        config: Production simulation settings
+        terminal_dihedrals: Optional terminal ring dihedrals for MC flips
     """
-    num_steps_per_log = int(log_ps // integrator_ps_per_step)
-    steps = int(run_time_ps / integrator_ps_per_step)
+    num_steps_per_log = int(config.log_interval / config.integrator_step_size)
+    steps = int(config.run_time / config.integrator_step_size)
 
-    system = create_system(forcefield, topology, rest_ligand=rest_ligand)
+    system = create_system(forcefield, topology, rest_ligand=config.rest_ligand)
 
     # Add distal restraints to prevent protein unfolding
     add_distal_restraints(
@@ -264,7 +130,7 @@ def production(
         max_restraint_force=10.0,
     )
 
-    integrator = create_integrator(integrator_ps_per_step)
+    integrator = create_integrator(config.integrator_step_size)
     simulation = app.Simulation(topology, system, integrator)
 
     # Set box vectors before positions
@@ -301,7 +167,7 @@ def production(
     # Production run with progress bar
     steps_per_update = num_steps_per_log
     total_updates = steps // steps_per_update
-    ps_per_update = steps_per_update * integrator_ps_per_step
+    ps_per_update = steps_per_update * config.integrator_step_size
 
     with tqdm(total=total_updates, desc="Production", unit="frames") as pbar:
         for i in range(total_updates):

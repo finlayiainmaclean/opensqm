@@ -5,6 +5,20 @@ from dataclasses import dataclass
 import numpy as np
 from openmm import app, unit
 
+# Residue name -> (anchor_atom_name, pivot_atom_name) for the side-chain bond
+# whose 180-degree rotation usefully reorients the planar terminal group. The
+# pivot is the atom on the ring/amide side; the anchor stays on the backbone
+# side. Aromatic residues (HIS/TYR/TRP) flip about Cbeta-Cgamma; the terminal
+# amides of ASN/GLN flip about the bond directly preceding the amide carbon
+# (CB-CG for ASN, CG-CD for GLN) which swaps the carbonyl O and the amide N
+# without changing connectivity - the classic "MolProbity flip" that fixes
+# the O/N ambiguity inherited from X-ray refinement.
+RING_FLIP_BONDS: dict[str, tuple[str, str]] = {
+    "HIS": ("CB", "CG"),
+    "ASN": ("CB", "CG"),
+    "GLN": ("CG", "CD"),
+}
+
 
 @dataclass
 class TerminalGroup:
@@ -13,6 +27,76 @@ class TerminalGroup:
     angles: list[float]
     bond: tuple[int, int]
     rotatable_group: list[int]
+
+
+def find_residue_ring_bond(
+    topology: app.Topology,
+    residue_name: str,
+    residue_number: int | str,
+    chain_id: str | None = None,
+) -> tuple[int, int]:
+    """
+    Resolve the bond atom indices whose rotation flips a residue's planar side-chain group.
+
+    Supports the residues defined in :data:`RING_FLIP_BONDS`: aromatic side
+    chains (HIS/TYR/TRP) flip about the CB-CG bond, and the terminal amides of
+    ASN (CB-CG) and GLN (CG-CD) flip to swap the carbonyl O with the amide N
+    -- the standard "MolProbity flip". The returned tuple is in
+    ``(anchor, pivot)`` order suitable for :func:`find_terminal_group`.
+
+    Parameters
+    ----------
+    topology :
+        The OpenMM topology containing the residue.
+    residue_name :
+        Three-letter residue code (e.g. ``"HIS"``).
+    residue_number :
+        Residue sequence number (PDB ``resSeq``) of the target residue.
+    chain_id :
+        Optional chain identifier to disambiguate residues sharing the same
+        ``resSeq`` across chains.
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(anchor_atom_index, pivot_atom_index)`` for the rotatable bond.
+    """
+    key = residue_name.upper()
+    if key not in RING_FLIP_BONDS:
+        raise ValueError(
+            f"No ring-flip bond defined for residue {residue_name!r}; "
+            f"supported residues: {sorted(RING_FLIP_BONDS)}"
+        )
+    anchor_name, pivot_name = RING_FLIP_BONDS[key]
+
+    target_id = str(residue_number)
+    matches = [
+        res
+        for res in topology.residues()
+        if res.name.upper() == key
+        and str(res.id) == target_id
+        and (chain_id is None or res.chain.id == chain_id)
+    ]
+    if not matches:
+        raise ValueError(
+            f"Residue {residue_name}.{residue_number} not found in topology"
+            + (f" (chain {chain_id})" if chain_id else "")
+        )
+    if len(matches) > 1:
+        chains = sorted({res.chain.id for res in matches})
+        raise ValueError(
+            f"Residue {residue_name}.{residue_number} is ambiguous across "
+            f"chains {chains}; pass chain_id to disambiguate"
+        )
+
+    atoms_by_name = {atom.name: atom.index for atom in matches[0].atoms()}
+    missing = [n for n in (anchor_name, pivot_name) if n not in atoms_by_name]
+    if missing:
+        raise ValueError(
+            f"Residue {residue_name}.{residue_number} is missing atom(s) {missing}; "
+            f"found atoms: {sorted(atoms_by_name)}"
+        )
+    return atoms_by_name[anchor_name], atoms_by_name[pivot_name]
 
 
 def find_terminal_group(

@@ -11,7 +11,7 @@ from openmm import (
 from openmm.app.topology import Atom
 from openmm.openmm import System
 from openmm.unit import Quantity
-
+from pydantic_units import OpenMMQuantity
 
 def add_distal_restraints(
     system: System,
@@ -96,7 +96,7 @@ def add_restraints(
     system: System,
     positions: Quantity,
     atoms: Generator[Atom, None, None],
-    restraint_force: float,
+    restraint_force: OpenMMQuantity[unit.kilocalories_per_mole / unit.angstroms**2] = 4.0 * unit.kilocalories_per_mole / unit.angstroms**2,
     restraints: Sequence[Literal["ligand", "backbone", "heavy_atom", "protein", "solvent"]] = (
         "ligand",
         "backbone",
@@ -104,8 +104,7 @@ def add_restraints(
 ) -> System:
     # Add restrains to system for equilibration in place. The restraints are added to the backbone atoms of the protein, and heavy atoms of the ligand.
     force = CustomExternalForce("k*periodicdistance(x, y, z, x0, y0, z0)^2")
-    force_amount = restraint_force * unit.kilocalories_per_mole / unit.angstroms**2
-    force.addGlobalParameter("k", force_amount)
+    force.addGlobalParameter("k", restraint_force)
     force.addPerParticleParameter("x0")
     force.addPerParticleParameter("y0")
     force.addPerParticleParameter("z0")

@@ -6,7 +6,7 @@ version = "0.0.1"
 readme = "README.md"
 keywords = []
 authors = [{name = "Finlay MacLean"}]
-requires-python = ">3.12,<3.14"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "loguru",
     "pandas",
@@ -25,7 +25,7 @@ dependencies = [
     "scipy",
     "pyyaml",
     "sqlitedict>=2.1.0",
-
+    "openmm>=8.5.1",
 ]
 
 [tool.pixi.workspace]
@@ -34,19 +34,20 @@ platforms = ["linux-64", "osx-arm64"]
 
 [tool.pixi.dependencies]
 mopac = "*"
-openmm = "*"
 pdbfixer = "*"
 openff-toolkit = "*"
 openmmforcefields = "*"
 openff-bespokefit = "*"
+pydantic-units = "*"
 xtb-python = "*"
 ambertools = "*"
 mdtraj = "*"
 pymbar = "<4"
 xmltodict = ">=1.0.2,<2"
 pytest = ">=9.0.3,<10"
-espaloma_charge = "*"
+openmm-ml = "*"
 mdtop = "*"
+pytorch = ">=2.4"
 
 [tool.pixi.pypi-dependencies]
 opensqm = { path = ".", editable = true }
@@ -141,5 +142,11 @@ doctest_optionflags = "NORMALIZE_WHITESPACE"
 build-backend = "hatchling.build"
 requires = ["hatchling"]
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.deptry.per_rule_ignores]
 DEP001 = ["openmm", "openmmforcefields", "openff", "mdtraj", "pytraj", "pdbfixer"]
+
+[tool.uv.sources]
+unipka = { git = "https://github.com/finlayiainmaclean/unipka.git" }

@@ -33,7 +33,7 @@ def calculate_rmsd_matrix(xyz: np.ndarray) -> np.ndarray:
 def get_representative_frame(
     all_tops: list[str],
     all_trajs: list[str],
-    all_energies: list[float] | np.ndarray,
+    all_energies: list[list[float] | np.ndarray],
     lig_resname: str = "LIG",
     cluster_eps: float = 1.0,
 ) -> tuple[Modeller, float]:

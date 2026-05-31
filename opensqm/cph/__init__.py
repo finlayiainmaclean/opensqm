@@ -7,18 +7,25 @@ protonation states and hybrid solvent approaches.
 __version__ = '1.0.0'
 
 # Import main classes for easy access
-from .constantph import ConstantPH, ResidueState, ResidueTitration
+from .constantph import (
+    ConstantPH,
+    ResidueState,
+    ResidueTitration,
+    select_titratable_residues,
+)
 from .reference_energy import ReferenceEnergyFinder
+from opensqm.md.water_swap_mc import WaterSwapSettings, WaterSwapMC
 
 # Import utility modules
-from . import utils
 from . import simulation_config
 
 __all__ = [
     'ConstantPH',
-    'ResidueState', 
+    'ResidueState',
     'ResidueTitration',
     'ReferenceEnergyFinder',
-    'utils',
+    'WaterSwapSettings',
+    'WaterSwapMC',
+    'select_titratable_residues',
     'simulation_config',
 ]

@@ -1,9 +1,10 @@
-from typing import Any
+from typing import Any, Literal
 from pydantic import BaseModel, Field, validator
 
 from openmm.app import ForceField, PME, CutoffNonPeriodic, HBonds
 from openmm import unit
 from openmm import LangevinIntegrator
+from pydantic_units import OpenMMQuantity
 import xxhash
 import json
 
@@ -25,61 +26,117 @@ def _default_implicit_params() -> dict:
     )
 
 
-class SimulationConfig(BaseModel):
+class ConstantpHSettings(BaseModel):
 
     explicit_ff_files: tuple = ('amber14-all.xml', 'amber14/tip3pfb.xml')
     implicit_ff_files: tuple = ('amber14-all.xml', 'implicit/gbn2.xml')
+
+    # Ligand parameterisation (used when ligands are passed to generate_references)
+    partial_charge_method: Literal["am1bcc"] = "am1bcc"
+    bespoke_ligand_forcefield: bool = True
+
     explicit_params: dict = Field(default_factory=_default_explicit_params)
     implicit_params: dict = Field(default_factory=_default_implicit_params)
-    temperature: float = 300.0  # Kelvin
+    temperature: OpenMMQuantity[unit.kelvin] = 300 * unit.kelvin
     relaxation_steps: int = 100
-    timestep: float = 0.004     # ps
-    relaxation_timestep: float = 0.002  # ps
-    friction: float = 1.0       # ps^-1
-    relaxation_friction: float = 10.0   # ps^-1
+    timestep: OpenMMQuantity[unit.picosecond] = 0.004 * unit.picoseconds
+    relaxation_timestep: OpenMMQuantity[unit.picosecond] = 0.002 * unit.picoseconds
+    friction: OpenMMQuantity[unit.picosecond**-1] = 1.0 / unit.picosecond
+    relaxation_friction: OpenMMQuantity[unit.picosecond**-1] = 10.0 / unit.picosecond
+
+    
 
 
     # Derived attributes
-    explicit_ff: Any = None
-    implicit_ff: Any = None
     integrator: Any = None
     relaxation_integrator: Any = None
 
     def __init__(self, **data: Any) -> None:
         super().__init__(**data)
-        self._make_forcefields()
         self._make_integrators()
 
-    def _make_forcefields(self):
-        """Instantiate OpenMM ForceField objects."""
-        object.__setattr__(self, 'explicit_ff', ForceField(*self.explicit_ff_files))
-        object.__setattr__(self, 'implicit_ff', ForceField(*self.implicit_ff_files))
+    def make_explicit_ff(self) -> ForceField:
+        """Build a fresh OpenMM ForceField for the explicit-solvent system.
+
+        Forcefields are built on demand rather than cached on the config so
+        that callers can register additional template generators (e.g. for
+        ligands) on the returned object without mutating shared state.
+        """
+        return ForceField(*self.explicit_ff_files)
+
+    def make_implicit_ff(self) -> ForceField:
+        """Build a fresh OpenMM ForceField for the implicit-solvent system."""
+        return ForceField(*self.implicit_ff_files)
+
+    def get_explicit_forcefield(self, ligands=None) -> ForceField:
+        """Build the explicit-solvent forcefield, optionally with ligand templates.
+
+        Parameters
+        ----------
+        ligands : openff.toolkit.topology.Molecule or list of Molecule, optional
+            Titratable ligand variant(s) whose SMIRNOFF templates should be
+            registered on the returned forcefield via
+            :func:`opensqm.md.prepare.get_ligand_forcefield`. When ``None``
+            the result is identical to :meth:`make_explicit_ff`.
+        """
+        ff = self.make_explicit_ff()
+        if ligands is None:
+            return ff
+        from opensqm.md.prepare import get_ligand_forcefield
+        return get_ligand_forcefield(
+            ligands,
+            bespoke_ligand_forcefield=self.bespoke_ligand_forcefield,
+            forcefield=ff,
+            partial_charge_method=self.partial_charge_method,
+        )
+
+    def get_implicit_forcefield(self, ligands=None) -> ForceField:
+        """Build the implicit-solvent forcefield, optionally with ligand templates.
+
+        See :meth:`get_explicit_forcefield` for the ligand semantics.
+        """
+        ff = self.make_implicit_ff()
+        if ligands is None:
+            return ff
+        from opensqm.md.prepare import get_ligand_forcefield
+        return get_ligand_forcefield(
+            ligands,
+            bespoke_ligand_forcefield=self.bespoke_ligand_forcefield,
+            forcefield=ff,
+            partial_charge_method=self.partial_charge_method,
+        )
+
+
 
     def _make_integrators(self):
         """Create production and relaxation integrators."""
-        temperature = self.temperature * unit.kelvin
         object.__setattr__(self, 'integrator', LangevinIntegrator(
-            temperature,
-            self.friction / unit.picosecond,
-            self.timestep * unit.picoseconds))
+            self.temperature,
+            self.friction,
+            self.timestep))
         object.__setattr__(self, 'relaxation_integrator', LangevinIntegrator(
-            temperature,
-            self.relaxation_friction / unit.picosecond,
-            self.relaxation_timestep * unit.picoseconds))
+            self.temperature,
+            self.relaxation_friction,
+            self.relaxation_timestep))
 
     def hash(self) -> str:
         """Create a reproducible hash of parameters that affect reference energies.
 
-        Only force field definitions and temperature are included, since
-        sampling dynamics parameters (pH, timestep, friction) do not change
-        the converged reference energy values.
+        Includes force field definitions, temperature, and the ligand
+        parameterisation choices (partial charge method + bespoke
+        forcefield flag) since those change the converged reference
+        energies. Sampling dynamics parameters (pH, timestep, friction)
+        are intentionally excluded because they do not affect the
+        converged values.
         """
         conf_dict = {
             'explicit_ff_files': list(self.explicit_ff_files),
             'implicit_ff_files': list(self.implicit_ff_files),
             'explicit_params': {k: str(v) for k, v in self.explicit_params.items()},
             'implicit_params': {k: str(v) for k, v in self.implicit_params.items()},
-            'temperature': self.temperature,
+            'temperature': str(self.temperature),
+            'partial_charge_method': self.partial_charge_method,
+            'bespoke_ligand_forcefield': self.bespoke_ligand_forcefield,
         }
         hash_str = json.dumps(conf_dict, sort_keys=True)
         return xxhash.xxh64(hash_str.encode()).hexdigest()
@@ -87,7 +144,7 @@ class SimulationConfig(BaseModel):
 
 # Example use
 if __name__=="__main__":
-    config = SimulationConfig()
+    config = ConstantpHSettings()
     print("Hash:", config.hash())
-    print("Explicit FF:", config.explicit_ff)
+    print("Explicit FF:", config.make_explicit_ff())
     print("Integrator:", config.integrator)

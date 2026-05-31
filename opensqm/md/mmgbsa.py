@@ -16,11 +16,15 @@ from openmm.app import (
     Topology,
 )
 from pymbar import timeseries
+from pydantic import BaseModel, ConfigDict
 from rdkit import Chem
 from scipy.spatial.distance import cdist
 from tqdm import tqdm
 
+from opensqm.md.equilibrate import EquilibrationSettings
+from opensqm.md.vanilla import ProductionSettings
 from opensqm.md.prepare import get_ligand_forcefield
+
 
 
 def _openmm_atom_lookup_key(atom: Any) -> tuple[Any, ...]:
@@ -67,7 +71,55 @@ def make_system(topology: Topology, forcefield: ForceField) -> Any:
         nonbondedMethod=CutoffNonPeriodic,
         constraints=HBonds,
     )
+
     return system
+
+
+def calculate_average_waters_per_residue(
+    traj: md.Trajectory, cutoff: float = 0.4
+) -> dict[int, float]:
+    """
+    Calculate the average number of water molecules within a cutoff distance
+    of each protein residue over a trajectory.
+
+    Parameters
+    ----------
+    traj : mdtraj.Trajectory
+        The trajectory, which must contain both protein and water.
+    cutoff : float, optional
+        The distance cutoff in nanometers (default 0.4 nm = 4 Angstroms).
+
+    Returns
+    -------
+    dict[int, float]
+        Dictionary mapping the mdtraj residue index to the average number of
+        water molecules within the cutoff across all frames.
+    """
+    protein_residues = [r for r in traj.topology.residues if r.is_protein]
+
+    # Get oxygen atoms for waters
+    water_atoms = []
+    for r in traj.topology.residues:
+        if r.name in ("HOH", "WAT", "TIP3", "TIP4", "TIP5"):
+            for a in r.atoms:
+                if a.element.symbol == "O":
+                    water_atoms.append(a.index)
+                    break
+    water_atoms = np.array(water_atoms)
+
+    avg_waters = {}
+    for res in protein_residues:
+        # Use heavy atoms of the residue for distance calculation
+        res_atoms = np.array([a.index for a in res.atoms if a.element.symbol != "H"])
+        if len(res_atoms) == 0:
+            continue
+            
+        # Find waters within cutoff of any heavy atom in this residue
+        neighbors = md.compute_neighbors(traj, cutoff, res_atoms, haystack_indices=water_atoms)
+        counts = [len(frame_neighbors) for frame_neighbors in neighbors]
+        avg_waters[res.index] = float(np.mean(counts))
+
+    return avg_waters
 
 
 def get_interaction_energy(
@@ -224,6 +276,7 @@ def get_interaction_energy(
     system_ligand = make_system(ligand.topology, forcefield_ligand)
     system_protein = make_system(protein.topology, forcefield_protein)
     system_complex = make_system(complex.topology, forcefield_complex)
+
 
     integrator_complex = LangevinMiddleIntegrator(
         300 * unit.kelvin, 1 / unit.picosecond, 0.002 * unit.picoseconds

@@ -1,5 +1,6 @@
 """SQM module."""
 
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -38,8 +39,8 @@ class OptimisationSettings(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    sqm_optimise: bool = True
-    mm_optimise: bool = True
+    sqm_optimise: bool = False
+    mm_optimise: bool = False
     crop: bool = True
 
 
@@ -75,18 +76,23 @@ class SQMOutput(BaseModel):
 
 
 @ray.remote
-def run_sqm_wrapper(inp: SQMConfig, output_dir: Path) -> SQMOutput:
+def run_sqm_wrapper(inp: SQMConfig, output_dir: Path) -> SQMOutput | None:
     """Run SQM on a protein and ligand with caching."""
-    output_json = output_dir / f"{hash(inp)}.json"
+    config_hash = hashlib.sha256(inp.json(sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    output_json = output_dir / f"{config_hash}.json"
 
     if output_json.exists():
         logger.info(f"Output existing for {inp.complex.complex_id}")
-        return SQMOutput.model_validate_json(output_json.read_text())
+        return SQMOutput.parse_raw(output_json.read_text())
 
     logger.info(f"Running SQM for {inp.complex.complex_id}")
-    output = run_sqm(inp)
-    output_json.write_text(output.model_dump_json())
-    return output
+    try:
+        output = run_sqm(inp)
+        output_json.write_text(output.json(sort_keys=True))
+        return output
+    except Exception as e:
+        logger.error(f"Error running SQM for {inp.complex.complex_id}: {e}")
+        return None
 
 
 def run_sqm(inp: SQMConfig) -> SQMOutput:
@@ -122,20 +128,20 @@ def run_sqm(inp: SQMConfig) -> SQMOutput:
     if inp.settings.sqm_optimise:
         logger.info("Crudely optimising ligand")
 
-        ligand, protein = optimise_complex(
-            ligand=ligand,
-            protein=protein,
-            mode="ligand",
-            gnorm=20,
-            num_epochs=20,  # ~4 minutes an epoch
-            use_rapid=True,
-        )
+        # ligand, protein = optimise_complex(
+        #     ligand=ligand,
+        #     protein=protein,
+        #     mode="ligand",
+        #     gnorm=20,
+        #     num_epochs=3,  # ~4 minutes an epoch
+        #     use_rapid=True,
+        # )
 
         logger.info("Refining ligand")
         ligand, protein = optimise_complex(
             ligand=ligand,
             protein=protein,
-            mode="ligand",
+            mode="hydrogens",
             gnorm=10,
             num_epochs=3,  # # ~5 minutes an epoch
             use_rapid=False,
@@ -182,7 +188,7 @@ def run_sqm(inp: SQMConfig) -> SQMOutput:
     ligand_strain = E_ligand_bound - E_ligand_free
 
     scores = run_interaction_energy(ligand=ligand, protein=protein)
-    score = scores["interaction_energy"] + G_Hplus + ligand_strain
+    score = scores["interaction_energy"] + G_Hplus # ligand_strain
 
     logger.info(
         f"interaction_energy: {scores['interaction_energy']:.2f}, G_Hplus: {G_Hplus:.2f}, "
@@ -256,11 +262,13 @@ def cli(
     if not run_local:
         ray.init(num_cpus=NUM_CPUS, ignore_reinit_error=True)
 
-    df = pd.read_csv(dataframe_path).head(10)
+    df = pd.read_csv(dataframe_path)
     if "protein" in df.columns:
         df = df.dropna(subset=["protein"])
 
     db = SqliteDict("data/outputs/results.sqlite", autocommit=True)
+
+    print(len(db))
 
     inputs_to_run = []
     all_results = {}
@@ -269,7 +277,7 @@ def cli(
         complex_id = str(row.id)  # type: ignore
         if not overwrite and complex_id in db:
             result_json = db[complex_id]
-            all_results[complex_id] = SQMOutput.model_validate_json(result_json)
+            all_results[complex_id] = SQMOutput.parse_raw(result_json)
             continue
 
         inputs_to_run.append(
@@ -282,6 +290,7 @@ def cli(
                 settings=settings,
             )
         )
+ 
 
     if inputs_to_run:
         if run_local:
@@ -289,10 +298,11 @@ def cli(
         else:
             futures = [run_sqm_wrapper.remote(inp, output_dir) for inp in inputs_to_run]
             new_results = process_ray_futures(futures, desc="Processing")
+            new_results = [r for r in new_results if r is not None]
 
         for inp, result in zip(inputs_to_run, new_results, strict=False):
             all_results[inp.complex.complex_id] = result
-            db[inp.complex.complex_id] = result.model_dump_json()
+            db[inp.complex.complex_id] = result.json(sort_keys=True)
 
     db.close()
 
@@ -300,16 +310,21 @@ def cli(
         all_results[str(row.id)] for row in df.itertuples() if str(row.id) in all_results
     ]
 
-    scores_df = pd.DataFrame([r.model_dump() for r in results_list])
+    scores_df = pd.DataFrame([r.dict() for r in results_list])
     scores_df["complex_id"] = [str(row.id) for row in df.itertuples() if str(row.id) in all_results]
     if len(scores_df) > 1 and "pX" in df.columns:
-        scores_df = scores_df.loc[scores_df.groupby("complex_id")["score"].idxmin()]
-        corr = scipy.stats.spearmanr(scores_df["score"], df.loc[scores_df.index, "pX"])
+        scores_df = scores_df.loc[scores_df.groupby("complex_id")["interaction_energy"].idxmin()]
+        corr = scipy.stats.spearmanr(scores_df["interaction_energy"], df.loc[scores_df.index, "pX"])
         logger.info(f"Spearman correlation: {corr}")
 
     scores_csv_path = output_dir / "scores.csv"
     scores_df.to_csv(scores_csv_path, index=False)
     logger.info(f"Saved scores to {scores_csv_path}")
+
+
+    if "pX" in df.columns:
+        corr = scipy.stats.spearmanr(scores_df["interaction_energy"], df.loc[scores_df.index, "pX"])
+        logger.info(f"Spearman correlation: {corr}")
 
 
 if __name__ == "__main__":

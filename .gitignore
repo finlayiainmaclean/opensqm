@@ -184,3 +184,7 @@ sqm/
 bespoke-executor/
 
 .model.pt
+AGENTS.md
+LEAN-CTX.md
+.antigravitycli
+.DS_Store

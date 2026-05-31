@@ -120,7 +120,6 @@ def run_pdbfixer(
     fixer.replaceNonstandardResidues()
     fixer.removeHeterogens(keepWater=keep_waters)
     fixer.findMissingAtoms()
-    fixer.missingTerminals = {}
     fixer.addMissingAtoms()
 
     # fixer1 = renumber_chains(fixer)

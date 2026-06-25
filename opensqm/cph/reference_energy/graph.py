@@ -24,9 +24,6 @@ from collections import defaultdict, deque
 from typing import TYPE_CHECKING
 
 import numpy as np
-from loguru import logger
-
-from .types import VariantSpec
 
 if TYPE_CHECKING:
     from .models import Transition
@@ -208,46 +205,6 @@ def _solve_reference_energies_ls(
 _validate_transitions_tree = _validate_transitions_graph
 
 
-def _log_cycle_residuals(
-    residue_name: str,
-    transitions: list["Transition"],
-    edge_residuals_kj: list[float],
-    variant_names: list[str] | list[VariantSpec],
-) -> None:
-    """Emit an info log summarising LS cycle-closure residuals.
-
-    For a spanning tree (n_edges == n_variants - 1) the residuals are
-    identically zero by construction; the log just confirms the tree was
-    consistent. For over-determined inputs the per-edge residuals
-    quantify how far the experimental pKa inputs were from being
-    self-consistent and which edges absorbed the closure error.
-    """
-    if not edge_residuals_kj:
-        return
-    arr = np.asarray(edge_residuals_kj, dtype=float)
-    rms = float(np.sqrt(np.mean(arr ** 2)))
-    max_abs = float(np.max(np.abs(arr))) if arr.size else 0.0
-    redundant_edges = max(0, len(transitions) - max(0, len(variant_names) - 1))
-    if redundant_edges == 0:
-        logger.info(
-            f"{residue_name}: spanning-tree fit (no redundancy); "
-            f"per-edge residuals max=|{max_abs:.3f}| kJ/mol (should be ~0)"
-        )
-        return
-    logger.info(
-        f"{residue_name}: LS fit over {len(transitions)} edges with "
-        f"{redundant_edges} redundant; cycle-closure residuals "
-        f"rms={rms:.2f} kJ/mol, max=|{max_abs:.2f}| kJ/mol"
-    )
-    def _label(idx: int) -> str:
-        v = variant_names[idx]
-        return v if isinstance(v, str) else f"#{idx}"
-    for t, r in zip(transitions, edge_residuals_kj, strict=True):
-        logger.info(
-            f"  {_label(t.parent)} -> {_label(t.child)} (pKa={t.pka}): "
-            f"residual={r:+.3f} kJ/mol"
-        )
-
 
 def _topological_transitions(
     transitions: list["Transition"],
@@ -288,10 +245,9 @@ def _topological_transitions(
 
 
 __all__ = [
-    "macro_pka",
+    "_solve_reference_energies_ls",
+    "_topological_transitions",
     "_validate_transitions_graph",
     "_validate_transitions_tree",
-    "_solve_reference_energies_ls",
-    "_log_cycle_residuals",
-    "_topological_transitions",
+    "macro_pka",
 ]

@@ -14,7 +14,6 @@ custom ligand. To validate them we round-trip:
 """
 # ruff: noqa: PLR2004
 
-import io
 import tempfile
 from pathlib import Path
 
@@ -93,7 +92,8 @@ def test_get_hydrogen_variants_imidazolium_round_trip() -> None:
 
 def test_get_hydrogen_variants_h_attachments_match_topology() -> None:
     """Each (h_name, parent_name) tuple must reference real atoms in the topology and the
-    parent must actually be bonded to that hydrogen."""
+    parent must actually be bonded to that hydrogen.
+    """
     imidazolium, _ = build_imidazole_states()
     offmol = Molecule.from_rdkit(imidazolium, allow_undefined_stereo=False)
     top = offmol.to_topology().to_openmm()

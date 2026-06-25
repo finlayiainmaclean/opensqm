@@ -184,7 +184,7 @@ def run_torsion_scan_omm(
     bond_indices: tuple[int, int],
     steps: int = 24,
     relax_fmax: float = 0.5,
-) -> float | tuple[float, list[float], list[float]]:
+) -> tuple[float, list[float], list[float] | np.ndarray]:
     """
     Perform a relaxed 1D torsion scan around the specified bond using OpenMM.
 
@@ -269,22 +269,14 @@ def run_torsion_scan_omm(
     # Clean output and extrapolate
     valid_data = [(a, e) for a, e in zip(angles, energies, strict=False) if not np.isnan(e)]
     if not valid_data:
-        return (0.0, [], [])
+        return 0.0, [], []
 
     valid_angles = [d[0] for d in valid_data]
     valid_energies = [d[1] for d in valid_data]
 
-    result = torsion_barriers(valid_angles, valid_energies)
+    barrier_height = max(valid_energies) - min(valid_energies)
 
-    # Group barriers by sorted minima pair; keep only the lowest ts_energy
-    # (the kinetically relevant pathway between each pair of minima).
-    best_barriers: dict[tuple[float, float], dict] = {}
-    for barrier in result["barriers"]:
-        key = tuple(sorted((barrier["min1_angle"], barrier["min2_angle"])))
-        if key not in best_barriers or barrier["ts_energy"] < best_barriers[key]["ts_energy"]:
-            best_barriers[key] = barrier
-
-    return best_barriers, valid_angles, energies
+    return barrier_height, valid_angles, energies
 
 
 def autodetect_flip_dihedrals_named(
@@ -307,8 +299,8 @@ def autodetect_flip_dihedrals_named(
     bonds = autodetect_flip_dihedrals(rdmol)
     named: list[tuple[str, str]] = []
     for a, b in bonds:
-        atom_a = rdmol.GetAtomWithIdx(int(a))
-        atom_b = rdmol.GetAtomWithIdx(int(b))
+        atom_a = rdmol.GetAtomWithIdx(a)
+        atom_b = rdmol.GetAtomWithIdx(b)
         info_a = atom_a.GetPDBResidueInfo()
         info_b = atom_b.GetPDBResidueInfo()
         if info_a is None or info_b is None:
@@ -330,32 +322,32 @@ def autodetect_flip_dihedrals(
     identified_flips = set()
 
     if not candidate_bonds:
-        return []
+        return set()
 
     print(candidate_bonds)
 
     logger.info(f"Identified {len(candidate_bonds)} potential rotatable topology seeds.")
 
     for bond in candidate_bonds:
-        best_barriers, angles, _energies = run_torsion_scan_omm(rdmol, bond)
+        barrier_height, angles, _energies = run_torsion_scan_omm(rdmol, bond)
         if not angles:
             continue
 
         MIN_TS_ENERGY = 5
         MAX_TS_ENERGY = 30
 
-        print(best_barriers)
+        print(f"Barrier height: {barrier_height}")
 
-        for barrier in best_barriers.values():
-            if MIN_TS_ENERGY < barrier["ts_energy"] < MAX_TS_ENERGY:
-                logger.info(
-                    f"--> [SUCCESS] Type 2 isolated! Adding {bond} to MC rotation handler list."
-                )
-                identified_flips.add(tuple(sorted(bond)))
-            else:
-                logger.info(
-                    "--> [SKIP] Fluctuation rate not bound to simulation bottleneck regimes."
-                )
+        if MIN_TS_ENERGY < barrier_height < MAX_TS_ENERGY:
+            logger.info(
+                f"--> [SUCCESS] Type 2 isolated! Adding {bond} to MC rotation handler list."
+            )
+            a, b = bond
+            identified_flips.add((a, b) if a < b else (b, a))
+        else:
+            logger.info(
+                "--> [SKIP] Fluctuation rate not bound to simulation bottleneck regimes."
+            )
 
     return identified_flips
 

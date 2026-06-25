@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+from loguru import logger
 from mdtraj.reporters import DCDReporter
 from openmm import (
     LangevinMiddleIntegrator,
@@ -15,10 +16,10 @@ from openmm import (
 )
 from openmm.app.forcefield import ForceField
 from openmm.app.topology import Topology
-from tqdm import tqdm
-from loguru import logger
 from pydantic import BaseModel, ConfigDict
 from pydantic_units import OpenMMQuantity
+from tqdm import tqdm
+
 from opensqm.md.prepare import create_integrator, create_system
 from opensqm.md.restraints import add_distal_restraints, add_restraints
 from opensqm.md.terminal_ring_mc import TerminalRingMC, find_terminal_group
@@ -199,7 +200,7 @@ def production(
             # Get current simulation time
             current_time_ps = (i + 1) * ps_per_update
 
-  
+
             pbar.set_postfix({"Time": f"{current_time_ps:.0f}ps", "ns/day": f"{ns_per_day:.2f}"})
             pbar.update(1)
 

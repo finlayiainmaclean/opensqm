@@ -32,10 +32,10 @@ def _process_inchi_options(
 
     inchi_options = " ".join(inchi_options)
     return inchi_options
-    
-    
+
+
 def to_inchikey_non_standard(
-    mol: Chem.Mol, 
+    mol: Chem.Mol,
     fixed_hydrogen_layer: bool = True,
     undefined_stereocenter: bool = True,
     reconnected_metal_layer: bool = True,
@@ -64,7 +64,6 @@ def to_inchikey_non_standard(
         options: More InchI options in a form of a list of string. Example:
             `["/SRel", "/AuxNone"]`.
     """
-
     if mol is None:
         return None
 

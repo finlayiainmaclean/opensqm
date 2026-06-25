@@ -1,9 +1,9 @@
 """Module containing equilibration protocol."""
 import time
 
-
+import mdtraj as md
 import numpy as np
-from pymbar import timeseries
+from loguru import logger
 from openmm import (
     MonteCarloBarostat,
     app,
@@ -11,12 +11,13 @@ from openmm import (
 )
 from openmm.app.forcefield import ForceField
 from openmm.app.topology import Topology
+from pydantic import BaseModel, ConfigDict
+from pydantic_units import OpenMMQuantity
+from pymbar import timeseries
 from tqdm import tqdm
+
 from opensqm.md.prepare import create_integrator, create_system
 from opensqm.md.restraints import add_restraints
-from loguru import logger
-from pydantic_units import OpenMMQuantity
-from pydantic import BaseModel, ConfigDict
 
 
 class EquilibrationSettings(BaseModel):
@@ -64,11 +65,48 @@ def _check_volume_plateau(
         logger.warning(msg)
 
 
+def _recenter_ligand_positions(
+    topology: Topology,
+    positions: unit.Quantity,
+    *,
+    ligand_resname: str = "LIG",
+) -> unit.Quantity:
+    """Image the ligand into the primary cell and center it with the protein."""
+    box_vectors = topology.getPeriodicBoxVectors()
+    if box_vectors is None:
+        return positions
+
+    ligand_sel = [
+        atom.index
+        for atom in topology.atoms()
+        if atom.residue.name == ligand_resname
+    ]
+    if not ligand_sel:
+        return positions
+
+    traj = md.Trajectory(
+        xyz=np.asarray(positions.value_in_unit(unit.nanometer), dtype=np.float32)[None, :, :],
+        topology=md.Topology.from_openmm(topology),
+    )
+    box_nm = np.array(
+        [[v.value_in_unit(unit.nanometer) for v in row] for row in box_vectors],
+        dtype=np.float32,
+    )
+    traj.unitcell_vectors = box_nm[None, :, :]
+
+    ligand_atoms = {traj.topology.atom(i) for i in ligand_sel}
+    anchor_molecules = [*traj.topology.guess_anchor_molecules(), ligand_atoms]
+    traj.image_molecules(inplace=True, anchor_molecules=anchor_molecules)
+    return traj.xyz[0] * unit.nanometer
+
+
 def equilibrate(
     topology: Topology,
     positions: unit.Quantity,
     forcefield: ForceField,
     config: EquilibrationSettings,
+    *,
+    implicit_solvent: bool = False,
 ) -> tuple[Topology, unit.Quantity]:
     """
     Equilibrate a molecular system through NVT warmup and NPT equilibration.
@@ -90,23 +128,33 @@ def equilibrate(
     warmup_steps_per_iteration = int(warmup_steps / N)
     npt_steps = int(config.npt_time / config.integrator_step_size)
     npt_steps_per_iteration = int(npt_steps / N)
+    periodic = not implicit_solvent
+    box_vectors = None if implicit_solvent else topology.getPeriodicBoxVectors()
 
     # ========================================
     # PHASE 1: NVT WARMUP (with restraints)
     # ========================================
-    system = create_system(forcefield, topology, rest_ligand=False)
+    system = create_system(
+        forcefield, topology, rest_ligand=False, implicit_solvent=implicit_solvent
+    )
 
     # Use small timestep for initial warmup
     integrator = create_integrator(0.001 * unit.picoseconds)
 
     # Add restraints to backbone and ligand
     system, _ = add_restraints(
-        system, positions, topology.atoms(), restraint_force=config.restraint_force, restraints=("backbone", "ligand")
+        system,
+        positions,
+        topology.atoms(),
+        restraint_force=config.restraint_force,
+        restraints=("backbone", "ligand"),
+        periodic=periodic,
     )
 
     # Create simulation
     simulation = app.Simulation(topology, system, integrator)
-    simulation.context.setPeriodicBoxVectors(*topology.getPeriodicBoxVectors())
+    if box_vectors is not None:
+        simulation.context.setPeriodicBoxVectors(*box_vectors)
     simulation.context.setPositions(positions)
 
     # Energy minimization
@@ -131,27 +179,37 @@ def equilibrate(
             pbar.update(1)
 
     # Save warmup state including box vectors
-    warmup_state = simulation.context.getState(getPositions=True, enforcePeriodicBox=True)
+    warmup_state = simulation.context.getState(
+        getPositions=True, enforcePeriodicBox=periodic
+    )
     warmup_positions = warmup_state.getPositions()
-    warmup_box = warmup_state.getPeriodicBoxVectors()
+    warmup_box = warmup_state.getPeriodicBoxVectors() if periodic else None
 
-    # Create new system with barostat
-    system = create_system(forcefield, topology, rest_ligand=False)
+    # Create new system for production equilibration
+    system = create_system(
+        forcefield, topology, rest_ligand=False, implicit_solvent=implicit_solvent
+    )
     integrator = create_integrator(config.integrator_step_size)
 
     # Add restraints (will be gradually reduced)
     system, _ = add_restraints(
-        system, warmup_positions, topology.atoms(), 4.0, restraints=("backbone", "ligand")
+        system,
+        warmup_positions,
+        topology.atoms(),
+        4.0,
+        restraints=("backbone", "ligand"),
+        periodic=periodic,
     )
 
-    # Add Monte Carlo barostat for NPT
-    system.addForce(MonteCarloBarostat(1 * unit.atmosphere, 300 * unit.kelvin))
+    if not implicit_solvent:
+        # Add Monte Carlo barostat for NPT
+        system.addForce(MonteCarloBarostat(1 * unit.atmosphere, 300 * unit.kelvin))
 
     # Create new simulation
     simulation = app.Simulation(topology, system, integrator)
 
-    # CRITICAL: Set box vectors from warmup BEFORE setting positions
-    simulation.context.setPeriodicBoxVectors(*warmup_box)
+    if warmup_box is not None:
+        simulation.context.setPeriodicBoxVectors(*warmup_box)
     simulation.context.setPositions(warmup_positions)
 
     # Quick minimization with new system
@@ -160,21 +218,21 @@ def equilibrate(
     # Set velocities at target temperature
     simulation.context.setVelocitiesToTemperature(300 * unit.kelvin)
 
-    # Add reporter to track density and volume
-    density_reporter = app.StateDataReporter(
-        "/tmp/npt_equilibration.log",
-        100,
-        step=True,
-        volume=True,
-        density=True,
-        temperature=True,
-        potentialEnergy=True,
-    )
-    simulation.reporters.append(density_reporter)
-
-    # NPT equilibration with gradual restraint release
+    equil_desc = "NVT Equil" if implicit_solvent else "NPT Equil"
     volumes_nm3: list[float] = []
-    with tqdm(total=N, desc="NPT Equil", unit="iter") as pbar:
+    if not implicit_solvent:
+        density_reporter = app.StateDataReporter(
+            "/tmp/npt_equilibration.log",
+            100,
+            step=True,
+            volume=True,
+            density=True,
+            temperature=True,
+            potentialEnergy=True,
+        )
+        simulation.reporters.append(density_reporter)
+
+    with tqdm(total=N, desc=equil_desc, unit="iter") as pbar:
         for _i, k in enumerate(np.linspace(4.0, 1.0, N)):
             iter_start = time.time()
             simulation.step(npt_steps_per_iteration)
@@ -184,32 +242,41 @@ def equilibrate(
                 "k", float(k) * unit.kilocalories_per_mole / unit.angstroms**2
             )
 
-            volume = (
-                simulation.context.getState()
-                .getPeriodicBoxVolume()
-                .value_in_unit(unit.nanometer**3)
-            )
-            volumes_nm3.append(volume)
+            postfix: dict[str, str] = {"k": f"{k:.2f}"}
+            if not implicit_solvent:
+                volume = (
+                    simulation.context.getState()
+                    .getPeriodicBoxVolume()
+                    .value_in_unit(unit.nanometer**3)
+                )
+                volumes_nm3.append(volume)
+                postfix["vol"] = f"{volume:.1f}"
 
-            # Calculate performance
             iter_time = time.time() - iter_start
             sim_time_ns = npt_steps_per_iteration * config.integrator_step_size / 1000.0
             ns_per_day = sim_time_ns * 86400 / iter_time if iter_time > 0 else 0
-
-            pbar.set_postfix({"k": f"{k:.2f}", "vol": f"{volume:.1f}", "ns/day": f"{ns_per_day._value:.2f}"})
+            postfix["ns/day"] = f"{ns_per_day._value:.2f}"
+            pbar.set_postfix(postfix)
             pbar.update(1)
 
-    _check_volume_plateau(np.array(volumes_nm3))
+    if not implicit_solvent:
+        _check_volume_plateau(np.array(volumes_nm3))
 
-    # Save final equilibrated state with box vectors
-    npt_state = simulation.context.getState(
-        getPositions=True, getVelocities=True, getEnergy=True, enforcePeriodicBox=True
+    # Save final equilibrated state
+    final_state = simulation.context.getState(
+        getPositions=True,
+        getVelocities=True,
+        getEnergy=True,
+        enforcePeriodicBox=periodic,
     )
 
-    topology.setPeriodicBoxVectors(npt_state.getPeriodicBoxVectors())
+    if periodic:
+        topology.setPeriodicBoxVectors(final_state.getPeriodicBoxVectors())
 
-    positions = npt_state.getPositions()
+    positions = final_state.getPositions()
+    if periodic:
+        positions = _recenter_ligand_positions(topology, positions)
 
     return topology, positions
-    
+
 

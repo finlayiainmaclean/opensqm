@@ -189,4 +189,4 @@ def _resolve_named_transitions(
     return out
 
 
-__all__ = ["build_transitions_tree", "_resolve_named_transitions"]
+__all__ = ["_resolve_named_transitions", "build_transitions_tree"]

@@ -10,19 +10,18 @@ from loguru import logger
 from openmm import unit
 from openmm.app import Modeller
 from openmm.app.pdbfile import PDBFile
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from rdkit import Chem, RDLogger
-
 from tqdm import tqdm
 
+from opensqm.md.equilibrate import EquilibrationSettings, equilibrate
 from opensqm.md.mmgbsa import MMGBSASettings, get_interaction_energy
 from opensqm.md.prepare import prepare_complex
 from opensqm.md.representative import get_representative_frame
 from opensqm.md.vanilla import ProductionSettings, production
 from opensqm.rdkit_utils import set_coordinates
 from opensqm.torsion_scanner import autodetect_flip_dihedrals
-from opensqm.md.equilibrate import EquilibrationSettings, equilibrate
-from pydantic import ConfigDict
+
 RDLogger.DisableLog('rdApp.warning')
 
 
@@ -33,9 +32,9 @@ class MMGBSASettings(BaseModel):
     model_config = ConfigDict(frozen=True)
     n_closest_waters: int = 5
     n_replicas: int = 1
-    ligand_resname: str = "LIG" 
+    ligand_resname: str = "LIG"
     equilibration_config: EquilibrationSettings = EquilibrationSettings()
-    production_config: ProductionSettings = ProductionSettings()  
+    production_config: ProductionSettings = ProductionSettings()
     overwrite: bool = False
     use_terminal_ring_mc: bool = True
 
@@ -76,9 +75,9 @@ def run_mmgbsa(
     logger.info("Equilibrating complex")
 
     if equil_pdb_path.exists() and not config.overwrite:
-        logger.info(f"Equilibrated complex already exists")
+        logger.info("Equilibrated complex already exists")
     else:
-        logger.info(f"Equilibrating complex")
+        logger.info("Equilibrating complex")
         topology, positions = equilibrate(topology, positions, forcefield, config=config.equilibration_config)
         PDBFile.writeFile(topology, positions, open(equil_pdb_path, "w"), keepIds=True)
 
@@ -94,12 +93,12 @@ def run_mmgbsa(
         close_top_path = replica_dir / "com.close.prmtop"
         energies_path = replica_dir / "energies.csv"
 
-        
+
         if trajectory_path.exists() and not config.overwrite:
             logger.info(f"Production simulation for replica {replica_i} already exists")
         else:
             logger.info(f"Running production simulation for replica {replica_i}")
-           
+
             production(
                 topology,
                 positions,
@@ -108,7 +107,7 @@ def run_mmgbsa(
                 config=config.production_config,
                 terminal_dihedrals=terminal_dihedrals,
             )
-            
+
 
         print(equil_pdb_path, trajectory_path, close_top_path, close_trajectory_path)
 
@@ -194,23 +193,21 @@ def main(
     n_closest_waters,
     overwrite: bool,
 ):
-    """Run MD and MMGBSA for a single protein ligand complex."""
-    print("Running MD and MMGBSA for a single protein ligand complex.")
-    print("Protein: ", protein)
-    print("Ligand: ", ligand)
-    print("Output: ", output)
-    print("N_replicas: ", n_replicas)
-    print("Run-time: ", run_time)
-    print("N_closest_waters: ", n_closest_waters)
-    print("Overwrite: ", overwrite)
+
+    config = MMGBSASettings(
+        production_config=ProductionSettings(
+            total_run_time=run_time * unit.picoseconds,
+        ),
+        n_closest_waters=n_closest_waters,
+        overwrite=overwrite,
+        n_replicas=n_replicas
+    )
+
     scores = run_mmgbsa(
         protein,
         ligand,
         output,
-        n_replicas,
-        run_time,
-        overwrite,
-        mmgbsa_config=MMGBSASettings(n_closest_waters=n_closest_waters),
+        config
     )
     print(scores)
 

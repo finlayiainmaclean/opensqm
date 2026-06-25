@@ -26,13 +26,13 @@ TARGET_NAMES: Final[list[str]] = [
 ]
 
 TARGET_PDB_CODES: Final[dict[str, str]] = {
-    "BACE":"4DJX", 
-    "CDK2":"1H1Q", 
-    "JNK1":"2GMX", 
-    "MCL1":"4HW3", 
-    "PTP1":"2QBS", 
-    "Tyk2":"4GIH", 
-    "p38":"3FLY", 
+    "BACE":"4DJX",
+    "CDK2":"1H1Q",
+    "JNK1":"2GMX",
+    "MCL1":"4HW3",
+    "PTP1":"2QBS",
+    "Tyk2":"4GIH",
+    "p38":"3FLY",
     "thrombin":"2ZFF"}
 
 
@@ -70,7 +70,7 @@ def main():
             raw_prot_pdb_path = target_dir / f"{pdb_code}.raw.pdb"
             fixed_prot_pdb_path = target_dir / f"{pdb_code}.fixed.pdb"
 
-          
+
             raw_prot_pdb_path = target_dir / f"{pdb_code}.raw.pdb"
             fixed_prot_pdb_path = target_dir / f"{pdb_code}.fixed.pdb"
 
@@ -112,7 +112,7 @@ def main():
         inputs = pd.DataFrame(inputs)
 
         file = target_dir / "protein.csv"
-        inputs.to_csv(file) 
+        inputs.to_csv(file)
 
 
 

@@ -17,7 +17,6 @@ def get_hydrogen_variants(topology):
 
     This produces output in the format expected by Modeller.addHydrogens(variants=...).
     """
-
     # Build per-residue hydrogen -> parent mapping from bonds
     residue_hydrogens = defaultdict(list)
     for bond in topology.bonds():

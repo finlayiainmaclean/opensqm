@@ -1,8 +1,9 @@
-import pandas as pd
-from opensqm.md.mmgbsa import MMGBSASettings
-from opensqm.run_md import run_mmgbsa
 from pathlib import Path
+
+import pandas as pd
 from scipy.stats import spearmanr
+
+from opensqm.md.mmgbsa import MMGBSASettings, run_mmgbsa
 
 TARGET="003-CK2"
 
@@ -45,4 +46,4 @@ for row in df.itertuples():
     print(spearmanr(scores_df.mm_energy_mean, scores_df.pX))
 
 
-        
+

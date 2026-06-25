@@ -16,10 +16,16 @@ Two entry points live here:
 Both routines hash the ``SimulationConfig`` (forcefields, ligand
 charge method, temperature, ...) into the cache filename so that
 config-incompatible reference fits never collide on disk.
+
+Shipped amino-acid references are cached under
+``opensqm/cph/model-compounds/reference_energies``; custom ligand
+references are cached under ``.cache/cph/reference_energies`` at the
+project root (gitignored).
 """
 from pathlib import Path
-import xxhash
+
 import numpy as np
+import xxhash
 from loguru import logger
 from openff.toolkit.topology import Molecule  # type: ignore
 from rdkit import Chem
@@ -36,7 +42,6 @@ from .finder import (
     _make_pair_reference,
 )
 from .graph import (
-    _log_cycle_residuals,
     _solve_reference_energies_ls,
     _topological_transitions,
     _validate_transitions_graph,
@@ -44,13 +49,29 @@ from .graph import (
 from .hydrogen_variants import get_hydrogen_variants
 from .model_compounds import MODEL_COMPOUNDS
 from .models import TitratableResidueReference
-from .types import HydrogenVariant, NamedTransition
-
+from .types import HydrogenVariant, NamedTransition, VariantSpec
 
 # The model-compound assets live in ``opensqm/cph/model-compounds`` (one
 # level up from this sub-package), so resolve relative to the *parent*
 # directory rather than this module's folder.
 _MODEL_COMPOUND_DIR = Path(__file__).resolve().parent.parent / "model-compounds"
+# Shipped amino-acid reference fits live under model-compounds; user ligands
+# are cached under ``.cache/cph/reference_energies`` at the project root.
+_SHIPPED_REFERENCE_ENERGIES_DIR = _MODEL_COMPOUND_DIR / "reference_energies"
+
+
+def _project_root() -> Path:
+    """Best-effort repo root for dev checkouts; otherwise ``Path.cwd()``."""
+    candidate = Path(__file__).resolve().parents[3]
+    if (candidate / "pyproject.toml").is_file():
+        return candidate
+    return Path.cwd()
+
+
+def _ligand_reference_cache_dir() -> Path:
+    cache_dir = _project_root() / ".cache" / "cph" / "reference_energies"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
 
 
 def generate_ligand_reference(
@@ -58,7 +79,7 @@ def generate_ligand_reference(
     variant_molecules: list[Molecule],
     transitions: list[NamedTransition],
     ring_flip_bonds: list[tuple[str, str]] | None = None,
-    iterations: int = 10,
+    iterations: int = 20_000,
     substeps: int = 20,
 ) -> TitratableResidueReference:
     """Compute (or load) a :class:`TitratableResidueReference` for a titratable ligand.
@@ -98,8 +119,10 @@ def generate_ligand_reference(
         reference-energy fit -- so when a cached reference is loaded it
         is overridden by the user-supplied value (and the cache is
         rewritten if they differ). ``None`` is treated as an empty list.
-    iterations, substeps : int
-        Forwarded to :class:`ReferenceEnergyFinder`.
+    iterations : int
+        Maximum number of Monte Carlo moves to attempt per pathway.
+    substeps : int
+        Number of dynamics steps to integrate between Monte Carlo moves.
 
     Returns
     -------
@@ -125,7 +148,12 @@ def generate_ligand_reference(
     main_name = main_mol.name
 
     rdkit_mols = [m.to_rdkit() for m in variant_molecules]
-    inchikeys = [to_inchikey_non_standard(rd) for rd in rdkit_mols]
+    inchikeys: list[str] = []
+    for rd in rdkit_mols:
+        ikey = to_inchikey_non_standard(rd)
+        if ikey is None:
+            raise ValueError("Could not generate InChIKey for variant molecule")
+        inchikeys.append(ikey)
     charges = [int(Chem.GetFormalCharge(rd)) for rd in rdkit_mols]
     inchikey_str = "|".join(inchikeys)
 
@@ -138,23 +166,15 @@ def generate_ligand_reference(
         for t in transitions_resolved
     )
 
-    reference_energies_dir = _MODEL_COMPOUND_DIR / "reference_energies"
-    reference_energies_dir.mkdir(exist_ok=True)
     cache_path = (
-        reference_energies_dir
+        _ligand_reference_cache_dir()
         / f"{main_name}_{xxhash_str}_{edge_str}_{config.hash()}.json"
     )
-
-    print(cache_path)
 
     user_ring_flip_bonds = [tuple(b) for b in (ring_flip_bonds or [])]
     if cache_path.exists():
         logger.info(f"Skipping {main_name} ({xxhash_str}): cached at {cache_path}")
         cached = TitratableResidueReference.load(cache_path)
-        # ``ring_flip_bonds`` is cheap metadata, not part of the
-        # reference-energy fit, so honour the user's input even when
-        # loading a cached reference (and rewrite the cache so disk
-        # reflects current intent for subsequent runs).
         if list(cached.ring_flip_bonds) != user_ring_flip_bonds:
             cached = cached.copy(update={"ring_flip_bonds": user_ring_flip_bonds})
             cached.save(cache_path)
@@ -163,7 +183,8 @@ def generate_ligand_reference(
     per_state_variants: list[HydrogenVariant] = []
     for mol in variant_molecules:
         per_state_top = mol.to_topology().to_openmm()
-        per_state_variants.append(get_hydrogen_variants(per_state_top)[0])
+        variant = get_hydrogen_variants(per_state_top)[0]
+        per_state_variants.append(variant if variant is not None else [])
 
     lig_explicit_ff = config.get_explicit_forcefield(variant_molecules)
 
@@ -185,7 +206,7 @@ def generate_ligand_reference(
     ordered_transitions = _topological_transitions(transitions_resolved, root_idx=0)
     measured_deltas_kj: list[float] = []
     for t in ordered_transitions:
-        pair_variants = [per_state_variants[t.parent], per_state_variants[t.child]]
+        pair_variants: list[VariantSpec] = [per_state_variants[t.parent], per_state_variants[t.child]]
         pair_names = [names[t.parent], names[t.child]]
         pair_charges = [charges[t.parent], charges[t.child]]
         pair_label = f"{names[t.parent]}-{names[t.child]}"
@@ -208,20 +229,23 @@ def generate_ligand_reference(
         )
         logger.info(f"Computing reference energy for {pair_label} (pKa={t.pka})")
         finder = ReferenceEnergyFinder(cph, pKa=t.pka, temperature=config.temperature)
-        finder.findReferenceEnergies(iterations=iterations, substeps=substeps)
+        finder.findReferenceEnergies(
+            substeps=substeps,
+            max_iterations=iterations,
+            progress_desc=f"{pair_label} (pKa={t.pka})",
+        )
         ref_energies = cph.titrations[ligand_res_idx].referenceEnergies
         logger.info(
             f"Computed reference energy for {pair_label} (pKa={t.pka}): {ref_energies}"
         )
         measured_deltas_kj.append(float(ref_energies[1]._value))
 
-    energies_kj, edge_residuals_kj = _solve_reference_energies_ls(
+    energies_kj, _edge_residuals_kj = _solve_reference_energies_ls(
         ordered_transitions,
         measured_deltas_kj,
         n_variants=len(variant_molecules),
         root_idx=0,
     )
-    _log_cycle_residuals(main_name, ordered_transitions, edge_residuals_kj, names)
 
     reference = TitratableResidueReference(
         residue_name=main_name,
@@ -274,7 +298,7 @@ def generate_residue_reference_dict(
         recording rotatable bonds that ``ConstantPH`` should treat as
         terminal-group MC moves.
     iterations : int
-        Number of Monte Carlo moves to attempt per pathway.
+        Maximum number of Monte Carlo moves to attempt per pathway.
     substeps : int
         Number of dynamics steps to integrate between Monte Carlo moves.
 
@@ -284,7 +308,7 @@ def generate_residue_reference_dict(
         Keyed by residue name (e.g. ``"HIS"`` for proteins, the ligand's
         ``Molecule.name`` for ligands).
     """
-    reference_energies_dir = _MODEL_COMPOUND_DIR / "reference_energies"
+    reference_energies_dir = _SHIPPED_REFERENCE_ENERGIES_DIR
     reference_energies_dir.mkdir(exist_ok=True)
 
     references: dict[str, TitratableResidueReference] = {}
@@ -342,13 +366,12 @@ def generate_residue_reference_dict(
                     substeps=substeps,
                 )
             )
-        energies_kj, edge_residuals_kj = _solve_reference_energies_ls(
+        energies_kj, _edge_residuals_kj = _solve_reference_energies_ls(
             ordered_transitions,
             measured_deltas_kj,
             n_variants=len(variants),
             root_idx=0,
         )
-        _log_cycle_residuals(residue_name, ordered_transitions, edge_residuals_kj, variants)
 
         reference = TitratableResidueReference(
             residue_name=residue_name,
@@ -365,7 +388,6 @@ def generate_residue_reference_dict(
         references[residue_name] = reference
 
     if ligands is not None:
-
         for entry in ligands:
             if len(entry) == 2:
                 variant_molecules, transitions = entry

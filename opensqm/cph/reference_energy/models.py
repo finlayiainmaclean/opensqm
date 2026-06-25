@@ -340,4 +340,4 @@ class TitratableResidueReference(BaseModel):
         return cls.parse_raw(Path(path).read_text())
 
 
-__all__ = ["Transition", "TitratableResidueReference"]
+__all__ = ["TitratableResidueReference", "Transition"]

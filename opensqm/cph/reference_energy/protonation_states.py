@@ -64,6 +64,7 @@ def _heavy_skeleton(mol: Chem.Mol) -> Chem.Mol:
         atom.SetFormalCharge(0)
         atom.SetNumExplicitHs(0)
         atom.SetNoImplicit(True)
+
     return skel.GetMol()
 
 
@@ -200,6 +201,59 @@ def _ensure_explicit_hs(state: Chem.Mol | str) -> Chem.Mol:
     return Chem.Mol(state) if has_explicit_h else Chem.AddHs(state)
 
 
+def _has_conformer(mol: Chem.Mol) -> bool:
+    return mol.GetNumConformers() > 0
+
+
+def _resolve_geometry_reference(
+    states_with_hs: list[Chem.Mol],
+    geometry_mol: Chem.Mol | None,
+) -> Chem.Mol | None:
+    """Pick the mol whose conformer seeds the super-template geometry."""
+    if geometry_mol is not None:
+        return geometry_mol
+    candidates = [state for state in states_with_hs if _has_conformer(state)]
+    if not candidates:
+        return None
+    # The most-protonated input is usually closest to the super-template.
+    return max(
+        candidates,
+        key=lambda state: sum(1 for atom in state.GetAtoms() if atom.GetAtomicNum() == 1),
+    )
+
+
+def _embed_template(
+    template: Chem.Mol,
+    *,
+    geometry_mol: Chem.Mol | None,
+    seed: int,
+) -> None:
+    """Assign 3D coordinates to ``template`` in place."""
+    if geometry_mol is not None:
+        reference = _ensure_explicit_hs(geometry_mol)
+        if not _has_conformer(reference):
+            raise ValueError("geometry_mol must carry a 3D conformer")
+        try:
+            AllChem.ConstrainedEmbed(
+                template,
+                Chem.RemoveHs(reference),
+                useTethers=False,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to transfer the input conformer onto the protonation template"
+            ) from exc
+        return
+
+    # template = Chem.AddHs(template, addCoords=True)
+
+    if AllChem.EmbedMolecule(template, randomSeed=seed) == -1:
+        raise RuntimeError(
+            "Failed to embed a 3D conformer for the merged super-template"
+        )
+    AllChem.UFFOptimizeMolecule(template)
+
+
 def _map_states_to_canonical_skeleton(
     states_with_hs: list[Chem.Mol],
 ) -> tuple[Chem.Mol, list[tuple[int, ...]]]:
@@ -227,7 +281,9 @@ def _map_states_to_canonical_skeleton(
 
 
 def build_protonation_template(
-    states: list[Chem.Mol] | list[str],
+    states: list[Chem.Mol],
+    *,
+    geometry_mol: Chem.Mol | None = None,
     seed: int = 42,
 ) -> Chem.Mol:
     """Build a maximally-protonated "super-template" from a list of protomers.
@@ -243,16 +299,23 @@ def build_protonation_template(
         - H2N-CH2-CH2-NH2   (both deprotonated)
 
     this returns the di-cation H3N+-CH2-CH2-NH3+ that none of the inputs
-    contain on its own. The template is embedded with ETKDG, UFF-optimized,
-    and has PDB-style heavy-atom and H names assigned.
+    contain on its own. When ``geometry_mol`` (or any input state) carries
+    a 3D conformer, that pose is transferred onto the template with
+    :func:`rdkit.Chem.AllChem.ConstrainedEmbed`; otherwise the template is
+    embedded with ETKDG and UFF-relaxed. PDB-style heavy-atom and H names
+    are assigned before return.
 
     All inputs must share a heavy-atom skeleton (i.e. only protonation
     states of the same chemistry, not different tautomers with shifted
-    heavy atoms). Inputs may be SMILES strings or RDKit Mols and are
-    accepted with or without explicit Hs.
+    heavy atoms). Inputs must be RDKit Mols and are accepted with or
+    without explicit Hs.
     """
     if not states:
         raise ValueError("states must not be empty")
+    if any(isinstance(state, str) for state in states):
+        raise TypeError(
+            "build_protonation_template requires RDKit mols with conformers, not SMILES"
+        )
 
     states_with_hs = [_ensure_explicit_hs(s) for s in states]
     canonical_skel, mappings = _map_states_to_canonical_skeleton(states_with_hs)
@@ -263,12 +326,11 @@ def build_protonation_template(
     # formal charge at that atom.
     max_h: list[int] = [0] * n_heavy
     max_q: list[int | None] = [None] * n_heavy
-    for state, mapping in zip(states_with_hs, mappings):
+    for state, mapping in zip(states_with_hs, mappings, strict=False):
         h_counts, charges = _heavy_features(state)
         for state_idx in range(n_heavy):
             c_idx = mapping[state_idx]
-            if h_counts[state_idx] > max_h[c_idx]:
-                max_h[c_idx] = h_counts[state_idx]
+            max_h[c_idx] = max(max_h[c_idx], h_counts[state_idx])
             cur_q = max_q[c_idx]
             if cur_q is None or charges[state_idx] > cur_q:
                 max_q[c_idx] = charges[state_idx]
@@ -284,7 +346,7 @@ def build_protonation_template(
     template = template_rw.GetMol()
     try:
         Chem.SanitizeMol(template)
-    except Chem.AtomValenceException as exc:
+    except (Chem.AtomValenceException, Chem.KekulizeException) as exc:
         raise ValueError(
             f"Merged super-template is chemically invalid: cannot fit "
             f"H-counts {max_h} with formal charges {max_q} on the shared "
@@ -292,17 +354,20 @@ def build_protonation_template(
         ) from exc
 
     template = Chem.AddHs(template)
-    if AllChem.EmbedMolecule(template, randomSeed=seed) == -1:
-        raise RuntimeError(
-            "Failed to embed a 3D conformer for the merged super-template"
-        )
-    AllChem.UFFOptimizeMolecule(template)
+    geometry_reference = _resolve_geometry_reference(states_with_hs, geometry_mol)
+    _embed_template(
+        template,
+        geometry_mol=geometry_reference,
+        seed=seed,
+    )
     _assign_ligand_atom_names(template)
     return template
 
 
 def build_protonation_states(
-    states: list[Chem.Mol] | list[str],
+    states: list[Chem.Mol],
+    *,
+    geometry_mol: Chem.Mol | None = None,
     seed: int = 42,
 ) -> list[Chem.Mol]:
     """Build aligned RDKit Mols for a list of protonation states.
@@ -312,21 +377,44 @@ def build_protonation_states(
     represented even when no single input state has all sites protonated.
     Each input state is then derived from that template by locating which
     hydrogens differ via a heavy-atom substructure match and removing them.
-    All returned mols share heavy-atom indices, PDB-style names, and
-    conformer geometry -- the prerequisite for using them together with
+    All returned mols share heavy-atom indices, PDB-style names, and the
+    input conformer frame -- the prerequisite for using them together with
     ``Modeller.addHydrogens(variants=...)``. The returned list preserves
-    the input order, so callers can pass e.g. a unipka microstate
-    distribution in whichever order is most convenient.
+    the input order.
+
+    Parameters
+    ----------
+    states:
+        Protomer mols with explicit 3D conformers (e.g. the ``mol`` column
+        from a unipka distribution). SMILES strings are not accepted.
+    geometry_mol:
+        Optional mol whose conformer defines the binding pose. Defaults to
+        the most-protonated entry in ``states`` that carries a conformer.
     """
     if not states:
         raise ValueError("states must not be empty")
+    if any(isinstance(state, str) for state in states):
+        raise TypeError(
+            "build_protonation_states requires RDKit mols with conformers, not SMILES"
+        )
 
     states_with_hs = [_ensure_explicit_hs(s) for s in states]
-    template = build_protonation_template(states_with_hs, seed=seed)
+    geometry_reference = _resolve_geometry_reference(states_with_hs, geometry_mol)
+    if geometry_reference is None:
+        raise ValueError(
+            "build_protonation_states requires at least one input mol with a "
+            "3D conformer, or an explicit geometry_mol"
+        )
+
+    template = build_protonation_template(
+        states_with_hs,
+        geometry_mol=geometry_reference,
+        seed=seed,
+    )
     return [
         _derive_state_from_template(template, state)
         for state in states_with_hs
     ]
 
 
-__all__ = ["build_protonation_template", "build_protonation_states"]
+__all__ = ["build_protonation_states", "build_protonation_template"]

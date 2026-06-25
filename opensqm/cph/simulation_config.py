@@ -1,29 +1,28 @@
-from typing import Any, Literal
-from pydantic import BaseModel, Field, validator
-
-from openmm.app import ForceField, PME, CutoffNonPeriodic, HBonds
-from openmm import unit
-from openmm import LangevinIntegrator
-from pydantic_units import OpenMMQuantity
-import xxhash
 import json
+from typing import Any, Literal
+
+import xxhash
+from openmm import LangevinIntegrator, unit
+from openmm.app import PME, CutoffNonPeriodic, ForceField, HBonds
+from pydantic import BaseModel, Field
+from pydantic_units import OpenMMQuantity
 
 
 def _default_explicit_params() -> dict:
-    return dict(
-        nonbondedMethod=PME,
-        nonbondedCutoff=0.9 * unit.nanometers,
-        constraints=HBonds,
-        hydrogenMass=1.5 * unit.dalton,
-    )
+    return {
+        'nonbondedMethod': PME,
+        'nonbondedCutoff': 0.9 * unit.nanometers,
+        'constraints': HBonds,
+        'hydrogenMass': 1.5 * unit.dalton,
+    }
 
 
 def _default_implicit_params() -> dict:
-    return dict(
-        nonbondedMethod=CutoffNonPeriodic,
-        nonbondedCutoff=2.0 * unit.nanometers,
-        constraints=HBonds,
-    )
+    return {
+        'nonbondedMethod': CutoffNonPeriodic,
+        'nonbondedCutoff': 2.0 * unit.nanometers,
+        'constraints': HBonds,
+    }
 
 
 class ConstantpHSettings(BaseModel):
@@ -44,7 +43,7 @@ class ConstantpHSettings(BaseModel):
     friction: OpenMMQuantity[unit.picosecond**-1] = 1.0 / unit.picosecond
     relaxation_friction: OpenMMQuantity[unit.picosecond**-1] = 10.0 / unit.picosecond
 
-    
+
 
 
     # Derived attributes

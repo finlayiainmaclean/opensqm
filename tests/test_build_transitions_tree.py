@@ -7,7 +7,6 @@ is attached as a *parent* of a charge-(q-1) sink instead of as a child of
 a (non-existent) charge-(q+1) parent, so the resulting graph still spans
 all variants by 1-proton steps.
 """
-# ruff: noqa: PLR2004
 
 import pytest
 from openff.toolkit.topology import Molecule  # type: ignore

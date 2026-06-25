@@ -16,15 +16,11 @@ from openmm.app import (
     Topology,
 )
 from pymbar import timeseries
-from pydantic import BaseModel, ConfigDict
 from rdkit import Chem
 from scipy.spatial.distance import cdist
 from tqdm import tqdm
 
-from opensqm.md.equilibrate import EquilibrationSettings
-from opensqm.md.vanilla import ProductionSettings
 from opensqm.md.prepare import get_ligand_forcefield
-
 
 
 def _openmm_atom_lookup_key(atom: Any) -> tuple[Any, ...]:
@@ -113,7 +109,7 @@ def calculate_average_waters_per_residue(
         res_atoms = np.array([a.index for a in res.atoms if a.element.symbol != "H"])
         if len(res_atoms) == 0:
             continue
-            
+
         # Find waters within cutoff of any heavy atom in this residue
         neighbors = md.compute_neighbors(traj, cutoff, res_atoms, haystack_indices=water_atoms)
         counts = [len(frame_neighbors) for frame_neighbors in neighbors]
@@ -130,6 +126,8 @@ def get_interaction_energy(
     close_top_path: str,
     n_closest_waters: int = 5,
     ligand_resname: str = "LIG",
+    frame_indices: np.ndarray | None = None,
+    offmol: "Molecule | None" = None,
 ) -> tuple[list[float], np.ndarray, str, str]:
     """
     Calculate the MMGBSA interaction energy.
@@ -172,12 +170,16 @@ def get_interaction_energy(
     to_delete = waters_to_delete + ion_residues
 
     modeller.delete(to_delete)
-    ligand_rdmol = Chem.AddHs(Chem.MolFromMolFile(ligand_path, removeHs=False), addCoords=True)
+    if offmol is None:
+        ligand_rdmol = Chem.AddHs(Chem.MolFromMolFile(ligand_path, removeHs=False), addCoords=True)
+        offmol = Molecule.from_rdkit(ligand_rdmol, allow_undefined_stereo=True)
 
     # Image in mdtraj
     imaged_traj_path = str(traj_path).replace(".dcd", "_imaged.dcd")
     ref = md.load(str(pdb_path))
     traj_md = md.load(str(traj_path), top=str(pdb_path))
+    if frame_indices is not None:
+        traj_md = traj_md[frame_indices]
     protein_idxs = ref.topology.select("protein and name CA")
     traj_md = traj_md.image_molecules()
     traj_md = traj_md.superpose(
@@ -250,7 +252,6 @@ def get_interaction_energy(
     lig_mask = traj_closest.topology.select(f"resname {ligand_resname}")
     prot_mask = traj_closest.topology.select(f"not resname {ligand_resname}")
 
-    offmol = Molecule.from_rdkit(ligand_rdmol, allow_undefined_stereo=False)
     forcefield_complex = get_ligand_forcefield(offmol, True)
     forcefield_ligand = copy.deepcopy(forcefield_complex)
     forcefield_ligand.loadFile("implicit/obc1.xml")

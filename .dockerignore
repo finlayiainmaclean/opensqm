@@ -1,0 +1,28 @@
+# VCS and local env
+.git
+.github
+.pixi
+.venv
+.env
+
+# Python artifacts
+__pycache__
+*.py[cod]
+*.egg-info
+.ruff_cache
+.pytest_cache
+.mypy_cache
+htmlcov
+.coverage
+coverage.xml
+
+# Large local outputs (mount at runtime instead)
+runs/
+data/
+sqm/
+bespoke-executor/
+
+# Dev-only
+.pre-commit-config.yaml
+AGENTS.md
+LEAN-CTX.md

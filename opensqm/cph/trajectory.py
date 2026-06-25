@@ -48,8 +48,6 @@ from openmm import NonbondedForce, unit
 from openmm.app import Modeller, PDBFile
 from openmm.app.dcdfile import DCDFile
 
-from opensqm.md.water_swap_mc import WATER_LAMBDA_PARAM
-
 if TYPE_CHECKING:
     from opensqm.cph.constantph import ConstantPH
 
@@ -58,12 +56,12 @@ class _StateChannel:
     """Bookkeeping for one system-state's DCD + frame counter."""
 
     __slots__ = (
-        "dcd_path",
-        "pdb_path",
-        "keep_indices",
         "dcd_file",
-        "out_handle",
+        "dcd_path",
         "frame_ix",
+        "keep_indices",
+        "out_handle",
+        "pdb_path",
     )
 
     def __init__(
@@ -73,13 +71,15 @@ class _StateChannel:
         keep_indices: np.ndarray,
         dcd_file: DCDFile,
         out_handle: Any,
+        *,
+        frame_ix: int = 0,
     ) -> None:
         self.dcd_path = dcd_path
         self.pdb_path = pdb_path
         self.keep_indices = keep_indices
         self.dcd_file = dcd_file
         self.out_handle = out_handle
-        self.frame_ix = 0
+        self.frame_ix = frame_ix
 
     def close(self) -> None:
         try:
@@ -129,6 +129,7 @@ class StateSplitTrajectoryManager:
         *,
         csv_path: str | Path | None = None,
         enforce_periodic_box: bool = True,
+        append: bool = False,
     ) -> None:
         self.cph = cph
         self.simulation = cph.simulation
@@ -136,6 +137,7 @@ class StateSplitTrajectoryManager:
         self.topology = cph.explicitTopology
         self.report_interval = int(report_interval)
         self.enforce_periodic_box = bool(enforce_periodic_box)
+        self.append = bool(append)
 
         self.base_path = Path(base_path)
         self.base_path.parent.mkdir(parents=True, exist_ok=True)
@@ -167,21 +169,24 @@ class StateSplitTrajectoryManager:
         # diffusing through space, so we keep ghost1 and drop only
         # ghost2.
         self._always_ghost: frozenset[int] = frozenset()
-        if cph.waterSwap is not None:
-            self._always_ghost = frozenset(
-                int(i) for i in cph.waterSwap.ghost2_atoms
-            )
 
         self._channels: dict[tuple[int, ...], _StateChannel] = {}
+        self._initial_frame_ix = self._restore_frame_counts_from_csv()
         self._step_size_ps = float(
             self.simulation.integrator.getStepSize()
             .value_in_unit(unit.picosecond)
         )
 
-        self._csv_handle = open(self.csv_path, "w", newline="")
+        resume_csv = self.append and self.csv_path.exists()
+        self._csv_handle = open(
+            self.csv_path,
+            "a" if resume_csv else "w",
+            newline="",
+        )
         self._csv_writer = csv.writer(self._csv_handle)
-        self._csv_writer.writerow(["step", "time_ns", "system_state", "frame_ix"])
-        self._csv_handle.flush()
+        if not resume_csv:
+            self._csv_writer.writerow(["step", "time_ns", "system_state", "frame_ix"])
+            self._csv_handle.flush()
 
     def _find_nonbonded_force(self) -> NonbondedForce:
         """Locate the single :class:`NonbondedForce` on the explicit system."""
@@ -200,6 +205,18 @@ class StateSplitTrajectoryManager:
                 "instances; an unambiguous force is required"
             )
         return candidates[0]
+
+    def _restore_frame_counts_from_csv(self) -> dict[tuple[int, ...], int]:
+        """Return next frame index per system-state signature from an existing CSV."""
+        if not self.csv_path.exists():
+            return {}
+        counts: dict[tuple[int, ...], int] = {}
+        with open(self.csv_path, newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                signature = tuple(int(x) for x in row["system_state"].split("_"))
+                counts[signature] = int(row["frame_ix"]) + 1
+        return counts
 
     # ------------------------------------------------------------------
     # OpenMM reporter protocol
@@ -220,10 +237,7 @@ class StateSplitTrajectoryManager:
         # ``lambda_water_swap > 0`` - the Hamiltonian at that moment is
         # the mid-switch alchemical interpolation, not the physical one,
         # and emitting the frame would pollute the per-state DCD.
-        if self.cph.waterSwap is not None:
-            lam = simulation.context.getParameter(WATER_LAMBDA_PARAM)
-            if float(lam) != 0.0:
-                return
+
 
         signature = self._current_signature()
         channel = self._channels.get(signature)
@@ -299,18 +313,23 @@ class StateSplitTrajectoryManager:
             f"{self.base_path.name}.{sig_str}.pdb"
         )
 
-        sub_topology, sub_positions = self._build_sub_topology(keep)
-        with open(pdb_path, "w") as f:
-            PDBFile.writeFile(sub_topology, sub_positions, f)
+        append_dcd = self.append and dcd_path.exists()
+        if append_dcd:
+            sub_topology = PDBFile(str(pdb_path)).topology
+        else:
+            sub_topology, sub_positions = self._build_sub_topology(keep)
+            with open(pdb_path, "w") as f:
+                PDBFile.writeFile(sub_topology, sub_positions, f)
 
-        out_handle = open(dcd_path, "wb")
+        mode = "r+b" if append_dcd else "wb"
+        out_handle = open(dcd_path, mode)
         dcd = DCDFile(
             out_handle,
             sub_topology,
             self.simulation.integrator.getStepSize(),
             self.simulation.currentStep,
             self.report_interval,
-            append=False,
+            append=append_dcd,
         )
         return _StateChannel(
             dcd_path=dcd_path,
@@ -318,6 +337,7 @@ class StateSplitTrajectoryManager:
             keep_indices=keep,
             dcd_file=dcd,
             out_handle=out_handle,
+            frame_ix=self._initial_frame_ix.get(signature, 0),
         )
 
     def _build_sub_topology(self, keep_indices: np.ndarray):
@@ -351,3 +371,38 @@ class StateSplitTrajectoryManager:
             self.close()
         except Exception:
             pass
+
+
+TRAJECTORIES_DIRNAME = "trajectories"
+
+
+def trajectories_dir(output_path: Path) -> Path:
+    return output_path / TRAJECTORIES_DIRNAME
+
+
+def replica_trajectory_stem(replica_i: int) -> str:
+    return f"replica_{replica_i:04d}"
+
+
+def replica_trajectory_base(output_path: Path, replica_i: int) -> Path:
+    return trajectories_dir(output_path) / replica_trajectory_stem(replica_i)
+
+
+def replica_trajectory_index(output_path: Path, replica_i: int) -> Path:
+    return replica_trajectory_base(output_path, replica_i).with_suffix(".csv")
+
+
+def iter_replica_state_trajectories(
+    output_path: Path,
+    replica_i: int,
+) -> list[tuple[Path, Path]]:
+    """Return (dcd, pdb) pairs for one replica's state-split trajectories."""
+    traj_dir = trajectories_dir(output_path)
+    prefix = replica_trajectory_stem(replica_i)
+    pairs: list[tuple[Path, Path]] = []
+    for dcd in sorted(traj_dir.glob(f"{prefix}.*.dcd")):
+        if dcd.name.endswith(".close.dcd") or dcd.name.endswith("_imaged.dcd"):
+            continue
+        pdb = dcd.with_suffix(".pdb")
+        pairs.append((dcd, pdb))
+    return pairs

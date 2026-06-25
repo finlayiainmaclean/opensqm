@@ -1,6 +1,5 @@
 """Convert RDKit molecules to OpenMM topologies and back."""
 
-import numpy as np
 from loguru import logger
 from openmm.app import Atom, Modeller, Topology
 from rdkit import Chem
@@ -18,11 +17,65 @@ def get_rdkit_pdb_info(atom: Chem.Atom) -> tuple[str, str, int, str] | None:
     return chain, res_name, res_num, atom_name
 
 
+def pdb_residue_key_from_rdkit(atom: Chem.Atom) -> tuple[str, str, int, str] | None:
+    """Return a PDB residue key (chain, resname, resnum, icode) for an RDKit atom."""
+    pdb_info = atom.GetPDBResidueInfo()
+    if pdb_info is None:
+        return None
+    icode = (pdb_info.GetInsertionCode() or " ").strip() or " "
+    return (
+        pdb_info.GetChainId().strip(),
+        pdb_info.GetResidueName().strip(),
+        pdb_info.GetResidueNumber(),
+        icode,
+    )
+
+
+def pdb_residue_key_from_openmm(residue) -> tuple[str, str, int, str]:
+    """Return a PDB residue key (chain, resname, resnum, icode) for an OpenMM residue."""
+    icode = (getattr(residue, "insertionCode", "") or " ").strip() or " "
+    try:
+        resnum = int(residue.id)
+    except (TypeError, ValueError):
+        resnum = int("".join(character for character in str(residue.id) if character.isdigit()) or 0)
+    return (
+        str(residue.chain.id).strip(),
+        residue.name.strip(),
+        resnum,
+        icode,
+    )
+
+
+def map_pdb_residue_keys_to_openmm_indices(
+    topology: Topology,
+    residue_keys: set[tuple[str, str, int, str]],
+) -> set[int]:
+    """Map PDB residue keys onto OpenMM residue indices.
+
+    OpenFF-built ligand topologies often leave ``chain.id`` empty in memory
+    even though :class:`openmm.app.PDBFile` writes them with a concrete chain
+    letter (typically ``A``). When matching RDSL selections from a written
+    PDB, treat blank chains as wildcards so ligands are not dropped.
+    """
+    omm_keys = [
+        (pdb_residue_key_from_openmm(residue), residue.index)
+        for residue in topology.residues()
+    ]
+    selected: set[int] = set()
+    for chain, resname, resnum, icode in residue_keys:
+        for omm_key, index in omm_keys:
+            omm_chain, omm_name, omm_num, omm_icode = omm_key
+            if omm_name != resname or omm_num != resnum or omm_icode != icode:
+                continue
+            if omm_chain == chain or not omm_chain or not chain:
+                selected.add(index)
+                break
+    return selected
+
+
 def get_openmm_pdb_info(atom: Atom) -> str:
     """Get PDB info string for OpenMM atom."""
-    chain = atom.residue.chain.index
-    res_name = atom.residue.name.strip()
-    res_num = int(atom.residue.id)  # residue.id might be a string
+    chain, res_name, res_num, _ = pdb_residue_key_from_openmm(atom.residue)
     atom_name = atom.name.strip()
     return f"{chain}:{res_name}{res_num}:{atom_name}"
 
@@ -44,17 +97,6 @@ def build_rdkit_to_openmm_mapping(
     -------
     dict : mapping from RDKit atom index -> OpenMM atom index
     """
-    rdkit_chains = []
-    for a in rdkit_mol.GetAtoms():
-        pdb_info = a.GetPDBResidueInfo()
-        if pdb_info is None:
-            continue
-        chain_id = pdb_info.GetChainId()
-        if chain_id not in rdkit_chains:
-            rdkit_chains.append(chain_id)
-
-    chains_rdkit_to_openmm = dict(zip(rdkit_chains, np.arange(len(rdkit_chains)), strict=True))
-
     # Build a dictionary of OpenMM atom identifiers to indices
     openmm_id_to_idx = {}
     for oa in modeller_topology.atoms():
@@ -73,9 +115,7 @@ def build_rdkit_to_openmm_mapping(
             continue
 
         chain, res_name, res_num, atom_name = pdb_info
-        opemm_chain = chains_rdkit_to_openmm[chain]
-
-        pdb_id = f"{opemm_chain}:{res_name}{res_num}:{atom_name}"
+        pdb_id = f"{chain}:{res_name}{res_num}:{atom_name}"
 
         if pdb_id in openmm_id_to_idx:
             rdkit_to_openmm[rdkit_idx] = openmm_id_to_idx[pdb_id]

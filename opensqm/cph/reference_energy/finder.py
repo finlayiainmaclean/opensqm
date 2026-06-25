@@ -30,12 +30,35 @@ from openmm.unit import (
     kilojoules_per_mole,
 )
 from scipy.optimize import curve_fit
+from tqdm import tqdm
 
 from opensqm.cph.constantph import ConstantPH
 from opensqm.cph.simulation_config import ConstantpHSettings
 
 from .models import TitratableResidueReference, Transition
 from .types import VariantSpec
+
+
+def _mean_fractions_by_ph(
+    fractions: list[list[float]],
+    min_samples_per_ph: int,
+) -> dict[int, float]:
+    means: dict[int, float] = {}
+    for ph_index, samples in enumerate(fractions):
+        if len(samples) >= min_samples_per_ph:
+            means[ph_index] = float(np.mean(samples))
+    return means
+
+
+def _fractions_converged(
+    previous: dict[int, float],
+    current: dict[int, float],
+    n_ph: int,
+    tolerance: float,
+) -> bool:
+    if len(current) != n_ph or len(previous) != n_ph:
+        return False
+    return all(abs(current[i] - previous[i]) < tolerance for i in current)
 
 
 class ReferenceEnergyFinder(object):
@@ -61,23 +84,40 @@ class ReferenceEnergyFinder(object):
         if not is_quantity(temperature):
             temperature = temperature*kelvin
         self.temperature = temperature
-        self.residueIndex = list(model.titrations.keys())[0]
+        self.residueIndex = next(iter(model.titrations.keys()))
         self.titration = model.titrations[self.residueIndex]
         if len(self.titration.explicitStates) != 2:
             raise ValueError("Only residues with two states are currently supported")
 
-    def findReferenceEnergies(self, iterations=10, substeps=20):
+    def findReferenceEnergies(
+        self,
+        substeps: int = 20,
+        *,
+        max_iterations: int = 20_000,
+        check_interval: int = 200,
+        fraction_tolerance: float = 0.01,
+        min_samples_per_ph: int = 50,
+        stable_checks: int = 3,
+        progress_desc: str | None = None,
+    ):
         """
         Compute the reference energies for the states of the model compound.  On exit, they will be stored in
         the ConstantPH object.
 
         Parameters
         ----------
-        iterations: int
-            The number of Monte Carlo moves to attempt.  The larger the number, the more tightly converged
-            the results will be.
-        subsets: int
+        substeps : int
             The number of dynamics steps to integrate between Monte Carlo moves.
+        max_iterations : int
+            Upper bound on Monte Carlo moves per outer refinement cycle.
+        check_interval : int
+            How often to test whether per-pH protonation fractions have stabilized.
+        fraction_tolerance : float
+            Maximum allowed change in a per-pH mean fraction between checks.
+        min_samples_per_ph : int
+            Minimum samples required at every pH before testing for convergence.
+        stable_checks : int
+            Number of consecutive stable checks required before stopping.
         """
         # Find an initial estimate of the reference energies just by computing the potential
         # energies of the states.
@@ -98,14 +138,50 @@ class ReferenceEnergyFinder(object):
 
         while True:
             self.model.setPH([-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0])
-            for i in range(1000):
+            for _ in range(1000):
                 self.model.simulation.step(substeps)
                 self.model.attemptMCStep()
             fractions = [[] for _ in range(len(self.model.pH))]
-            for i in range(iterations):
-                self.model.simulation.step(substeps)
-                self.model.attemptMCStep()
-                fractions[self.model.currentPHIndex].append(1.0 if self.titration.protonatedIndex == self.titration.currentIndex else 0.0)
+            previous_means: dict[int, float] | None = None
+            consecutive_stable_checks = 0
+            pbar = (
+                tqdm(total=max_iterations, desc=progress_desc, leave=False)
+                if progress_desc is not None
+                else None
+            )
+            try:
+                for mc_step in range(1, max_iterations + 1):
+                    self.model.simulation.step(substeps)
+                    self.model.attemptMCStep()
+                    fractions[self.model.currentPHIndex].append(
+                        1.0
+                        if self.titration.protonatedIndex == self.titration.currentIndex
+                        else 0.0
+                    )
+                    if pbar is not None:
+                        pbar.update(1)
+
+                    if mc_step % check_interval != 0:
+                        continue
+
+                    current_means = _mean_fractions_by_ph(
+                        fractions, min_samples_per_ph,
+                    )
+                    if previous_means is not None and _fractions_converged(
+                        previous_means,
+                        current_means,
+                        len(self.model.pH),
+                        fraction_tolerance,
+                    ):
+                        consecutive_stable_checks += 1
+                        if consecutive_stable_checks >= stable_checks:
+                            break
+                    else:
+                        consecutive_stable_checks = 0
+                    previous_means = current_means
+            finally:
+                if pbar is not None:
+                    pbar.close()
 
             # Fit a curve to the data to better estimate when the fraction is exactly 0.5,
             # and compute the reference energy based on it.
@@ -207,7 +283,10 @@ def _compute_pairwise_reference_energy(
     )
     logger.info(f"Computing reference energy for {cache_name} with pKa={pka}")
     finder = ReferenceEnergyFinder(cph, pKa=pka, temperature=config.temperature)
-    finder.findReferenceEnergies(iterations=iterations, substeps=substeps)
+    finder.findReferenceEnergies(
+        substeps=substeps,
+        max_iterations=iterations,
+    )
     ref_energies = cph.titrations[1].referenceEnergies
     logger.info(f"Computed reference energies for {cache_name}: {ref_energies}")
     # ``referenceEnergies`` is in the order of the input ``pair``. ``pair[0]``

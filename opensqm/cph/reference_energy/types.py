@@ -6,7 +6,6 @@ Pydantic at module-load time.
 """
 from typing import Union
 
-
 # A single state's worth of hydrogen placement instructions, in the form
 # expected by ``Modeller.addHydrogens(variants=...)`` for residues that are
 # not described in OpenMM's default ``Hydrogens.xml``: a list of
@@ -24,4 +23,4 @@ VariantSpec = Union[str, HydrogenVariant]
 NamedTransition = tuple[str, str, float]
 
 
-__all__ = ["HydrogenVariant", "VariantSpec", "NamedTransition"]
+__all__ = ["HydrogenVariant", "NamedTransition", "VariantSpec"]

@@ -13,19 +13,28 @@ from openmm.openmm import System
 from openmm.unit import Quantity
 from pydantic_units import OpenMMQuantity
 
+
 def add_distal_restraints(
     system: System,
     positions: Quantity,
     atoms: Generator[Atom, None, None],
     min_distance: float = 0.8,
-    max_distance: float = 1.5,
+    max_distance: float = 1.2,
     max_restraint_force: float = 10.0,
     restraints: Sequence[Literal["ligand", "backbone", "heavy_atom", "protein", "solvent"]] = (
         "ligand",
         "backbone",
     ),
+    flat_bottom_sigma: float = 0.0,
+    exclusion_distance: float = 1.0,
+    exclude_by_residue: bool = False,
 ) -> System:
-    # Add restraints to system for equilibration in place with distance-dependent force constants
+    # Add restraints to system for equilibration in place with distance-dependent force constants.
+    # ``flat_bottom_sigma`` (Angstrom): if > 0 use a flat-bottom restraint, no force until the atom
+    # is displaced more than sigma from its reference position (paper backbone sigma = 3.0 A).
+    # ``exclusion_distance`` (nm): atoms nearer the ligand than this are left free.
+    # ``exclude_by_residue``: free the entire residue when any of its atoms is inside the exclusion
+    # distance (paper: residues within 6 A of the binding site).
 
     # Convert atoms generator to list so we can iterate multiple times
     atoms_list = list(atoms)
@@ -41,8 +50,23 @@ def add_distal_restraints(
 
     lig_positions = np.array(lig_positions)
 
+    # Optional: min distance from each residue to the binding site (over residue atoms).
+    residue_min_distance: dict[object, float] = {}
+    if exclude_by_residue:
+        for atom_crd, atom in zip(positions, atoms_list, strict=False):
+            atom_pos = atom_crd.value_in_unit(unit.nanometers)
+            d = float(np.min(np.linalg.norm(lig_positions - atom_pos, axis=1)))
+            if d < residue_min_distance.get(atom.residue, np.inf):
+                residue_min_distance[atom.residue] = d
+
     # Create force with per-particle force constant
-    force = CustomExternalForce("k*periodicdistance(x, y, z, x0, y0, z0)^2")
+    if flat_bottom_sigma > 0.0:
+        force = CustomExternalForce(
+            "k*(max(0, periodicdistance(x, y, z, x0, y0, z0) - sigma))^2"
+        )
+        force.addGlobalParameter("sigma", flat_bottom_sigma / 10.0)  # Angstrom -> nm
+    else:
+        force = CustomExternalForce("k*periodicdistance(x, y, z, x0, y0, z0)^2")
     force.addPerParticleParameter("k")
     force.addPerParticleParameter("x0")
     force.addPerParticleParameter("y0")
@@ -74,7 +98,10 @@ def add_distal_restraints(
             distances = np.linalg.norm(lig_positions - atom_pos, axis=1)
             min_distance_nm = np.min(distances)
 
-            if min_distance_nm < 1.0:
+            if exclude_by_residue:
+                if residue_min_distance.get(atom.residue, np.inf) < exclusion_distance:
+                    continue
+            elif min_distance_nm < exclusion_distance:
                 continue
 
             # Calculate distance-dependent force constant using linear interpolation
@@ -101,9 +128,14 @@ def add_restraints(
         "ligand",
         "backbone",
     ),
+    periodic: bool = True,
 ) -> System:
     # Add restrains to system for equilibration in place. The restraints are added to the backbone atoms of the protein, and heavy atoms of the ligand.
-    force = CustomExternalForce("k*periodicdistance(x, y, z, x0, y0, z0)^2")
+    if periodic:
+        expr = "k*periodicdistance(x, y, z, x0, y0, z0)^2"
+    else:
+        expr = "k*((x-x0)^2+(y-y0)^2+(z-z0)^2)"
+    force = CustomExternalForce(expr)
     force.addGlobalParameter("k", restraint_force)
     force.addPerParticleParameter("x0")
     force.addPerParticleParameter("y0")

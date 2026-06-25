@@ -1,5 +1,6 @@
 
-from openmm import unit, app, LangevinIntegrator
+from openmm import LangevinIntegrator, app, unit
+
 
 def minimize(modeller: app.Modeller, ff_files: tuple = ('amber14-all.xml', 'implicit/gbn2.xml', 'amber14/tip3pfb.xml')):
     forcefield = app.ForceField(*ff_files)
@@ -31,7 +32,7 @@ def minimize(modeller: app.Modeller, ff_files: tuple = ('amber14-all.xml', 'impl
     for atom in modeller.topology.atoms():
         if atom.residue.name not in ['ACE', 'NME']:
             system.setParticleMass(atom.index, 0.0)
-                
+
     integrator = LangevinIntegrator(300*unit.kelvin,1/unit.picosecond,1*unit.femtosecond)
     sim = app.Simulation(modeller.topology, system, integrator)
     sim.context.setPositions(modeller.positions)

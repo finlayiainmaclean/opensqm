@@ -150,4 +150,5 @@ allow-direct-references = true
 DEP001 = ["openmm", "openmmforcefields", "openff", "mdtraj", "pytraj", "pdbfixer"]
 
 [tool.uv.sources]
-unipka = { git = "https://github.com/finlayiainmaclean/unipka.git" }
+unipka = { git = "https://github.com/finlayiainmaclean/unipka.git", rev = "b42ee81670c36ef18d76f9718970ca55a7911536"}
+

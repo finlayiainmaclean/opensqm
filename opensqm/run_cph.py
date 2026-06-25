@@ -1,3 +1,4 @@
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,7 +39,6 @@ from opensqm.cph.pka import (
 )
 from opensqm.cph.reference_energy import (
     build_protonation_states,
-    build_transitions_tree,
     generate_residue_reference_dict,
 )
 from opensqm.cph.simulation_config import ConstantpHSettings
@@ -82,7 +82,6 @@ class ConstantpHRunSettings(BaseModel):
     ligand_terminal_ring_mc: bool = False
     mmgbsa_n_closest_waters: int = 5
     ligand_protonation: bool = True
-    ligand_protonation_penalty: OpenMMQuantity[unit.kilocalories_per_mole] = 3.0 * unit.kilocalories_per_mole
     protonation_swap_interval: OpenMMQuantity[unit.picosecond] = 0.2 * unit.picoseconds
     remd_swap_interval: OpenMMQuantity[unit.picosecond] = 10 * unit.picoseconds
     use_ph_remd: bool = True
@@ -97,6 +96,102 @@ class LigandSetup:
     ring_flip_bonds: list[tuple[str, str]]
 
 
+# pKa window for ligand titration-site enumeration. Only sites whose
+# micro-pKa lies in this range are titrated; the rest are held fixed at the
+# input protomer's protonation state. Bracketing physiological pH captures the
+# sites that actually titrate in a near-neutral constant-pH run.
+_LIGAND_PKA_WINDOW = (6.0, 8.0)
+
+
+def _protomer_key(mol: Chem.Mol) -> str:
+    """FixedH InChIKey that distinguishes protonation states.
+
+    Mirrors ``unipka._same_mol`` so the protomers returned by
+    ``get_microstates`` can be deduplicated and matched back to the variant
+    list by chemical identity (atom names/coordinates are ignored).
+    """
+    return Chem.MolToInchiKey(Chem.RemoveHs(Chem.Mol(mol)), options="/FixedH")
+
+
+def _variants_from_microstates(
+    molecule_rdmol: Chem.Mol,
+    microstates: list,
+) -> tuple[list[Chem.Mol], list[tuple[int, int, float]]]:
+    """Turn unipka microstates into aligned protomers + a transition graph.
+
+    Each :class:`unipka.Microstate` is a single-site, one-proton acid/base
+    pair with its own micro-pKa, all enumerated relative to ``molecule_rdmol``.
+    The variant set is therefore a *star* rooted at the input protomer, so the
+    transition graph is connected and one-proton-stepped by construction -- no
+    ladder assembly is needed. Returns ``(molecule_mols, transitions)`` where
+    ``molecule_mols`` are pose-aligned RDKit mols (most-protonated first, so
+    ``molecule_mols[0]`` seeds the production topology) and ``transitions`` are
+    ``(parent_index, child_index, pka)`` tuples indexing into them with
+    ``parent`` the acid and ``child`` the conjugate base.
+    """
+    if not microstates:
+        return [molecule_rdmol], []
+
+    keys = [_protomer_key(molecule_rdmol)]
+    state_mols = [molecule_rdmol]
+    for ms in microstates:
+        for partner in (ms.acid, ms.base):
+            key = _protomer_key(partner)
+            if key not in keys:
+                keys.append(key)
+                state_mols.append(partner)
+
+    # Order by formal charge descending so the most-protonated state is first,
+    # matching the prior charge-sorted convention the production topology and
+    # super-template construction rely on.
+    order = sorted(
+        range(len(state_mols)),
+        key=lambda i: Chem.GetFormalCharge(state_mols[i]),
+        reverse=True,
+    )
+    state_mols = [state_mols[i] for i in order]
+    keys = [keys[i] for i in order]
+    key_to_idx = {key: i for i, key in enumerate(keys)}
+
+    molecule_mols = build_protonation_states(state_mols, geometry_mol=molecule_rdmol)
+    transitions = [
+        (
+            key_to_idx[_protomer_key(ms.acid)],
+            key_to_idx[_protomer_key(ms.base)],
+            float(ms.pka),
+        )
+        for ms in microstates
+    ]
+    return molecule_mols, transitions
+
+
+def _ligand_transitions_path(output_path: Path, csv_name: str) -> Path:
+    return output_path / f"{Path(csv_name).stem}_transitions.json"
+
+
+def _save_ligand_transitions(
+    output_path: Path, csv_name: str, transitions: list[tuple[str, str, float]],
+) -> None:
+    _ligand_transitions_path(output_path, csv_name).write_text(
+        json.dumps(
+            [{"parent": p, "child": c, "pka": pka} for p, c, pka in transitions],
+            indent=2,
+        )
+    )
+
+
+def _load_ligand_transitions(
+    output_path: Path, csv_name: str,
+) -> list[tuple[str, str, float]] | None:
+    path = _ligand_transitions_path(output_path, csv_name)
+    if not path.exists():
+        return None
+    return [
+        (e["parent"], e["child"], float(e["pka"]))
+        for e in json.loads(path.read_text())
+    ]
+
+
 def _build_small_molecule_variants(
     molecule_path: str,
     config: ConstantpHRunSettings,
@@ -109,25 +204,18 @@ def _build_small_molecule_variants(
     molecule_rdmol = set_residue_info(Chem.MolFromMolFile(molecule_path, removeHs=False))
 
     if config.ligand_protonation:
-        molecule_distribution = unipka.get_distribution(molecule_rdmol).reset_index(drop=True)
-        ligand_protonation_penalty = config.ligand_protonation_penalty.value_in_unit(
-            unit.kilocalories_per_mole
+        lo, hi = _LIGAND_PKA_WINDOW
+        microstates = unipka.get_microstates(molecule_rdmol, min_pka=lo, max_pka=hi)
+        molecule_mols, index_transitions = _variants_from_microstates(
+            molecule_rdmol, microstates,
         )
-        molecule_distribution = molecule_distribution[
-            molecule_distribution["relative_ph_adjusted_free_energy"]
-            < ligand_protonation_penalty
-        ]
-        molecule_distribution = molecule_distribution.sort_values(
-            ["charge", "relative_ph_adjusted_free_energy"], ascending=[False, True],
-        ).reset_index(drop=True)
-        molecule_mols = build_protonation_states(
-            list(molecule_distribution["mol"]),
-            geometry_mol=molecule_rdmol,
+        logger.info(
+            f"{residue_name}: {len(molecule_mols)} protonation states from "
+            f"{len(microstates)} titratable site(s) in pKa [{lo}, {hi}]"
         )
-        logger.info(f"Number of {residue_name} protonation states: {len(molecule_mols)}")
-        print(molecule_distribution.T)
     else:
         molecule_mols = [molecule_rdmol]
+        index_transitions = []
 
     variant_molecules: list[Molecule] = []
     for i, rdmol in enumerate(molecule_mols):
@@ -135,12 +223,21 @@ def _build_small_molecule_variants(
         offmol.name = residue_name if i == 0 else f"{residue_name}{i}"
         variant_molecules.append(offmol)
 
+    # Resolve the index-based transition graph to variant names now that the
+    # molecules are named (NamedTransition is what generate_ligand_reference
+    # consumes), and persist it so resumed runs need not re-query unipka.
+    transitions = [
+        (variant_molecules[parent].name, variant_molecules[child].name, pka)
+        for parent, child, pka in index_transitions
+    ]
+
     pd.DataFrame(
         {
             "residue_name": [mol.name for mol in variant_molecules],
             "smiles": [Chem.MolToSmiles(mol) for mol in molecule_mols],
         }
     ).to_csv(output_path / csv_name, index=False)
+    _save_ligand_transitions(output_path, csv_name, transitions)
 
     if config.ligand_terminal_ring_mc:
         ring_flip_bonds = autodetect_flip_dihedrals_named(molecule_mols[0])
@@ -148,12 +245,6 @@ def _build_small_molecule_variants(
     else:
         ring_flip_bonds = []
 
-    transitions = build_transitions_tree(
-        variant_molecules,
-        pka_fn=lambda p, c: unipka.get_macro_pka_from_macrostates(
-            acid_macrostate=[p], base_macrostate=[c],
-        ),
-    )
     return LigandSetup(variant_molecules, transitions, ring_flip_bonds)
 
 
@@ -169,7 +260,7 @@ def _load_or_build_small_molecule_variants(
     """Reload variant setup from CSV, or rebuild from the source file if missing."""
     if molecule_path is None:
         return None
-    setup = _reload_ligand_setup_from_csv(csv_path, output_path, config, unipka)
+    setup = _reload_ligand_setup_from_csv(csv_path, output_path, config)
     if setup is not None:
         return setup
     logger.info(
@@ -185,10 +276,17 @@ def _reload_ligand_setup_from_csv(
     csv_path: Path,
     output_path: Path,
     config: ConstantpHRunSettings,
-    unipka: UnipKa,
 ) -> LigandSetup | None:
-    """Rebuild ligand/cofactor setup from a prior run's variant CSV."""
+    """Rebuild ligand/cofactor setup from a prior run's variant CSV.
+
+    Returns ``None`` (triggering a full rebuild) when either the variant CSV
+    or its sibling transitions JSON is missing -- e.g. for runs created before
+    the transition graph was persisted.
+    """
     if not csv_path.exists():
+        return None
+    transitions = _load_ligand_transitions(csv_path.parent, csv_path.name)
+    if transitions is None:
         return None
 
     df = pd.read_csv(csv_path)
@@ -214,12 +312,6 @@ def _reload_ligand_setup_from_csv(
     else:
         ring_flip_bonds = []
 
-    transitions = build_transitions_tree(
-        variant_molecules,
-        pka_fn=lambda p, c: unipka.get_macro_pka_from_macrostates(
-            acid_macrostate=[p], base_macrostate=[c],
-        ),
-    )
     return LigandSetup(variant_molecules, transitions, ring_flip_bonds)
 
 

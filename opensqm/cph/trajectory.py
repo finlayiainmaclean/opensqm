@@ -43,6 +43,7 @@ import csv
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import mdtraj as md
 import numpy as np
 from openmm import NonbondedForce, unit
 from openmm.app import Modeller, PDBFile
@@ -392,11 +393,23 @@ def replica_trajectory_index(output_path: Path, replica_i: int) -> Path:
     return replica_trajectory_base(output_path, replica_i).with_suffix(".csv")
 
 
+def image_dcd_inplace(dcd_path: Path, pdb_path: Path) -> None:
+    """Wrap molecules into the primary unit cell, overwriting ``dcd_path``."""
+    traj = md.load_dcd(str(dcd_path), top=str(pdb_path))
+    if traj.n_frames == 0:
+        return
+    traj.image_molecules(inplace=True)
+    traj.save_dcd(str(dcd_path))
+
+
 def iter_replica_state_trajectories(
     output_path: Path,
     replica_i: int,
 ) -> list[tuple[Path, Path]]:
-    """Return (dcd, pdb) pairs for one replica's state-split trajectories."""
+    """Return (dcd, pdb) pairs for one replica's state-split trajectories.
+
+    Each DCD is molecule-imaged in place before being returned.
+    """
     traj_dir = trajectories_dir(output_path)
     prefix = replica_trajectory_stem(replica_i)
     pairs: list[tuple[Path, Path]] = []
@@ -404,5 +417,6 @@ def iter_replica_state_trajectories(
         if dcd.name.endswith(".close.dcd") or dcd.name.endswith("_imaged.dcd"):
             continue
         pdb = dcd.with_suffix(".pdb")
+        image_dcd_inplace(dcd, pdb)
         pairs.append((dcd, pdb))
     return pairs

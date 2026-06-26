@@ -66,7 +66,6 @@ def main() -> None:
         integrator_step_size=0.002 * unit.picosecond,
         absorbing_boundary_radius=args.boundary,
         equilibration_config=equilibration,
-        bespoke_ligand_forcefield=False,
     )
 
     t0 = time.time()

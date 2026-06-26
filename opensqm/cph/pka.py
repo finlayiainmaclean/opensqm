@@ -756,7 +756,8 @@ def plot_microstate_populations(
     figure_paths: list[Path] = []
 
     for residue_index, pop_df in populations.items():
-        if pop_df.empty:
+        if pop_df.empty or pop_df.index.nunique() < 2:
+            # A single-pH run yields one point on the pH axis; nothing to plot.
             continue
 
         residue = next(
@@ -829,9 +830,20 @@ def analyze_cph_results(
         )
 
     if not joint_populations.empty:
-        joint_populations.to_csv(
-            output_dir / "joint_populations.csv", index_label="ph"
+        state_idx = {name: i for i, name in enumerate(joint_populations.columns)}
+        long_joint = (
+            joint_populations.rename_axis("ph")
+            .reset_index()
+            .melt(id_vars="ph", var_name="state_name", value_name="population")
         )
+        long_joint.insert(1, "state_idx", long_joint["state_name"].map(state_idx))
+        long_joint = (
+            long_joint.sort_values(["ph", "state_idx"])
+            .reset_index(drop=True)[
+                ["ph", "state_idx", "state_name", "population"]
+            ]
+        )
+        long_joint.to_csv(output_dir / "joint_populations.csv", index=False)
     if not residue_correlations.empty:
         residue_correlations.to_csv(
             output_dir / "residue_correlations.csv", index=False
@@ -876,15 +888,33 @@ def analyze_cph_results(
         residue = next(
             r for r in cph.explicitTopology.residues() if r.index == residue_index
         )
-        frame = populations_df.copy()
-        frame.insert(0, "residue_index", residue_index)
-        frame.insert(1, "residue_name", f"{residue.name}.{residue_index}")
-        population_frames.append(frame.reset_index())
+        state_idx = {name: i for i, name in enumerate(populations_df.columns)}
+        frame = (
+            populations_df.rename_axis("ph")
+            .reset_index()
+            .melt(id_vars="ph", var_name="state_name", value_name="population")
+        )
+        frame.insert(1, "residue_index", residue_index)
+        frame.insert(2, "residue_name", f"{residue.name}.{residue_index}")
+        frame.insert(3, "state_idx", frame["state_name"].map(state_idx))
+        population_frames.append(frame)
 
     if population_frames:
-        pd.concat(population_frames, ignore_index=True).to_csv(
-            output_dir / "populations.csv", index=False
+        long_pops = (
+            pd.concat(population_frames, ignore_index=True)
+            .sort_values(["ph", "residue_index", "state_idx"])
+            .reset_index(drop=True)[
+                [
+                    "ph",
+                    "residue_index",
+                    "residue_name",
+                    "state_idx",
+                    "state_name",
+                    "population",
+                ]
+            ]
         )
+        long_pops.to_csv(output_dir / "populations.csv", index=False)
         plot_microstate_populations(populations, cph, output_dir)
     if pka_rows:
         pd.DataFrame(pka_rows).to_csv(output_dir / "pkas.csv", index=False)

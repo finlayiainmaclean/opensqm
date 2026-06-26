@@ -35,7 +35,6 @@ class ModBindDGSettings(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     # --- System preparation ---
-    bespoke_ligand_forcefield: bool = False
     bound_box_shape: BoxShape = "cube"
     bound_padding: OpenMMQuantity[unit.nanometer] = 1.2 * unit.nanometer
     unbound_box_shape: BoxShape = "cube"
@@ -124,7 +123,6 @@ class ModBindDGSettings(BaseModel):
     def hash(self) -> str:
         """Reproducible short hash of the settings that define a run."""
         conf_dict = {
-            "bespoke_ligand_forcefield": self.bespoke_ligand_forcefield,
             "bound_box_shape": self.bound_box_shape,
             "bound_padding": str(self.bound_padding),
             "unbound_box_shape": self.unbound_box_shape,

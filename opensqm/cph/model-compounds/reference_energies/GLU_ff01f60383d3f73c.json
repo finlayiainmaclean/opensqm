@@ -1,13 +1,13 @@
 {
-  "residue_name": "ASP",
-  "main_variant": "ASH",
+  "residue_name": "GLU",
+  "main_variant": "GLH",
   "variant_names": [
-    "ASH",
-    "ASP"
+    "GLH",
+    "GLU"
   ],
   "variants": [
-    "ASH",
-    "ASP"
+    "GLH",
+    "GLU"
   ],
   "charges": [
     0,
@@ -15,13 +15,13 @@
   ],
   "reference_energies_kj_per_mole": [
     0.0,
-    -110.67246116683948
+    -120.10536278942729
   ],
   "transitions": [
     {
       "parent": 0,
       "child": 1,
-      "pka": 3.7
+      "pka": 4.3
     }
   ],
   "ring_flip_bonds": []

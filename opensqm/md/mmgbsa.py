@@ -252,7 +252,7 @@ def get_interaction_energy(
     lig_mask = traj_closest.topology.select(f"resname {ligand_resname}")
     prot_mask = traj_closest.topology.select(f"not resname {ligand_resname}")
 
-    forcefield_complex = get_ligand_forcefield(offmol, True)
+    forcefield_complex = get_ligand_forcefield(offmol)
     forcefield_ligand = copy.deepcopy(forcefield_complex)
     forcefield_ligand.loadFile("implicit/obc1.xml")
 
@@ -350,7 +350,7 @@ if __name__ == "__main__":
     protein = PDBFile(protein)
 
     topology, positions, forcefield = prepare_complex(
-        ligand_rdmol, protein, bespoke_ligand_forcefield=True
+        ligand_rdmol, protein
     )
 
     PDBFile.writeFile(topology, positions, open("/tmp/com.pdb", "w"), keepIds=True)

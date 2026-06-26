@@ -78,7 +78,6 @@ def assign_ligand_charges(
 
 def get_ligand_forcefield(
     ligand: Molecule | list[Molecule],
-    bespoke_ligand_forcefield: bool = False,
     forcefield: ForceField | None = None,
     partial_charge_method: Literal["am1bcc"] = "am1bcc",
 ) -> ForceField:
@@ -88,14 +87,11 @@ def get_ligand_forcefield(
     protonation states of the same ligand for constant-pH simulations).
     Partial charges are assigned to each molecule if not already present.
 
-    When `bespoke_ligand_forcefield` is True, `generate_bespoke_offxml` is
-    called once per molecule and the resulting OFFXML is used as the base
-    forcefield for that molecule's `SMIRNOFFTemplateGenerator`. If bespoke
-    fitting fails or returns nothing, the molecule falls back to the standard
-    `openff-2.2.0.offxml`. Each molecule gets its own template generator
-    registered on the forcefield; OpenMM's residue matching iterates through
-    the registered generators and each one only claims its own molecule (via
-    OpenFF's isomorphism check), so they coexist without conflict.
+    Each molecule is parameterised with the standard `openff-2.2.0.offxml`
+    (Sage) forcefield and gets its own template generator registered on the
+    forcefield; OpenMM's residue matching iterates through the registered
+    generators and each one only claims its own molecule (via OpenFF's
+    isomorphism check), so they coexist without conflict.
 
     If `forcefield` is None, a fresh empty `app.ForceField()` is created and
     returned. Otherwise the SMIRNOFF generators are registered on the supplied
@@ -111,21 +107,8 @@ def get_ligand_forcefield(
     standard_smirnoff_cache = (LIGAND_FORCEFIELD_DIR / "smirnoff.json").resolve()
 
     for lig in ligands:
-        ligand_forcefield_file: str | None = None
-        if bespoke_ligand_forcefield:
-            ligand_forcefield_file = None
-
-            # try:
-            #     bespoke_path = generate_bespoke_offxml(lig)
-            # except Exception as e:
-            #     logger.error(f"Failed to generate bespoke forcefield for {lig.to_smiles()}: {e}")
-            #     bespoke_path = None
-            # ligand_forcefield_file = (
-            #     str(Path(bespoke_path).resolve()) if bespoke_path else None
-            # )
-
         smirnoff = SMIRNOFFTemplateGenerator(
-            forcefield=ligand_forcefield_file or "openff-2.2.0.offxml",
+            forcefield="openff-2.2.0.offxml",
             molecules=lig,
             cache=str(standard_smirnoff_cache),
         )
@@ -206,7 +189,6 @@ def prepare_system(
     protein_modeller: Modeller | None = None,
     small_molecules: Sequence[tuple[Chem.Mol | Molecule, str]] | None = None,
     padding: float = 1.2,
-    bespoke_ligand_forcefield: bool = True,
     ionic_strength: float = 0.15,
     box_shape: str = "cube",
     solvent_mode: SolventMode = "explicit",
@@ -233,7 +215,7 @@ def prepare_system(
         else:
             modeller.add(lig_top, lig_pos)
 
-    forcefield = get_ligand_forcefield(offmols, bespoke_ligand_forcefield)
+    forcefield = get_ligand_forcefield(offmols)
     if solvent_mode == "explicit":
         forcefield.loadFile(_PROTEIN_FORCEFIELD_FILES)
     else:
@@ -259,7 +241,7 @@ def prepare_system(
 
 
 def prepare_complex(
-    ligand: Chem.Mol | Molecule, bespoke_ligand_forcefield: bool = True,
+    ligand: Chem.Mol | Molecule,
     padding: float = 1.2,
     protein_modeller: Modeller | None = None,
     box_shape: str = "cube",
@@ -270,7 +252,6 @@ def prepare_complex(
         protein_modeller=protein_modeller,
         small_molecules=[(ligand, "LIG")],
         padding=padding,
-        bespoke_ligand_forcefield=bespoke_ligand_forcefield,
         box_shape=box_shape,
         solvent_mode=solvent_mode,
     )
@@ -279,7 +260,6 @@ def prepare_complex(
 def build_complex_forcefield(
     ligand: Chem.Mol | Molecule,
     *,
-    bespoke_ligand_forcefield: bool = True,
     solvent_mode: SolventMode = "explicit",
 ) -> ForceField:
     """Build a ForceField for an already-assembled ligand-protein topology.
@@ -293,7 +273,7 @@ def build_complex_forcefield(
         offmol = ligand
     else:
         offmol = Molecule.from_rdkit(ligand, allow_undefined_stereo=True)
-    forcefield = get_ligand_forcefield([offmol], bespoke_ligand_forcefield)
+    forcefield = get_ligand_forcefield([offmol])
     if solvent_mode == "explicit":
         forcefield.loadFile(_PROTEIN_FORCEFIELD_FILES)
     else:

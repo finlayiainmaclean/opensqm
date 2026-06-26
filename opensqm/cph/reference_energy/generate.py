@@ -284,8 +284,7 @@ def generate_residue_reference_dict(
     ----------
     config : SimulationConfig
         Simulation configuration. Forcefield definitions, temperature, and
-        the ligand parameterisation choices (``partial_charge_method``,
-        ``bespoke_ligand_forcefield``) all participate in the cache hash.
+        the ligand ``partial_charge_method`` all participate in the cache hash.
     ligands : list, optional
         Each entry is a 2-tuple ``(variant_molecules, transitions)`` or a
         3-tuple ``(variant_molecules, transitions, ring_flip_bonds)``

@@ -15,7 +15,7 @@ from openmm import unit
 from opensqm.fix import run_pdbfixer
 from opensqm.md.equilibrate import EquilibrationSettings
 from rdkit import Chem, RDLogger
-
+from unipka import UnipKa
 from opensqm.modbinddg.analyze import analyze_modbinddg
 from opensqm.modbinddg.config import ModBindDGSettings
 from opensqm.modbinddg.simulate import collect_trajectories
@@ -101,7 +101,7 @@ def run_modbinddg(
 
     run_pdbfixer(protein, fixed_protein)
 
-    config.cph_equilibration_ns = 0.1
+    config.cph_equilibration_ns = 0.5
 
     # --- constant-pH equilibration at pH 7 ---
     logger.info(f"Running {config.cph_equilibration_ns} ns CpH equilibration at pH 7")
@@ -114,6 +114,7 @@ def run_modbinddg(
             production_time=config.cph_equilibration_ns * unit.nanosecond,
             use_ph_remd=False,
             n_replicas=1,
+            protonation_penalty=3.0 * unit.kilocalories_per_mole,
             titratable_residue_query="(protein within 5 of resn LIG) or (resn LIG)",
         ),
         resume=resume,
@@ -133,20 +134,12 @@ def run_modbinddg(
         logger.info("Loaded equilibrated unbound state from cache")
 
     if bound_state is None or (need_unbound and unbound_state is None):
-        from unipka import UnipKa
-        unipka = UnipKa()
-
-        ligand_rdmol = Chem.MolFromMolFile(ligand, removeHs=True)
-        df = unipka.get_distribution(ligand_rdmol)
-        ligand_rdmol = df.iloc[0].mol
-        ligand_rdmol = Chem.AddHs(ligand_rdmol, addCoords=True)
-
+        
         if need_unbound and unbound_state is None:
             logger.info("Building and equilibrating unbound state")
             unbound_state = build_unbound_state(
-                ligand_rdmol,
+                snapshot.ligand,
                 equilibration_config=EquilibrationSettings(),
-                bespoke_ligand_forcefield=config.bespoke_ligand_forcefield,
             )
             save_prepared_state(unbound_state, states_dir, "unbound")
 
@@ -155,8 +148,6 @@ def run_modbinddg(
             logger.info("Using CpH lowest-energy snapshot as protein starting structure")
             bound_state = build_bound_state_from_state(
                 snapshot,
-                ligand_rdmol=ligand_rdmol,
-                bespoke_ligand_forcefield=config.bespoke_ligand_forcefield,
             )
             save_prepared_state(bound_state, states_dir, "bound")
 

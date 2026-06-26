@@ -96,8 +96,8 @@ class ReferenceEnergyFinder(object):
         max_iterations: int = 20_000,
         check_interval: int = 200,
         fraction_tolerance: float = 0.01,
-        min_samples_per_ph: int = 50,
-        stable_checks: int = 3,
+        min_samples_per_ph: int = 500,
+        stable_checks: int = 5,
         progress_desc: str | None = None,
     ):
         """

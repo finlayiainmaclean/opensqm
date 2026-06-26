@@ -32,7 +32,6 @@ class ConstantpHSettings(BaseModel):
 
     # Ligand parameterisation (used when ligands are passed to generate_references)
     partial_charge_method: Literal["am1bcc"] = "am1bcc"
-    bespoke_ligand_forcefield: bool = True
 
     explicit_params: dict = Field(default_factory=_default_explicit_params)
     implicit_params: dict = Field(default_factory=_default_implicit_params)
@@ -84,7 +83,6 @@ class ConstantpHSettings(BaseModel):
         from opensqm.md.prepare import get_ligand_forcefield
         return get_ligand_forcefield(
             ligands,
-            bespoke_ligand_forcefield=self.bespoke_ligand_forcefield,
             forcefield=ff,
             partial_charge_method=self.partial_charge_method,
         )
@@ -100,7 +98,6 @@ class ConstantpHSettings(BaseModel):
         from opensqm.md.prepare import get_ligand_forcefield
         return get_ligand_forcefield(
             ligands,
-            bespoke_ligand_forcefield=self.bespoke_ligand_forcefield,
             forcefield=ff,
             partial_charge_method=self.partial_charge_method,
         )
@@ -122,8 +119,7 @@ class ConstantpHSettings(BaseModel):
         """Create a reproducible hash of parameters that affect reference energies.
 
         Includes force field definitions, temperature, and the ligand
-        parameterisation choices (partial charge method + bespoke
-        forcefield flag) since those change the converged reference
+        partial charge method since those change the converged reference
         energies. Sampling dynamics parameters (pH, timestep, friction)
         are intentionally excluded because they do not affect the
         converged values.
@@ -135,7 +131,6 @@ class ConstantpHSettings(BaseModel):
             'implicit_params': {k: str(v) for k, v in self.implicit_params.items()},
             'temperature': str(self.temperature),
             'partial_charge_method': self.partial_charge_method,
-            'bespoke_ligand_forcefield': self.bespoke_ligand_forcefield,
         }
         hash_str = json.dumps(conf_dict, sort_keys=True)
         return xxhash.xxh64(hash_str.encode()).hexdigest()

@@ -1,4 +1,5 @@
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,7 @@ from opensqm.cph.pka import (
     build_replica_overlay_timeseries,
     compute_pka_timeseries,
 )
+from opensqm.cph.propka import find_titratable_residues_near_ph
 from opensqm.cph.reference_energy import (
     build_protonation_states,
     build_transitions_tree,
@@ -64,13 +66,14 @@ def _default_equilibration_config() -> EquilibrationSettings:
     )
 
 
-
 class ConstantpHRunSettings(BaseModel):
     """Settings for a constant-pH MD run."""
 
     model_config = ConfigDict(frozen=True)
     # Equilibration settings
-    equilibration_config: EquilibrationSettings = Field(default_factory=_default_equilibration_config)
+    equilibration_config: EquilibrationSettings = Field(
+        default_factory=_default_equilibration_config
+    )
     # Production settings
     production_time: OpenMMQuantity[unit.nanosecond] = 10 * unit.nanosecond
     integrator_step_size: OpenMMQuantity[unit.picosecond] = 0.004 * unit.picoseconds
@@ -79,10 +82,16 @@ class ConstantpHRunSettings(BaseModel):
     # CPH settings
     cph_config: ConstantpHSettings = Field(default_factory=ConstantpHSettings)
     titratable_residue_query: str | None = None
+    # Intersect the query selection with the residues PROPKA predicts are near
+    # their pKa at some pH in the ladder, so only residues that are both
+    # requested and actually titrating are driven. The ligand/cofactor are
+    # exempt (PROPKA only sees the protein). See ``_propka_titratable_indices``.
+    restrict_titratable_to_near_ph: bool = True
+
     ligand_terminal_ring_mc: bool = False
     mmgbsa_n_closest_waters: int = 5
     ligand_protonation: bool = True
-    ligand_protonation_penalty: OpenMMQuantity[unit.kilocalories_per_mole] = 3.0 * unit.kilocalories_per_mole
+    protonation_penalty: OpenMMQuantity[unit.kilocalories_per_mole] = 2.0 * unit.kilocalories_per_mole
     protonation_swap_interval: OpenMMQuantity[unit.picosecond] = 0.2 * unit.picoseconds
     remd_swap_interval: OpenMMQuantity[unit.picosecond] = 10 * unit.picoseconds
     use_ph_remd: bool = True
@@ -109,16 +118,18 @@ def _build_small_molecule_variants(
     molecule_rdmol = set_residue_info(Chem.MolFromMolFile(molecule_path, removeHs=False))
 
     if config.ligand_protonation:
-        molecule_distribution = unipka.get_distribution(molecule_rdmol).reset_index(drop=True)
-        ligand_protonation_penalty = config.ligand_protonation_penalty.value_in_unit(
+        molecule_distribution = unipka.get_distribution(molecule_rdmol, pH=config.pH).reset_index(
+            drop=True
+        )
+        ligand_protonation_penalty = config.protonation_penalty.value_in_unit(
             unit.kilocalories_per_mole
         )
         molecule_distribution = molecule_distribution[
-            molecule_distribution["relative_ph_adjusted_free_energy"]
-            < ligand_protonation_penalty
+            molecule_distribution["relative_ph_adjusted_free_energy"] < ligand_protonation_penalty
         ]
         molecule_distribution = molecule_distribution.sort_values(
-            ["charge", "relative_ph_adjusted_free_energy"], ascending=[False, True],
+            ["charge", "relative_ph_adjusted_free_energy"],
+            ascending=[False, True],
         ).reset_index(drop=True)
         molecule_mols = build_protonation_states(
             list(molecule_distribution["mol"]),
@@ -151,7 +162,8 @@ def _build_small_molecule_variants(
     transitions = build_transitions_tree(
         variant_molecules,
         pka_fn=lambda p, c: unipka.get_macro_pka_from_macrostates(
-            acid_macrostate=[p], base_macrostate=[c],
+            acid_macrostate=[p],
+            base_macrostate=[c],
         ),
     )
     return LigandSetup(variant_molecules, transitions, ring_flip_bonds)
@@ -172,12 +184,14 @@ def _load_or_build_small_molecule_variants(
     setup = _reload_ligand_setup_from_csv(csv_path, output_path, config, unipka)
     if setup is not None:
         return setup
-    logger.info(
-        f"{csv_path.name} not found; rebuilding {residue_name} variants from file"
-    )
+    logger.info(f"{csv_path.name} not found; rebuilding {residue_name} variants from file")
     return _build_small_molecule_variants(
-        molecule_path, config, output_path, unipka,
-        residue_name=residue_name, csv_name=csv_path.name,
+        molecule_path,
+        config,
+        output_path,
+        unipka,
+        residue_name=residue_name,
+        csv_name=csv_path.name,
     )
 
 
@@ -217,7 +231,8 @@ def _reload_ligand_setup_from_csv(
     transitions = build_transitions_tree(
         variant_molecules,
         pka_fn=lambda p, c: unipka.get_macro_pka_from_macrostates(
-            acid_macrostate=[p], base_macrostate=[c],
+            acid_macrostate=[p],
+            base_macrostate=[c],
         ),
     )
     return LigandSetup(variant_molecules, transitions, ring_flip_bonds)
@@ -231,18 +246,70 @@ def _ligand_entries_from_setups(
     for setup in (ligand_setup, cofactor_setup):
         if setup is None:
             continue
-        entries.append(
-            (setup.variant_molecules, setup.transitions, setup.ring_flip_bonds)
-        )
+        entries.append((setup.variant_molecules, setup.transitions, setup.ring_flip_bonds))
     return entries
 
 
 def _log_titratable_residues(topology, titratable_residue_indices: list[int]) -> None:
     residue_names = np.array([r.name for r in topology.residues()])
-    formatted = ", ".join(
-        f"{residue_names[i]} ({i})" for i in titratable_residue_indices
-    )
+    formatted = ", ".join(f"{residue_names[i]} ({i})" for i in titratable_residue_indices)
     logger.info(f"Titratable residues: {formatted}")
+
+
+def _propka_titratable_indices(
+    protein_pdb: str | Path,
+    topology: Topology,
+    allowed_indices: set[int],
+    pHs: list[float],
+    *,
+    protonation_penalty: unit.Quantity,
+    temperature: unit.Quantity,
+) -> set[int]:
+    """Topology residue indices PROPKA flags as near-titrating at any pH.
+
+    For each pH in ``pHs``, PROPKA is run on the dry protein ``protein_pdb`` and
+    every group whose minor protonation state lies within ``protonation_penalty``
+    of that pH is matched back to its topology residue. Only indices in
+    ``allowed_indices`` (residues that have a titratable reference and are not
+    disulfide-bonded) can be returned, so PROPKA never introduces a residue the
+    constant-pH model has no states for.
+
+    Residues are matched on ``(chain, resSeq, resname)``; when chain ids differ
+    between PROPKA and the topology (e.g. blank chains) a unique
+    ``(resSeq, resname)`` match is used as a fallback.
+    """
+    by_full_key: dict[tuple[str, int, str], int] = {}
+    by_num_name: dict[tuple[int, str], list[int]] = defaultdict(list)
+    for residue in topology.residues():
+        if residue.index not in allowed_indices:
+            continue
+        try:
+            res_num = int(residue.id)
+        except (TypeError, ValueError):
+            continue
+        chain_id = (residue.chain.id or "").strip()
+        by_full_key[(chain_id, res_num, residue.name)] = residue.index
+        by_num_name[(res_num, residue.name)].append(residue.index)
+
+    indices: set[int] = set()
+    for pH in pHs:
+        for prediction in find_titratable_residues_near_ph(
+            protein_pdb,
+            pH=pH,
+            protonation_penalty=protonation_penalty,
+            temperature=temperature,
+        ):
+            key = (prediction.chain_id, prediction.residue_number, prediction.residue_name)
+            index = by_full_key.get(key)
+            if index is None:
+                candidates = by_num_name.get(
+                    (prediction.residue_number, prediction.residue_name), []
+                )
+                if len(candidates) == 1:
+                    index = candidates[0]
+            if index is not None:
+                indices.add(index)
+    return indices
 
 
 def _apply_barostat(remd: ConstantPHRemd, config: ConstantpHRunSettings) -> None:
@@ -290,8 +357,9 @@ class SystemState:
     optionally carries the LIG residue as an RDKit mol in the exact protonation
     state of this frame, so the system can be rebuilt with the right protomer.
     """
-    topology: Topology                      # box vectors set to this frame's cell
-    positions: unit.Quantity                # (n_atoms, 3), physical atoms of that protonation state
+
+    topology: Topology  # box vectors set to this frame's cell
+    positions: unit.Quantity  # (n_atoms, 3), physical atoms of that protonation state
     system: System | None = None
     ligand: "Chem.Mol | None" = None
 
@@ -299,8 +367,9 @@ class SystemState:
 @dataclass
 class pHResult:
     """Per-pH summary for downstream use (e.g. modbinddg)."""
+
     ph: float
-    population: float                       # joint population fraction of the snapshot's state at this pH
+    population: float  # joint population fraction of the snapshot's state at this pH
     lowest_energy_snapshot: SystemState | None
 
 
@@ -339,9 +408,7 @@ def _per_frame_system_energies(
             context = Context(system, integrator)
 
             traj = md.load_dcd(str(dcd_path), top=str(pdb_path))
-            frame_to_time = dict(
-                zip(state_rows["frame_ix"].astype(int), state_rows["time_ns"])
-            )
+            frame_to_time = dict(zip(state_rows["frame_ix"].astype(int), state_rows["time_ns"]))
             frame_to_step = dict(
                 zip(state_rows["frame_ix"].astype(int), state_rows["step"].astype(int))
             )
@@ -358,17 +425,19 @@ def _per_frame_system_energies(
                     .getPotentialEnergy()
                     .value_in_unit(unit.kilocalories_per_mole)
                 )
-                records.append({
-                    "ph": ph,
-                    "state_label": state_label,
-                    "time_ns": frame_to_time[frame_ix],
-                    "replica_i": replica_i,
-                    "energy": energy,
-                    "energy_type": "potential",
-                    "dcd_path": dcd_path,
-                    "pdb_path": pdb_path,
-                    "frame_ix": frame_ix,
-                })
+                records.append(
+                    {
+                        "ph": ph,
+                        "state_label": state_label,
+                        "time_ns": frame_to_time[frame_ix],
+                        "replica_i": replica_i,
+                        "energy": energy,
+                        "energy_type": "potential",
+                        "dcd_path": dcd_path,
+                        "pdb_path": pdb_path,
+                        "frame_ix": frame_ix,
+                    }
+                )
     return records
 
 
@@ -396,9 +465,7 @@ def _ligand_rdmol_for_state(
     if len(indices) != len(keys):
         return None
     resname_by_index = {r.index: r.name for r in cph.explicitTopology.residues()}
-    ligand_keys = [
-        k for k in keys if str(resname_by_index.get(k, "")).startswith(ligand_resname)
-    ]
+    ligand_keys = [k for k in keys if str(resname_by_index.get(k, "")).startswith(ligand_resname)]
     if len(ligand_keys) != 1:
         return None
     variant_index = indices[keys.index(ligand_keys[0])]
@@ -470,7 +537,8 @@ def _build_ph_results(
         # frames at this pH if none were recorded for it.
         preferred = (
             [
-                r for r in ph_tail
+                r
+                for r in ph_tail
                 if _state_label_to_joint_label(cph, r["state_label"]) == dominant_label
             ]
             if dominant_label is not None
@@ -482,16 +550,16 @@ def _build_ph_results(
         population = 0.0
         if candidates:
             best = min(candidates, key=lambda r: r["energy"])
-            frame = md.load_frame(str(best["dcd_path"]), best["frame_ix"], top=str(best["pdb_path"]))
+            frame = md.load_frame(
+                str(best["dcd_path"]), best["frame_ix"], top=str(best["pdb_path"])
+            )
             topology = PDBFile(str(best["pdb_path"])).topology
             if frame.unitcell_vectors is not None:
                 topology.setPeriodicBoxVectors(frame.unitcell_vectors[0] * unit.nanometer)
             snapshot = SystemState(
                 topology=topology,
                 positions=frame.xyz[0] * unit.nanometer,
-                ligand=_ligand_rdmol_for_state(
-                    cph, ligand_variant_molecules, best["state_label"]
-                ),
+                ligand=_ligand_rdmol_for_state(cph, ligand_variant_molecules, best["state_label"]),
             )
             # Report the population of the microstate the chosen frame is in.
             chosen_label = _state_label_to_joint_label(cph, best["state_label"])
@@ -592,10 +660,6 @@ def _analyze_remd_results(
     return {
         **analysis,
         **mmgbsa,
-        "replica_results": [
-            [results[i] for i in range(replica_i, len(results), n_replicas)]
-            for replica_i in range(n_replicas)
-        ],
         "ph_results": ph_results,
     }
 
@@ -627,14 +691,11 @@ def run_cph(
     ligand = Path(ligand).expanduser().resolve() if ligand is not None else None
     cofactor = Path(cofactor).expanduser().resolve() if cofactor is not None else None
 
-
     if skip_md:
         resume = True
 
     integrator_step_size_ps = config.integrator_step_size.value_in_unit(unit.picosecond)
-    protonation_swap_interval_ps = config.protonation_swap_interval.value_in_unit(
-        unit.picosecond
-    )
+    protonation_swap_interval_ps = config.protonation_swap_interval.value_in_unit(unit.picosecond)
     pHs = [config.pH] if isinstance(config.pH, float) else list(config.pH)
     skip_pka = len(pHs) == 1
     ckpt_dir = checkpoint_dir(output_path)
@@ -642,7 +703,7 @@ def run_cph(
 
     resume_setup = resume and equilibrated_pdb_path(output_path).exists()
     if resume and not resume_setup:
-        resume=False
+        resume = False
 
     ligand_setup: LigandSetup | None = None
     cofactor_setup: LigandSetup | None = None
@@ -670,14 +731,18 @@ def run_cph(
             ligand_setup = _load_or_build_small_molecule_variants(
                 ligand or manifest.get("ligand"),
                 output_path / "ligands.csv",
-                output_path, config, unipka,
+                output_path,
+                config,
+                unipka,
                 residue_name="LIG",
             )
         if cofactor is not None or manifest.get("cofactor") is not None:
             cofactor_setup = _load_or_build_small_molecule_variants(
                 cofactor or manifest.get("cofactor"),
                 output_path / "cofactors.csv",
-                output_path, config, unipka,
+                output_path,
+                config,
+                unipka,
                 residue_name="COF",
             )
 
@@ -687,13 +752,21 @@ def run_cph(
     else:
         if ligand is not None:
             ligand_setup = _build_small_molecule_variants(
-                ligand, config, output_path, unipka,
-                residue_name="LIG", csv_name="ligands.csv",
+                ligand,
+                config,
+                output_path,
+                unipka,
+                residue_name="LIG",
+                csv_name="ligands.csv",
             )
         if cofactor is not None:
             cofactor_setup = _build_small_molecule_variants(
-                cofactor, config, output_path, unipka,
-                residue_name="COF", csv_name="cofactors.csv",
+                cofactor,
+                config,
+                output_path,
+                unipka,
+                residue_name="COF",
+                csv_name="cofactors.csv",
             )
 
         protein_pdb = PDBFile(str(protein))
@@ -713,7 +786,8 @@ def run_cph(
             )
         else:
             omm_top, omm_pos, forcefield = prepare_protein(
-                protein_modeller, padding=1.0,
+                protein_modeller,
+                padding=1.0,
             )
 
         for res in omm_top.residues():
@@ -734,15 +808,64 @@ def run_cph(
             config.titratable_residue_query,
         )
 
-        if not titratable_residue_indices:
-            raise RuntimeError(
-                "No titratable residues were found in the supplied topology"
+        if config.restrict_titratable_to_near_ph:
+            # Universe of titratable residues (references matched, disulfides
+            # dropped); PROPKA hits are matched within it.
+            titratable_universe = set(
+                select_titratable_residue_indices(omm_top, system_pdb, residue_reference_dict, None)
             )
+            try:
+                propka_indices = _propka_titratable_indices(
+                    protein,
+                    omm_top,
+                    titratable_universe,
+                    pHs,
+                    protonation_penalty=config.protonation_penalty,
+                    temperature=config.cph_config.temperature,
+                )
+            except Exception as exc:  # PROPKA is best-effort; keep the base set
+                logger.warning(
+                    f"PROPKA titratable-residue selection failed ({exc}); "
+                    "keeping the base selection"
+                )
+            else:
+                if not propka_indices:
+                    # Most likely a structure/numbering mismatch rather than a
+                    # genuinely inert protein; pruning to nothing would be worse.
+                    logger.warning(
+                        f"PROPKA flagged no protein residues near the pH ladder "
+                        f"{pHs}; keeping the base selection rather than pruning it away"
+                    )
+                else:
+                    # Keep only residues that are both requested and near-pKa, but
+                    # always retain the ligand/cofactor (PROPKA only sees protein).
+                    small_molecule_indices = {
+                        r.index for r in omm_top.residues() if r.name in ("LIG", "COF")
+                    }
+                    keep = propka_indices | small_molecule_indices
+                    removed = set(titratable_residue_indices) - keep
+                    if removed:
+                        removed_names = ", ".join(
+                            f"{r.name} ({r.index})"
+                            for r in omm_top.residues()
+                            if r.index in removed
+                        )
+                        logger.info(
+                            f"PROPKA pruned {len(removed)} titratable residue(s) far "
+                            f"from the pH ladder {pHs}: {removed_names}"
+                        )
+                    titratable_residue_indices = sorted(set(titratable_residue_indices) & keep)
+
+        if not titratable_residue_indices:
+            raise RuntimeError("No titratable residues were found in the supplied topology")
 
         _log_titratable_residues(omm_top, titratable_residue_indices)
 
         omm_top, omm_pos = equilibrate(
-            omm_top, omm_pos, forcefield, config=config.equilibration_config,
+            omm_top,
+            omm_pos,
+            forcefield,
+            config=config.equilibration_config,
         )
         with equilibrated_pdb_path(output_path).open("w") as pdb_file:
             PDBFile.writeFile(omm_top, omm_pos, pdb_file, keepIds=True)
@@ -799,9 +922,7 @@ def run_cph(
 
     if skip_md:
         if not resume_setup:
-            raise ValueError(
-                "skip_md requires equilibrated.pdb and run_manifest.json under output"
-            )
+            raise ValueError("skip_md requires equilibrated.pdb and run_manifest.json under output")
         if not (ckpt_dir / REMD_STATE_FILENAME).exists():
             raise ValueError(f"skip_md requires {ckpt_dir / REMD_STATE_FILENAME}")
         if not (ckpt_dir / PRODUCTION_STATE_FILENAME).exists():
@@ -812,8 +933,7 @@ def run_cph(
         if not results:
             raise ValueError("skip_md requires non-empty production results on disk")
         logger.info(
-            f"skip_md: loaded {len(results)} result rows from checkpoint; "
-            "skipping production MD"
+            f"skip_md: loaded {len(results)} result rows from checkpoint; skipping production MD"
         )
     elif resume_production:
         remd.load_checkpoint(ckpt_dir)
@@ -856,9 +976,7 @@ def run_cph(
 
     num_steps = int(config.production_time / config.integrator_step_size)
     reporter_interval = int(config.reporter_interval / config.integrator_step_size)
-    protonation_swap_steps = int(
-        config.protonation_swap_interval / config.integrator_step_size
-    )
+    protonation_swap_steps = int(config.protonation_swap_interval / config.integrator_step_size)
     num_batches = num_steps // protonation_swap_steps
     titratable_indices = list(cph.titrations.keys())
 
@@ -921,7 +1039,9 @@ def run_cph(
 
                 iter_time = time.time() - iter_start
                 sim_time_ns = ps_per_batch / 1000.0
-                ns_per_day = config.n_replicas * sim_time_ns * 86400 / iter_time if iter_time > 0 else 0
+                ns_per_day = (
+                    config.n_replicas * sim_time_ns * 86400 / iter_time if iter_time > 0 else 0
+                )
                 pbar.set_postfix(
                     Time=f"{current_time_ps:.0f}ps",
                     ns_per_day=f"{ns_per_day:.2f}",
@@ -958,9 +1078,7 @@ def run_cph(
         protonation_swap_steps=protonation_swap_steps,
         ph_ladder=pHs,
         cph_config=config.cph_config,
-        ligand_variant_molecules=(
-            ligand_setup.variant_molecules if ligand_setup else None
-        ),
+        ligand_variant_molecules=(ligand_setup.variant_molecules if ligand_setup else None),
     )
 
     return {
@@ -983,8 +1101,11 @@ if __name__ == "__main__":
         ligand=ligand_path,
         resume=True,
         skip_md=False,
-
-
-        config=ConstantpHRunSettings(titratable_residue_query="(resn ASP and resi 27) or (resn LIG)",
-        pH=7.0, n_replicas=3, weights=weights)
+        config=ConstantpHRunSettings(
+            titratable_residue_query="(resn ASP and resi 27) or (resn LIG)",
+            pH=7.0,
+            n_replicas=1,
+            weights=weights,
+            production_time=500 * unit.picosecond,
+        ),
     )

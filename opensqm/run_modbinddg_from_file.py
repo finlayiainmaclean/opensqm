@@ -163,7 +163,6 @@ def run_modbinddg(
             logger.info("Building and equilibrating unbound state")
             unbound_state = build_unbound_state(
                 ligand_rdmol,
-                bespoke_ligand_forcefield=config.bespoke_ligand_forcefield,
                 equilibration_config=config.equilibration_config,
             )
             save_prepared_state(unbound_state, states_dir, "unbound")
@@ -176,7 +175,6 @@ def run_modbinddg(
             bound_state = build_bound_state(
                 ligand_rdmol,
                 protein_modeller,
-                bespoke_ligand_forcefield=config.bespoke_ligand_forcefield,
                 equilibration_config=config.equilibration_config,
                 box_shape=config.bound_box_shape,
                 padding=config.bound_padding,

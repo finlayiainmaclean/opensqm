@@ -12,9 +12,11 @@ that drop charge by exactly 1, etc.) are enforced by Pydantic root
 validators that delegate to the helpers in
 :mod:`opensqm.cph.reference_energy.graph`.
 """
+
 # pyrefly: ignore [missing-import]
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 from openmm.unit import kilojoules_per_mole
 from pydantic import BaseModel, Field, root_validator
@@ -143,7 +145,7 @@ class TitratableResidueReference(BaseModel):
     ring_flip_bonds: list[tuple[str, str]] = Field(default_factory=list)
 
     @root_validator(pre=True)
-    def _migrate_legacy(cls, values):  # noqa: N805
+    def _migrate_legacy(cls, values: dict[str, Any]) -> dict[str, Any]:  # noqa: N805 -- pydantic v1 root_validator receives cls
         """Backfill ``transitions``/``charges`` from the legacy ``micro_pkas`` schema.
 
         Earlier versions of this file stored a flat ``micro_pkas`` list of
@@ -159,21 +161,16 @@ class TitratableResidueReference(BaseModel):
             variants = values.get("variants") or []
             micro_pkas = values.get("micro_pkas") or []
             if len(micro_pkas) != len(variants) - 1:
-                raise ValueError(
-                    "legacy micro_pkas length must equal len(variants) - 1"
-                )
+                raise ValueError("legacy micro_pkas length must equal len(variants) - 1")
             values["transitions"] = [
-                {"parent": 0, "child": i + 1, "pka": float(pka)}
-                for i, pka in enumerate(micro_pkas)
+                {"parent": 0, "child": i + 1, "pka": float(pka)} for i, pka in enumerate(micro_pkas)
             ]
         values.pop("micro_pkas", None)
         if "charges" not in values:
             variants = values.get("variants") or []
             if all(isinstance(v, str) for v in variants):
                 try:
-                    values["charges"] = [
-                        _PROTEIN_VARIANT_CHARGES[v] for v in variants
-                    ]
+                    values["charges"] = [_PROTEIN_VARIANT_CHARGES[v] for v in variants]
                 except KeyError as exc:
                     raise ValueError(
                         f"legacy reference uses unknown protein variant {exc!r}; "
@@ -197,8 +194,7 @@ class TitratableResidueReference(BaseModel):
                 # ``main`` suffixed with the state index) so cached files
                 # remain loadable without forcing a full regenerate.
                 values["variant_names"] = [
-                    main_variant if i == 0 else f"{main_variant}{i}"
-                    for i in range(len(variants))
+                    main_variant if i == 0 else f"{main_variant}{i}" for i in range(len(variants))
                 ]
         if "ring_flip_bonds" not in values:
             # Legacy caches (protein + ligand) predate ``ring_flip_bonds``.
@@ -215,7 +211,7 @@ class TitratableResidueReference(BaseModel):
         return values
 
     @root_validator
-    def _check_consistency(cls, values):  # noqa: N805
+    def _check_consistency(cls, values: dict[str, Any]) -> dict[str, Any]:  # noqa: N805 -- pydantic v1 root_validator receives cls
         variants = values.get("variants") or []
         variant_names = values.get("variant_names") or []
         main_variant = values.get("main_variant")
@@ -232,17 +228,12 @@ class TitratableResidueReference(BaseModel):
             )
         if first_is_str and variants[0] != main_variant:
             raise ValueError(
-                f"variants[0] ({variants[0]!r}) must equal "
-                f"main_variant ({main_variant!r})"
+                f"variants[0] ({variants[0]!r}) must equal main_variant ({main_variant!r})"
             )
         if len(variant_names) != len(variants):
-            raise ValueError(
-                "variant_names must have the same length as variants"
-            )
+            raise ValueError("variant_names must have the same length as variants")
         if len(set(variant_names)) != len(variant_names):
-            raise ValueError(
-                f"variant_names must be unique, got {variant_names!r}"
-            )
+            raise ValueError(f"variant_names must be unique, got {variant_names!r}")
         if variant_names[0] != main_variant:
             raise ValueError(
                 f"variant_names[0] ({variant_names[0]!r}) must equal "
@@ -255,17 +246,13 @@ class TitratableResidueReference(BaseModel):
                 f"variants={variants!r}"
             )
         if len(energies) != len(variants):
-            raise ValueError(
-                "reference_energies_kj_per_mole must have the same length as variants"
-            )
+            raise ValueError("reference_energies_kj_per_mole must have the same length as variants")
         if energies[0] != 0.0:
             raise ValueError(
                 "reference_energies_kj_per_mole[0] must be 0.0 (main_variant baseline)"
             )
         if len(charges) != len(variants):
-            raise ValueError(
-                "charges must have the same length as variants"
-            )
+            raise ValueError("charges must have the same length as variants")
         _validate_transitions_graph(transitions, len(variants), root_idx=0)
         for t in transitions:
             charge_drop = charges[t.parent] - charges[t.child]

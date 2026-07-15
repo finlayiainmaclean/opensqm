@@ -7,12 +7,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from opensqm.md.mmgbsa import get_interaction_energy
-from opensqm.modbinddg.states import LIGAND_RESNAME
+from opensqm.modbind.states import LIGAND_RESNAME
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from opensqm.modbinddg.config import ModBindDGSettings
+    from opensqm.modbind.config import ModBindDGSettings
 
 
 def bound_dcd_frame_indices(displacements: np.ndarray, radius: float) -> np.ndarray:
@@ -40,12 +40,9 @@ def compute_bound_mmgbsa(
     all_energies: list[float] = []
     n_bound_frames = 0
 
-
     for replica_i, displacements in enumerate(bound_trajectories):
         dcd_path = trajectory_dir / f"bound_{replica_i:04d}.dcd"
-        frame_indices = bound_dcd_frame_indices(
-            displacements, config.bound_state_radius
-        )
+        frame_indices = bound_dcd_frame_indices(displacements, config.bound_state_radius)
         n_bound_frames += int(frame_indices.size)
         if frame_indices.size == 0:
             continue
@@ -53,7 +50,7 @@ def compute_bound_mmgbsa(
         replica_dir = mmgbsa_dir / f"replica_{replica_i:04d}"
         replica_dir.mkdir(parents=True, exist_ok=True)
         close_traj = replica_dir / "bound.close.dcd"
-        close_top = replica_dir / "bound.close.prmtop"
+        close_top = replica_dir / "bound.close.pdb"
 
         energies, _rmsd, _top, _traj = get_interaction_energy(
             pdb_path=str(equil_pdb),
@@ -69,7 +66,6 @@ def compute_bound_mmgbsa(
         # DCD frame ``j`` maps to displacement row ``j + 1`` (row 0 is t=0), so
         # each MMGBSA energy is paired with the COM coordinate that determines
         # its ModBinddG reweighting bin.
-
 
     arr = np.asarray(all_energies, dtype=np.float64)
 

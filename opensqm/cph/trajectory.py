@@ -50,6 +50,9 @@ from openmm.app import Modeller, PDBFile
 from openmm.app.dcdfile import DCDFile
 
 if TYPE_CHECKING:
+    from openmm import State
+    from openmm.app import Simulation, Topology
+
     from opensqm.cph.constantph import ConstantPH
 
 
@@ -143,18 +146,19 @@ class StateSplitTrajectoryManager:
         self.base_path = Path(base_path)
         self.base_path.parent.mkdir(parents=True, exist_ok=True)
         self.csv_path = (
-            Path(csv_path) if csv_path is not None
-            else self.base_path.with_suffix(".csv")
+            Path(csv_path) if csv_path is not None else self.base_path.with_suffix(".csv")
         )
 
         self._nb_force = self._find_nonbonded_force()
         self._titration_keys = sorted(self.cph.titrations)
         self._titratable_h_indices = np.asarray(
-            sorted({
-                int(i)
-                for k in self._titration_keys
-                for i in self.cph.titrations[k].explicitHydrogenIndices
-            }),
+            sorted(
+                {
+                    int(i)
+                    for k in self._titration_keys
+                    for i in self.cph.titrations[k].explicit_hydrogen_indices
+                }
+            ),
             dtype=int,
         )
 
@@ -174,13 +178,11 @@ class StateSplitTrajectoryManager:
         self._channels: dict[tuple[int, ...], _StateChannel] = {}
         self._initial_frame_ix = self._restore_frame_counts_from_csv()
         self._step_size_ps = float(
-            self.simulation.integrator.getStepSize()
-            .value_in_unit(unit.picosecond)
+            self.simulation.integrator.getStepSize().value_in_unit(unit.picosecond)
         )
 
         resume_csv = self.append and self.csv_path.exists()
-        self._csv_handle = open(
-            self.csv_path,
+        self._csv_handle = self.csv_path.open(
             "a" if resume_csv else "w",
             newline="",
         )
@@ -191,10 +193,7 @@ class StateSplitTrajectoryManager:
 
     def _find_nonbonded_force(self) -> NonbondedForce:
         """Locate the single :class:`NonbondedForce` on the explicit system."""
-        candidates = [
-            f for f in self.system.getForces()
-            if isinstance(f, NonbondedForce)
-        ]
+        candidates = [f for f in self.system.getForces() if isinstance(f, NonbondedForce)]
         if not candidates:
             raise RuntimeError(
                 "StateSplitTrajectoryManager requires a NonbondedForce "
@@ -212,7 +211,7 @@ class StateSplitTrajectoryManager:
         if not self.csv_path.exists():
             return {}
         counts: dict[tuple[int, ...], int] = {}
-        with open(self.csv_path, newline="") as handle:
+        with self.csv_path.open(newline="") as handle:
             reader = csv.DictReader(handle)
             for row in reader:
                 signature = tuple(int(x) for x in row["system_state"].split("_"))
@@ -223,22 +222,22 @@ class StateSplitTrajectoryManager:
     # OpenMM reporter protocol
     # ------------------------------------------------------------------
 
-    def describeNextReport(self, simulation):  # noqa: N802 - OpenMM API
-        steps = (
-            self.report_interval
-            - simulation.currentStep % self.report_interval
-        )
+    def describeNextReport(  # noqa: N802 -- name fixed by OpenMM's reporter protocol
+        self, simulation: Simulation
+    ) -> tuple[int, bool, bool, bool, bool, bool]:
+        """Report steps-until-next-report and the OpenMM reporter state flags."""
+        steps = self.report_interval - simulation.currentStep % self.report_interval
         # (steps, positions, velocities, forces, energy, enforcePeriodicBox)
         return (steps, True, False, False, False, self.enforce_periodic_box)
 
-    def report(self, simulation, state) -> None:
+    def report(self, simulation: Simulation, state: State) -> None:
+        """Write the current frame to its per-state DCD and log it in the sidecar CSV."""
         # Skip frames emitted mid-NCMC water-swap. ``WaterSwapMC.attempt``
         # drives ``simulation.step()`` between alchemy jumps, so the
         # production stepper can land on a reporter interval while
         # ``lambda_water_swap > 0`` - the Hamiltonian at that moment is
         # the mid-switch alchemical interpolation, not the physical one,
         # and emitting the frame would pollute the per-state DCD.
-
 
         signature = self._current_signature()
         channel = self._channels.get(signature)
@@ -252,18 +251,21 @@ class StateSplitTrajectoryManager:
         )
         filtered = positions_nm[channel.keep_indices] * unit.nanometer
         channel.dcd_file.writeModel(
-            filtered, periodicBoxVectors=state.getPeriodicBoxVectors(),
+            filtered,
+            periodicBoxVectors=state.getPeriodicBoxVectors(),
         )
         channel.out_handle.flush()
 
         time_ns = simulation.currentStep * self._step_size_ps * 1e-3
         sig_str = "_".join(str(s) for s in signature)
-        self._csv_writer.writerow([
-            simulation.currentStep,
-            f"{time_ns:.6f}",
-            sig_str,
-            channel.frame_ix,
-        ])
+        self._csv_writer.writerow(
+            [
+                simulation.currentStep,
+                f"{time_ns:.6f}",
+                sig_str,
+                channel.frame_ix,
+            ]
+        )
         self._csv_handle.flush()
         channel.frame_ix += 1
 
@@ -272,10 +274,7 @@ class StateSplitTrajectoryManager:
     # ------------------------------------------------------------------
 
     def _current_signature(self) -> tuple[int, ...]:
-        return tuple(
-            int(self.cph.titrations[k].currentIndex)
-            for k in self._titration_keys
-        )
+        return tuple(int(self.cph.titrations[k].current_index) for k in self._titration_keys)
 
     def _compute_keep_indices(self) -> np.ndarray:
         """Atom indices physically present in the current ConstantPH state.
@@ -307,23 +306,19 @@ class StateSplitTrajectoryManager:
     def _create_channel(self, signature: tuple[int, ...]) -> _StateChannel:
         keep = self._compute_keep_indices()
         sig_str = "_".join(str(s) for s in signature)
-        dcd_path = self.base_path.with_name(
-            f"{self.base_path.name}.{sig_str}.dcd"
-        )
-        pdb_path = self.base_path.with_name(
-            f"{self.base_path.name}.{sig_str}.pdb"
-        )
+        dcd_path = self.base_path.with_name(f"{self.base_path.name}.{sig_str}.dcd")
+        pdb_path = self.base_path.with_name(f"{self.base_path.name}.{sig_str}.pdb")
 
         append_dcd = self.append and dcd_path.exists()
         if append_dcd:
             sub_topology = PDBFile(str(pdb_path)).topology
         else:
             sub_topology, sub_positions = self._build_sub_topology(keep)
-            with open(pdb_path, "w") as f:
+            with pdb_path.open("w") as f:
                 PDBFile.writeFile(sub_topology, sub_positions, f)
 
         mode = "r+b" if append_dcd else "wb"
-        out_handle = open(dcd_path, mode)
+        out_handle = dcd_path.open(mode)
         dcd = DCDFile(
             out_handle,
             sub_topology,
@@ -341,12 +336,9 @@ class StateSplitTrajectoryManager:
             frame_ix=self._initial_frame_ix.get(signature, 0),
         )
 
-    def _build_sub_topology(self, keep_indices: np.ndarray):
+    def _build_sub_topology(self, keep_indices: np.ndarray) -> tuple[Topology, unit.Quantity]:
         """Return ``(topology, positions)`` containing only kept atoms."""
-        positions = (
-            self.simulation.context.getState(getPositions=True)
-            .getPositions()
-        )
+        positions = self.simulation.context.getState(getPositions=True).getPositions()
         modeller = Modeller(self.topology, positions)
         keep_set = {int(i) for i in keep_indices}
         atoms = list(self.topology.atoms())
@@ -368,6 +360,7 @@ class StateSplitTrajectoryManager:
             pass
 
     def __del__(self) -> None:
+        """Best-effort flush/close of open files when the manager is collected."""
         try:
             self.close()
         except Exception:
@@ -378,18 +371,22 @@ TRAJECTORIES_DIRNAME = "trajectories"
 
 
 def trajectories_dir(output_path: Path) -> Path:
+    """Return the trajectories directory under ``output_path``."""
     return output_path / TRAJECTORIES_DIRNAME
 
 
 def replica_trajectory_stem(replica_i: int) -> str:
+    """Return the zero-padded trajectory filename stem for a replica."""
     return f"replica_{replica_i:04d}"
 
 
 def replica_trajectory_base(output_path: Path, replica_i: int) -> Path:
+    """Return the base trajectory path (no suffix) for a replica."""
     return trajectories_dir(output_path) / replica_trajectory_stem(replica_i)
 
 
 def replica_trajectory_index(output_path: Path, replica_i: int) -> Path:
+    """Return the sidecar CSV index path for a replica's trajectories."""
     return replica_trajectory_base(output_path, replica_i).with_suffix(".csv")
 
 

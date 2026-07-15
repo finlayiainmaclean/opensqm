@@ -9,6 +9,7 @@ Generates (or loads from cache) a :class:`TitratableResidueReference`
 for every entry in :data:`opensqm.cph.reference_energy.model_compounds.MODEL_COMPOUNDS`
 under the default :class:`opensqm.cph.simulation_config.SimulationConfig`.
 """
+
 # pyrefly: ignore [missing-import]
 from loguru import logger
 
@@ -18,6 +19,7 @@ from .generate import generate_residue_reference_dict
 
 
 def main() -> None:
+    """Generate (or load) reference energies for the default config and log them."""
     config = ConstantpHSettings()
     logger.info(f"Hash: {config.hash()}")
 

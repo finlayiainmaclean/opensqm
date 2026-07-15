@@ -33,13 +33,26 @@ from openmm.app import DCDReporter, Simulation
 from tqdm import tqdm
 
 if TYPE_CHECKING:
-    from opensqm.modbinddg.config import ModBindDGSettings
-    from opensqm.modbinddg.states import PreparedState
+    from openmm.app import Topology
+
+    from opensqm.modbind.config import ModBindDGSettings
+    from opensqm.modbind.states import PreparedState
 
 _NM_TO_ANGSTROM = 10.0
 
 _NON_PROTEIN_RESIDUES = {
-    "LIG", "COF", "HOH", "SOL", "WAT", "NA", "CL", "MG", "K", "ZN", "ACE", "NME",
+    "LIG",
+    "COF",
+    "HOH",
+    "SOL",
+    "WAT",
+    "NA",
+    "CL",
+    "MG",
+    "K",
+    "ZN",
+    "ACE",
+    "NME",
 }
 
 
@@ -49,10 +62,10 @@ class BoundEscapeDiagnostics:
 
     escape_time_ns: float
     escaped: bool
-    calpha_rmsd_last10_A: float
+    calpha_rmsd_last10_a: float
 
 
-def _calpha_indices(topology) -> list[int]:
+def _calpha_indices(topology: Topology) -> list[int]:
     return [
         atom.index
         for atom in topology.atoms()
@@ -62,10 +75,7 @@ def _calpha_indices(topology) -> list[int]:
 
 def _ligand_masses(state: PreparedState) -> np.ndarray:
     return np.array(
-        [
-            state.system.getParticleMass(i).value_in_unit(unit.dalton)
-            for i in state.ligand_indices
-        ],
+        [state.system.getParticleMass(i).value_in_unit(unit.dalton) for i in state.ligand_indices],
         dtype=np.float64,
     )
 
@@ -88,7 +98,9 @@ def _kabsch_rt(mobile: np.ndarray, target: np.ndarray) -> tuple[np.ndarray, np.n
     return rotation, translation
 
 
-def _ligand_com_nm(simulation: Simulation, ligand_indices: list[int], masses: np.ndarray) -> np.ndarray:
+def _ligand_com_nm(
+    simulation: Simulation, ligand_indices: list[int], masses: np.ndarray
+) -> np.ndarray:
     state = simulation.context.getState(getPositions=True, enforcePeriodicBox=True)
     positions = state.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
     ligand_positions = positions[ligand_indices]
@@ -133,12 +145,8 @@ def run_bound_escape(
     :func:`mdtraj.rmsd`).
     """
     logger.info(f"Running bound escape at {temperature._value:.0f} K")
-    frame_interval_steps = max(
-        1, round(config.bound_frame_interval / config.integrator_step_size)
-    )
-    max_frames = max(
-        1, round(config.max_escape_time / config.bound_frame_interval)
-    )
+    frame_interval_steps = max(1, round(config.bound_frame_interval / config.integrator_step_size))
+    max_frames = max(1, round(config.max_escape_time / config.bound_frame_interval))
 
     simulation = _build_simulation(
         state,
@@ -152,13 +160,9 @@ def run_bound_escape(
 
     masses = _ligand_masses(state)
     calpha_indices = _calpha_indices(state.topology)
-    ref_positions = np.asarray(
-        state.positions.value_in_unit(unit.nanometer), dtype=np.float64
-    )
+    ref_positions = np.asarray(state.positions.value_in_unit(unit.nanometer), dtype=np.float64)
     calpha_topology = (
-        md.Topology.from_openmm(state.topology).subset(calpha_indices)
-        if calpha_indices
-        else None
+        md.Topology.from_openmm(state.topology).subset(calpha_indices) if calpha_indices else None
     )
     reference_calpha = (
         md.Trajectory(ref_positions[calpha_indices][None], calpha_topology)
@@ -169,30 +173,26 @@ def run_bound_escape(
     # referenced to the protein structure). Falls back to lab frame if the
     # system has no C-alpha atoms (e.g. a protein-free system).
     ref_calpha_xyz = ref_positions[calpha_indices] if calpha_indices else None
-    ref_ligand_com = np.average(
-        ref_positions[state.ligand_indices], axis=0, weights=masses
-    )
+    ref_ligand_com = np.average(ref_positions[state.ligand_indices], axis=0, weights=masses)
 
     def _positions_nm() -> np.ndarray:
-        snapshot = simulation.context.getState(
-            getPositions=True, enforcePeriodicBox=False
-        )
+        snapshot = simulation.context.getState(getPositions=True, enforcePeriodicBox=False)
         return snapshot.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
 
-    def _displacement_A(positions: np.ndarray) -> np.ndarray:
+    def _displacement_a(positions: np.ndarray) -> np.ndarray:
         com = np.average(positions[state.ligand_indices], axis=0, weights=masses)
         if ref_calpha_xyz is not None:
             rotation, translation = _kabsch_rt(positions[calpha_indices], ref_calpha_xyz)
             com = rotation @ com + translation
         return (com - ref_ligand_com) * _NM_TO_ANGSTROM
 
-    displacements: list[np.ndarray] = [_displacement_A(_positions_nm())]
+    displacements: list[np.ndarray] = [_displacement_a(_positions_nm())]
     calpha_frames: list[np.ndarray] = []
     escaped = False
     for _ in tqdm(range(max_frames), desc="Bound escape", unit="frame"):
         simulation.step(frame_interval_steps)
         positions = _positions_nm()
-        displacement = _displacement_A(positions)
+        displacement = _displacement_a(positions)
         displacements.append(displacement)
         if calpha_topology is not None:
             calpha_frames.append(positions[calpha_indices])
@@ -206,13 +206,11 @@ def run_bound_escape(
     rmsd = float("nan")
     if calpha_frames and reference_calpha is not None:
         n_last = max(1, math.ceil(0.10 * len(calpha_frames)))
-        last = md.Trajectory(
-            np.asarray(calpha_frames[-n_last:], dtype=np.float32), calpha_topology
-        )
+        last = md.Trajectory(np.asarray(calpha_frames[-n_last:], dtype=np.float32), calpha_topology)
         rmsd = float(md.rmsd(last, reference_calpha, 0).mean()) * _NM_TO_ANGSTROM
 
     diagnostics = BoundEscapeDiagnostics(
-        escape_time_ns=escape_time_ns, escaped=escaped, calpha_rmsd_last10_A=rmsd
+        escape_time_ns=escape_time_ns, escaped=escaped, calpha_rmsd_last10_a=rmsd
     )
     return np.asarray(displacements, dtype=np.float64), diagnostics
 
@@ -231,12 +229,8 @@ def run_unbound_escape(
     frame_interval_steps = max(
         1, round(config.unbound_frame_interval / config.integrator_step_size)
     )
-    max_total_frames = max(
-        1, round(config.unbound_max_time / config.unbound_frame_interval)
-    )
-    max_segment_frames = max(
-        1, round(config.max_escape_time / config.unbound_frame_interval)
-    )
+    max_total_frames = max(1, round(config.unbound_max_time / config.unbound_frame_interval))
+    max_segment_frames = max(1, round(config.max_escape_time / config.unbound_frame_interval))
 
     simulation = _build_simulation(
         state,
@@ -257,10 +251,7 @@ def run_unbound_escape(
     total_frames = 0
 
     with tqdm(total=max_total_frames, desc="Unbound sampling", unit="frame") as pbar:
-        while (
-            total_frames < max_total_frames
-            and len(segments) < config.unbound_target_escapes
-        ):
+        while total_frames < max_total_frames and len(segments) < config.unbound_target_escapes:
             simulation.step(frame_interval_steps)
             total_frames += 1
             segment_frames += 1

@@ -14,26 +14,18 @@ DATASET = "Wang"
 
 BASE_URL = "https://raw.githubusercontent.com/Honza-R/Wang_dataset_SQM/refs/heads/main/Zariquiey_structures_extended"
 
-TARGET_NAMES: Final[list[str]] = [
-    "BACE",
-    "CDK2",
-    "JNK1",
-    "MCL1",
-    "PTP1",
-    "Tyk2",
-    "p38",
-    "thrombin"
-]
+TARGET_NAMES: Final[list[str]] = ["BACE", "CDK2", "JNK1", "MCL1", "PTP1", "Tyk2", "p38", "thrombin"]
 
 TARGET_PDB_CODES: Final[dict[str, str]] = {
-    "BACE":"4DJX",
-    "CDK2":"1H1Q",
-    "JNK1":"2GMX",
-    "MCL1":"4HW3",
-    "PTP1":"2QBS",
-    "Tyk2":"4GIH",
-    "p38":"3FLY",
-    "thrombin":"2ZFF"}
+    "BACE": "4DJX",
+    "CDK2": "1H1Q",
+    "JNK1": "2GMX",
+    "MCL1": "4HW3",
+    "PTP1": "2QBS",
+    "Tyk2": "4GIH",
+    "p38": "3FLY",
+    "thrombin": "2ZFF",
+}
 
 
 def main():
@@ -70,7 +62,6 @@ def main():
             raw_prot_pdb_path = target_dir / f"{pdb_code}.raw.pdb"
             fixed_prot_pdb_path = target_dir / f"{pdb_code}.fixed.pdb"
 
-
             raw_prot_pdb_path = target_dir / f"{pdb_code}.raw.pdb"
             fixed_prot_pdb_path = target_dir / f"{pdb_code}.fixed.pdb"
 
@@ -81,7 +72,6 @@ def main():
                     out=str(raw_prot_pdb_path),
                 )
                 run_pdbfixer(raw_prot_pdb_path, fixed_prot_pdb_path, keep_waters=True)
-
 
             if not lig_sdf_path.exists():
                 URL = f"{BASE_URL}/{target_name}/structures/{mol_id}/ligand.sdf"
@@ -113,8 +103,6 @@ def main():
 
         file = target_dir / "protein.csv"
         inputs.to_csv(file)
-
-
 
 
 if __name__ == "__main__":

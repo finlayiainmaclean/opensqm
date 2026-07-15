@@ -57,7 +57,4 @@ def minimize(
     sim.context.setPositions(modeller.positions)
     sim.minimizeEnergy()
 
-    modeller = app.Modeller(
-        modeller.topology, sim.context.getState(getPositions=True).getPositions()
-    )
-    return modeller
+    return app.Modeller(modeller.topology, sim.context.getState(getPositions=True).getPositions())

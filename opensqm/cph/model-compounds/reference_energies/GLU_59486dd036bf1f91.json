@@ -1,0 +1,28 @@
+{
+  "residue_name": "GLU",
+  "main_variant": "GLH",
+  "variant_names": [
+    "GLH",
+    "GLU"
+  ],
+  "variants": [
+    "GLH",
+    "GLU"
+  ],
+  "charges": [
+    0,
+    -1
+  ],
+  "reference_energies_kj_per_mole": [
+    0.0,
+    -131.79325217092236
+  ],
+  "transitions": [
+    {
+      "parent": 0,
+      "child": 1,
+      "pka": 4.3
+    }
+  ],
+  "ring_flip_bonds": []
+}

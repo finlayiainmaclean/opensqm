@@ -1,5 +1,5 @@
-# ruff: noqa: D100, D101
+"""Exceptions raised by the MOPAC integration."""
 
 
 class MOPACError(Exception):
-    pass
+    """Raised when a MOPAC run fails or its output cannot be parsed."""

@@ -4,6 +4,7 @@ Lifted out of the original ``reference_energy.py`` module so every other
 sub-module can import these aliases without dragging in OpenMM, RDKit, or
 Pydantic at module-load time.
 """
+
 from typing import Union
 
 # A single state's worth of hydrogen placement instructions, in the form

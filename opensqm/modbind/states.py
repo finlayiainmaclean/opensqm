@@ -19,10 +19,10 @@ from loguru import logger
 from openmm import XmlSerializer, unit
 from openmm.app import PDBxFile
 
+from opensqm.cph.run_cph import SystemState
 from opensqm.md.equilibrate import EquilibrationSettings, equilibrate
 from opensqm.md.prepare import build_complex_forcefield, create_system, prepare_complex
 from opensqm.md.restraints import add_distal_restraints
-from opensqm.run_cph import SystemState
 
 if TYPE_CHECKING:
     from openmm.app.topology import Topology
@@ -54,7 +54,6 @@ def _ligand_heavy_atom_indices(topology: Topology) -> list[int]:
 
 def build_bound_state_from_state(
     state: SystemState,
-    
 ) -> PreparedState:
     """Build the restrained bound-state system from a pre-equilibrated snapshot.
 
@@ -68,10 +67,8 @@ def build_bound_state_from_state(
     when CpH did not record one.
     """
     if state.ligand is None:
-        raise ValueError(
-            "build_bound_state_from_state needs a ligand: state.ligand is None "
-        )
-   
+        raise ValueError("build_bound_state_from_state needs a ligand: state.ligand is None ")
+
     topology = state.topology
     positions = state.positions
 

@@ -2,6 +2,7 @@
 
 from loguru import logger
 from openmm.app import Atom, Modeller, Topology
+from openmm.app.topology import Residue
 from rdkit import Chem
 
 
@@ -31,13 +32,15 @@ def pdb_residue_key_from_rdkit(atom: Chem.Atom) -> tuple[str, str, int, str] | N
     )
 
 
-def pdb_residue_key_from_openmm(residue) -> tuple[str, str, int, str]:
+def pdb_residue_key_from_openmm(residue: Residue) -> tuple[str, str, int, str]:
     """Return a PDB residue key (chain, resname, resnum, icode) for an OpenMM residue."""
     icode = (getattr(residue, "insertionCode", "") or " ").strip() or " "
     try:
         resnum = int(residue.id)
     except (TypeError, ValueError):
-        resnum = int("".join(character for character in str(residue.id) if character.isdigit()) or 0)
+        resnum = int(
+            "".join(character for character in str(residue.id) if character.isdigit()) or 0
+        )
     return (
         str(residue.chain.id).strip(),
         residue.name.strip(),
@@ -58,8 +61,7 @@ def map_pdb_residue_keys_to_openmm_indices(
     PDB, treat blank chains as wildcards so ligands are not dropped.
     """
     omm_keys = [
-        (pdb_residue_key_from_openmm(residue), residue.index)
-        for residue in topology.residues()
+        (pdb_residue_key_from_openmm(residue), residue.index) for residue in topology.residues()
     ]
     selected: set[int] = set()
     for chain, resname, resnum, icode in residue_keys:

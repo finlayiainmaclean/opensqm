@@ -34,9 +34,7 @@ def _stub_pka(parent: Chem.Mol, child: Chem.Mol) -> float:
     predictor; the actual value is irrelevant to the topology of the
     transitions list returned.
     """
-    return float(
-        Chem.GetFormalCharge(parent) - Chem.GetFormalCharge(child)
-    )
+    return float(Chem.GetFormalCharge(parent) - Chem.GetFormalCharge(child))
 
 
 def test_build_transitions_tree_single_variant() -> None:
@@ -55,7 +53,8 @@ def test_build_transitions_tree_linear_ladder() -> None:
     anion = _named_offmol("NCC(=O)[O-]", "LIG2")
 
     transitions = build_transitions_tree(
-        [cation, neutral, anion], pka_fn=_stub_pka,
+        [cation, neutral, anion],
+        pka_fn=_stub_pka,
     )
 
     assert transitions == [
@@ -77,7 +76,8 @@ def test_build_transitions_tree_star() -> None:
     neutral_b = _named_offmol("OCC", "HIE")
 
     transitions = build_transitions_tree(
-        [cation, neutral_a, neutral_b], pka_fn=_stub_pka,
+        [cation, neutral_a, neutral_b],
+        pka_fn=_stub_pka,
     )
 
     assert transitions == [
@@ -101,7 +101,8 @@ def test_build_transitions_tree_same_charge_tautomer_with_missing_parent() -> No
     dianion = _named_offmol("NC(CC(=O)[O-])C(=O)[O-]", "LIG2")
 
     transitions = build_transitions_tree(
-        [zwitter, neutral_amine, dianion], pka_fn=_stub_pka,
+        [zwitter, neutral_amine, dianion],
+        pka_fn=_stub_pka,
     )
 
     # LIG1 has no -1 + 1 = 0 parent so it attaches as a parent of LIG2.

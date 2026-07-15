@@ -188,7 +188,7 @@ def run_sqm(inp: SQMConfig) -> SQMOutput:
     ligand_strain = E_ligand_bound - E_ligand_free
 
     scores = run_interaction_energy(ligand=ligand, protein=protein)
-    score = scores["interaction_energy"] + G_Hplus # ligand_strain
+    score = scores["interaction_energy"] + G_Hplus  # ligand_strain
 
     logger.info(
         f"interaction_energy: {scores['interaction_energy']:.2f}, G_Hplus: {G_Hplus:.2f}, "
@@ -246,13 +246,13 @@ def cli(
     settings_path: Path | None = None,
     output_dir: Path | None = None,
     overwrite: bool = False,
-):
+) -> None:
     """Run the SQM CLI."""
     output_dir = output_dir or Path("data/outputs")
     output_dir.mkdir(exist_ok=True, parents=True)
 
     if settings_path is not None:
-        with open(settings_path) as f:
+        with Path(settings_path).open() as f:
             settings_dict = yaml.safe_load(f)
         settings = OptimisationSettings(**settings_dict)
     else:
@@ -291,7 +291,6 @@ def cli(
             )
         )
 
-
     if inputs_to_run:
         if run_local:
             new_results = [run_sqm(inp) for inp in tqdm(inputs_to_run, desc="SQM")]
@@ -320,7 +319,6 @@ def cli(
     scores_csv_path = output_dir / "scores.csv"
     scores_df.to_csv(scores_csv_path, index=False)
     logger.info(f"Saved scores to {scores_csv_path}")
-
 
     if "pX" in df.columns:
         corr = scipy.stats.spearmanr(scores_df["interaction_energy"], df.loc[scores_df.index, "pX"])

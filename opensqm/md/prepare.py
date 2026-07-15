@@ -1,7 +1,8 @@
 """Module containing vanilla MD protocols."""
 
 import logging
-from typing import Literal, Sequence
+from functools import lru_cache
+from typing import TYPE_CHECKING, Literal, Sequence
 
 from loguru import logger
 from openff.toolkit.topology import Molecule  # type: ignore
@@ -23,6 +24,11 @@ from rdkit import Chem
 from opensqm.md.rest import apply_rest
 from opensqm.utils import LIGAND_FORCEFIELD_DIR
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from openff.toolkit.utils.nagl_wrapper import NAGLToolkitWrapper
+
 logging.getLogger("openff.interchange.smirnoff").setLevel(logging.WARNING)
 
 _PROTEIN_FORCEFIELD_FILES = (
@@ -40,7 +46,15 @@ _IMPLICIT_FORCEFIELD_FILES = (
 
 SolventMode = Literal["explicit", "implicit"]
 
-_SOLVENT_RESIDUE_NAMES = frozenset({"HOH", "WAT", "SOL", "TIP3", "TIP", "NA", "CL", "K", "MG", "ZN", "CA", "CS"})
+PartialChargeMethod = Literal["nagl", "sqm"]
+DEFAULT_PARTIAL_CHARGE_METHOD: PartialChargeMethod = "nagl"
+
+# OpenFF's production graph-net AM1-BCC surrogate model.
+NAGL_MODEL = "openff-gnn-am1bcc-1.0.0.pt"
+
+_SOLVENT_RESIDUE_NAMES = frozenset(
+    {"HOH", "WAT", "SOL", "TIP3", "TIP", "NA", "CL", "K", "MG", "ZN", "CA", "CS"}
+)
 _ION_SYMBOLS = frozenset({"Na", "Cl", "K", "Mg", "Zn", "Ca", "Cs"})
 
 
@@ -63,23 +77,72 @@ def strip_solvent(modeller: Modeller) -> Modeller:
     return cleaned
 
 
+@lru_cache(maxsize=1)
+def _nagl_charger() -> "tuple[NAGLToolkitWrapper, Path]":
+    """Build the NAGL toolkit wrapper and resolve its AM1-BCC model path once.
+
+    NAGL is OpenFF's cross-platform graph-net surrogate for AM1-BCC. Its native
+    PyTorch backend needs no ``dgl``, so it works on macOS. Cached so the
+    wrapper build and model lookup happen at most once per process.
+    """
+    from openff.nagl_models import validate_nagl_model_path
+    from openff.toolkit.utils.nagl_wrapper import NAGLToolkitWrapper
+
+    return NAGLToolkitWrapper(), validate_nagl_model_path(NAGL_MODEL)
+
+
+def _assign_sqm_charges(ligand: Molecule) -> None:
+    """Assign AM1-BCC charges with AmberTools (the ``sqm`` semi-empirical engine)."""
+    # Reuse the molecule's existing conformer(s) instead of letting the
+    # toolkit regenerate one. OpenFF otherwise embeds a fresh ETKDG
+    # conformer, and for large multi-titratable ligands (e.g. the CpH
+    # protomers here, with aromatic-NH3+ / free -COOH groups) that can
+    # seed a geometry whose AM1 minimisation never converges in sqm,
+    # making antechamber abort with a fatal error. The pre-built
+    # protomer conformers are well-formed, so passing them keeps sqm
+    # well-behaved.
+    use_conformers = ligand.conformers if ligand.n_conformers else None
+    ligand.assign_partial_charges(
+        "am1bcc",
+        toolkit_registry=AmberToolsToolkitWrapper(),
+        use_conformers=use_conformers,
+    )
+
+
 def assign_ligand_charges(
     ligand: Molecule,
-    partial_charge_method: Literal["am1bcc"] = "am1bcc",
+    partial_charge_method: PartialChargeMethod = DEFAULT_PARTIAL_CHARGE_METHOD,
 ) -> None:
-    """Assign partial charges to the ligand."""
+    """Assign partial charges to the ligand.
+
+    ``nagl`` (the default) uses OpenFF's cross-platform GNN AM1-BCC model. It
+    ships a chemical-domain check and raises ``ValueError`` for chemistry
+    outside its training set (unusual bonds/elements); any such failure — or a
+    backend error — falls back to ``sqm``. ``sqm`` runs AmberTools AM1-BCC
+    directly, reusing the molecule's existing conformer(s) when present.
+    """
     if ligand.partial_charges is not None:
         return
     match partial_charge_method:
-        case "am1bcc":
-            toolkit_registry = AmberToolsToolkitWrapper()
-            ligand.assign_partial_charges("am1bcc", toolkit_registry=toolkit_registry)
+        case "nagl":
+            try:
+                wrapper, model_path = _nagl_charger()
+                ligand.assign_partial_charges(model_path, toolkit_registry=wrapper)
+            except Exception as exc:
+                # Fall back to sqm on any NAGL failure (not installed, backend
+                # error, or chemistry outside the model's chemical domain).
+                logger.warning(
+                    f"NAGL charges failed ({type(exc).__name__}: {exc}); falling back to sqm"
+                )
+                _assign_sqm_charges(ligand)
+        case "sqm":
+            _assign_sqm_charges(ligand)
 
 
 def get_ligand_forcefield(
     ligand: Molecule | list[Molecule],
     forcefield: ForceField | None = None,
-    partial_charge_method: Literal["am1bcc"] = "am1bcc",
+    partial_charge_method: PartialChargeMethod = DEFAULT_PARTIAL_CHARGE_METHOD,
 ) -> ForceField:
     """Register a SMIRNOFF template generator per ligand on a ForceField.
 
@@ -115,8 +178,6 @@ def get_ligand_forcefield(
         forcefield.registerTemplateGenerator(smirnoff.generator)
 
     return forcefield
-
-
 
 
 def solvate_ligand(
@@ -196,7 +257,9 @@ def prepare_system(
     """Build a system from optional small molecules and/or protein."""
     if not small_molecules:
         if protein_modeller is None:
-            raise ValueError("prepare_system requires protein_modeller when small_molecules is empty")
+            raise ValueError(
+                "prepare_system requires protein_modeller when small_molecules is empty"
+            )
         if solvent_mode == "implicit":
             raise ValueError("implicit solvent requires at least one small molecule")
         return prepare_protein(
@@ -335,14 +398,9 @@ def create_system(
     return system
 
 
-
 def create_integrator(
     integrator_ps_per_step: OpenMMQuantity[unit.picosecond],
     temperature: OpenMMQuantity[unit.kelvin] = 300 * unit.kelvin,
 ) -> LangevinMiddleIntegrator:
     """Create a Langevin Middle Integrator at the given temperature."""
-    return LangevinMiddleIntegrator(
-        temperature,
-        1 / unit.picosecond,
-        integrator_ps_per_step
-    )
+    return LangevinMiddleIntegrator(temperature, 1 / unit.picosecond, integrator_ps_per_step)

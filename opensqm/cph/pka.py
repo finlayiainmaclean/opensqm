@@ -1,17 +1,27 @@
+"""pKa fitting and titration population/correlation analysis for constant-pH runs."""
+
+from __future__ import annotations
+
 import itertools
 from pathlib import Path
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 import numpy as np
 import pandas as pd
 from scipy.optimize import curve_fit
 
+from opensqm.cph.constantph import residue_label, residue_label_slug
 
-def henderson_hasselbalch(pH, pKa):
-    return 1 / (1 + 10**(pH - pKa))
+if TYPE_CHECKING:
+    from opensqm.cph.constantph import ConstantPH
 
 
-def compute_populations(df, cph):
+def henderson_hasselbalch(ph: float | np.ndarray, pka: float) -> float | np.ndarray:
+    """Return the high-charge fraction from the Henderson-Hasselbalch relation."""
+    return 1 / (1 + 10 ** (ph - pka))
+
+
+def compute_populations(df: pd.DataFrame, cph: ConstantPH) -> dict[int, pd.DataFrame]:
     """Return per-residue state populations as a function of pH.
 
     Parameters
@@ -39,22 +49,18 @@ def compute_populations(df, cph):
         charges = reference.charges
         variant_names = reference.variant_names
         fractions = (
-            df.groupby('ph')[residue_index]
-            .value_counts(normalize=True)
-            .unstack(fill_value=0.0)
+            df.groupby("ph")[residue_index].value_counts(normalize=True).unstack(fill_value=0.0)
         )
         for state in range(len(charges)):
             if state not in fractions.columns:
                 fractions[state] = 0.0
         fractions = fractions[list(range(len(charges)))]
-        fractions.columns = [
-            f"{variant_names[i]}(q={charges[i]:+d})" for i in range(len(charges))
-        ]
+        fractions.columns = [f"{variant_names[i]}(q={charges[i]:+d})" for i in range(len(charges))]
         populations[residue_index] = fractions
     return populations
 
 
-def compute_joint_populations(df, cph):
+def compute_joint_populations(df: pd.DataFrame, cph: ConstantPH) -> pd.DataFrame:
     """Return joint microstate populations as a function of pH.
 
     For ``N`` titratable residues with ``n_i`` variants each, reports the
@@ -82,17 +88,13 @@ def compute_joint_populations(df, cph):
     if not titratable_indices:
         return pd.DataFrame()
 
-    n_states_per_residue = [
-        len(cph.titrations[i].charges) for i in titratable_indices
-    ]
-    all_joint_states = list(
-        itertools.product(*[range(n) for n in n_states_per_residue])
-    )
+    n_states_per_residue = [len(cph.titrations[i].charges) for i in titratable_indices]
+    all_joint_states = list(itertools.product(*[range(n) for n in n_states_per_residue]))
 
     joint_key = df[titratable_indices].apply(tuple, axis=1)
     fractions = (
         df.assign(_joint=joint_key)
-        .groupby('ph')['_joint']
+        .groupby("ph")["_joint"]
         .value_counts(normalize=True)
         .unstack(fill_value=0.0)
     )
@@ -105,11 +107,9 @@ def compute_joint_populations(df, cph):
         parts = []
         for res_idx, state in zip(titratable_indices, state_tuple, strict=False):
             titration = cph.titrations[res_idx]
-            residue = next(
-                r for r in cph.explicitTopology.residues() if r.index == res_idx
-            )
+            residue = next(r for r in cph.explicitTopology.residues() if r.index == res_idx)
             name = titration.variant_names[state]
-            parts.append(f"{residue.name}.{res_idx}:{name}")
+            parts.append(f"{residue_label(residue)}:{name}")
         return " | ".join(parts)
 
     fractions.columns = [_joint_label(col) for col in fractions.columns]
@@ -117,7 +117,8 @@ def compute_joint_populations(df, cph):
 
 
 def compute_residue_correlations(
-    joint_populations: pd.DataFrame, cph,
+    joint_populations: pd.DataFrame,
+    cph: ConstantPH,
 ) -> pd.DataFrame:
     """Pearson correlation of formal charges between residue pairs at each pH.
 
@@ -152,20 +153,16 @@ def compute_residue_correlations(
             ]
         )
 
-    n_states_per_residue = [
-        len(cph.titrations[i].charges) for i in titratable_indices
-    ]
-    all_joint_states = list(
-        itertools.product(*[range(n) for n in n_states_per_residue])
-    )
+    n_states_per_residue = [len(cph.titrations[i].charges) for i in titratable_indices]
+    all_joint_states = list(itertools.product(*[range(n) for n in n_states_per_residue]))
     charges_by_residue = {
         res_idx: np.asarray(cph.titrations[res_idx].charges, dtype=float)
         for res_idx in titratable_indices
     }
     residue_labels = {
-        res_idx: next(
-            r for r in cph.explicitTopology.residues() if r.index == res_idx
-        ).name + f".{res_idx}"
+        res_idx: residue_label(
+            next(r for r in cph.explicitTopology.residues() if r.index == res_idx)
+        )
         for res_idx in titratable_indices
     }
 
@@ -178,10 +175,12 @@ def compute_residue_correlations(
         cross = np.zeros((n_res, n_res))
 
         for prob, state in zip(p, all_joint_states, strict=False):
-            charge_vec = np.array([
-                charges_by_residue[res_idx][state[res_pos]]
-                for res_pos, res_idx in enumerate(titratable_indices)
-            ])
+            charge_vec = np.array(
+                [
+                    charges_by_residue[res_idx][state[res_pos]]
+                    for res_pos, res_idx in enumerate(titratable_indices)
+                ]
+            )
             means += prob * charge_vec
             second_moments += prob * charge_vec**2
             cross += prob * np.outer(charge_vec, charge_vec)
@@ -211,9 +210,9 @@ def compute_residue_correlations(
     return pd.DataFrame(rows).dropna()
 
 
-
-
-def calculate_pkas(df, cph):
+def calculate_pkas(
+    df: pd.DataFrame, cph: ConstantPH
+) -> dict[int, dict[tuple[int, int], tuple[float, float]]]:
     """Fit a macroscopic pKa for each adjacent charge transition per residue.
 
     Each residue's column in ``df`` records the index of the variant the
@@ -256,42 +255,47 @@ def calculate_pkas(df, cph):
             if not mask.any():
                 continue
             sub = df.loc[mask].copy()
-            sub['_charge'] = charge_series[mask]
-            if set(sub['_charge'].unique()) != {c_high, c_low}:
+            sub["_charge"] = charge_series[mask]
+            if set(sub["_charge"].unique()) != {c_high, c_low}:
                 # e.g. a serial replica that never visits one charge state.
                 continue
             frac = (
-                sub.groupby('ph')['_charge']
+                sub.groupby("ph")["_charge"]
                 .apply(lambda x, ch=c_high: float(np.mean(x == ch)))
-                .reset_index(name='f_high')
+                .reset_index(name="f_high")
             )
             ref_pka = reference_pkas.get((c_high, c_low), 7.0)
             try:
                 popt, pcov = curve_fit(  # type: ignore[misc]
-                    henderson_hasselbalch, frac['ph'], frac['f_high'], p0=[ref_pka],
+                    henderson_hasselbalch,
+                    frac["ph"],
+                    frac["f_high"],
+                    p0=[ref_pka],
                 )
             except Exception:
                 continue
             residue_pkas[(c_high, c_low)] = (
-                float(popt[0]), float(np.sqrt(np.diag(pcov))[0]),
+                float(popt[0]),
+                float(np.sqrt(np.diag(pcov))[0]),
             )
         pkas[residue_index] = residue_pkas
     return pkas
 
 
 def _charge_transition_label(
-    cph, residue_index: int, c_high: int, c_low: int,
+    cph: ConstantPH,
+    residue_index: int,
+    c_high: int,
+    c_low: int,
 ) -> str:
     titration = cph.titrations[residue_index]
-    residue = next(
-        r for r in cph.explicitTopology.residues() if r.index == residue_index
-    )
+    residue = next(r for r in cph.explicitTopology.residues() if r.index == residue_index)
     variant_names = titration.variant_names
     charges = titration.charges
     high_names = [n for n, c in zip(variant_names, charges, strict=False) if c == c_high]
     low_names = [n for n, c in zip(variant_names, charges, strict=False) if c == c_low]
     return (
-        f"{residue.name}.{residue_index} "
+        f"{residue_label(residue)} "
         f"{'/'.join(high_names)} ({c_high:+d}) -> "
         f"{'/'.join(low_names)} ({c_low:+d})"
     )
@@ -305,7 +309,7 @@ def _timeseries_sample_indices(n_samples: int, max_points: int = 200) -> np.ndar
 
 def compute_pka_timeseries(
     df: pd.DataFrame,
-    cph,
+    cph: ConstantPH,
     *,
     sample_interval_ns: float,
     max_points: int = 200,
@@ -360,9 +364,7 @@ def compute_pka_timeseries(
                         "residue_index": residue_index,
                         "charge_high": c_high,
                         "charge_low": c_low,
-                        "label": _charge_transition_label(
-                            cph, residue_index, c_high, c_low
-                        ),
+                        "label": _charge_transition_label(cph, residue_index, c_high, c_low),
                         "pka": pka,
                         "pka_err": pka_err,
                     }
@@ -373,7 +375,7 @@ def compute_pka_timeseries(
 
 def compute_pka_timeseries_from_replicas(
     replica_dfs: Sequence[pd.DataFrame],
-    cph,
+    cph: ConstantPH,
     *,
     sample_interval_ns: float,
     max_points: int = 200,
@@ -385,9 +387,7 @@ def compute_pka_timeseries_from_replicas(
     production time (not the length of the vertically stacked replica table).
     """
     if not replica_dfs:
-        return compute_pka_timeseries(
-            pd.DataFrame(), cph, sample_interval_ns=sample_interval_ns
-        )
+        return compute_pka_timeseries(pd.DataFrame(), cph, sample_interval_ns=sample_interval_ns)
 
     n_per_replica = min(len(df) for df in replica_dfs)
     rows: list[dict[str, Any]] = []
@@ -407,9 +407,7 @@ def compute_pka_timeseries_from_replicas(
                         "residue_index": residue_index,
                         "charge_high": c_high,
                         "charge_low": c_low,
-                        "label": _charge_transition_label(
-                            cph, residue_index, c_high, c_low
-                        ),
+                        "label": _charge_transition_label(cph, residue_index, c_high, c_low),
                         "pka": pka,
                         "pka_err": pka_err,
                     }
@@ -421,7 +419,7 @@ def compute_pka_timeseries_from_replicas(
 def compute_complement_pka_timeseries(
     replica_dfs: Sequence[pd.DataFrame],
     target_replica: int,
-    cph,
+    cph: ConstantPH,
     *,
     sample_interval_ns: float,
     max_points: int = 200,
@@ -432,9 +430,7 @@ def compute_complement_pka_timeseries(
     replica holds ASH, another holds ASP) but the pooled fit is well-defined.
     """
     if not replica_dfs or not (0 <= target_replica < len(replica_dfs)):
-        return compute_pka_timeseries(
-            pd.DataFrame(), cph, sample_interval_ns=sample_interval_ns
-        )
+        return compute_pka_timeseries(pd.DataFrame(), cph, sample_interval_ns=sample_interval_ns)
 
     n_per_replica = min(len(df) for df in replica_dfs)
     rows: list[dict[str, Any]] = []
@@ -455,9 +451,7 @@ def compute_complement_pka_timeseries(
                         "residue_index": residue_index,
                         "charge_high": c_high,
                         "charge_low": c_low,
-                        "label": _charge_transition_label(
-                            cph, residue_index, c_high, c_low
-                        ),
+                        "label": _charge_transition_label(cph, residue_index, c_high, c_low),
                         "pka": pka,
                         "pka_err": pka_err,
                     }
@@ -478,7 +472,7 @@ def _timeseries_transition_keys(df: pd.DataFrame) -> set[tuple[int, int, int]]:
 def build_replica_overlay_timeseries(
     replica_dfs: Sequence[pd.DataFrame],
     per_replica_timeseries: Sequence[tuple[str, pd.DataFrame]],
-    cph,
+    cph: ConstantPH,
     *,
     sample_interval_ns: float,
 ) -> list[tuple[str, pd.DataFrame]]:
@@ -499,12 +493,14 @@ def build_replica_overlay_timeseries(
         else:
             complement_only = complement[
                 complement.apply(
-                    lambda row: (
-                        int(row["residue_index"]),
-                        int(row["charge_high"]),
-                        int(row["charge_low"]),
-                    )
-                    not in own_keys,
+                    lambda row, own_keys=own_keys: (
+                        (
+                            int(row["residue_index"]),
+                            int(row["charge_high"]),
+                            int(row["charge_low"]),
+                        )
+                        not in own_keys
+                    ),
                     axis=1,
                 )
             ]
@@ -556,7 +552,7 @@ def plot_pka_timeseries(
     pka_timeseries: pd.DataFrame,
     output_path: str | Path,
     *,
-    cph=None,
+    cph: ConstantPH | None = None,
     filename: str = "pka_timeseries.png",
     overlay_timeseries: Sequence[tuple[str, pd.DataFrame]] | None = None,
 ) -> Path:
@@ -617,7 +613,7 @@ def plot_pka_timeseries(
     for ax, ((residue_index, charge_high, charge_low, label), group) in zip(
         axes.flat, transitions, strict=False
     ):
-        group = group.sort_values("time_ns")
+        group_sorted = group.sort_values("time_ns")
         replica_series: list[pd.Series] = []
         overlay_groups: list[tuple[str, pd.DataFrame]] = []
         if overlay_timeseries:
@@ -648,8 +644,8 @@ def plot_pka_timeseries(
 
         pooled_label = "average" if overlay_timeseries else None
         ax.plot(
-            group["time_ns"],
-            group["pka"],
+            group_sorted["time_ns"],
+            group_sorted["pka"],
             marker="o" if not overlay_timeseries else None,
             markersize=3,
             linewidth=1.5 if overlay_timeseries else 2,
@@ -658,12 +654,12 @@ def plot_pka_timeseries(
             label=pooled_label,
             zorder=4,
         )
-        if group["pka_err"].notna().any():
-            err = group["pka_err"].clip(upper=5.0)
+        if group_sorted["pka_err"].notna().any():
+            err = group_sorted["pka_err"].clip(upper=5.0)
             ax.fill_between(
-                group["time_ns"],
-                group["pka"] - err,
-                group["pka"] + err,
+                group_sorted["time_ns"],
+                group_sorted["pka"] - err,
+                group_sorted["pka"] + err,
                 alpha=0.15,
                 color="black",
                 zorder=2,
@@ -671,9 +667,7 @@ def plot_pka_timeseries(
 
         if overlay_groups:
             overlay_colors = ("#2166ac", "#d6604d", "#4daf4a", "#984ea3")
-            for replica_i, (replica_label, overlay_group) in enumerate(
-                overlay_groups
-            ):
+            for replica_i, (replica_label, overlay_group) in enumerate(overlay_groups):
                 ax.plot(
                     overlay_group["time_ns"],
                     overlay_group["pka"],
@@ -702,10 +696,10 @@ def plot_pka_timeseries(
             )
 
         if overlay_timeseries and overlay_groups:
-            ylim_series = [group["pka"], *replica_series]
+            ylim_series = [group_sorted["pka"], *replica_series]
             ylo, yhi = _pka_timeseries_plot_ylim(ylim_series)
         else:
-            ylo, yhi = _pka_timeseries_ylim(group["pka"])
+            ylo, yhi = _pka_timeseries_ylim(group_sorted["pka"])
         if model_pka is not None:
             ylo = min(ylo, model_pka - 0.5)
             yhi = max(yhi, model_pka + 0.5)
@@ -730,7 +724,7 @@ def plot_pka_timeseries(
 
 def plot_microstate_populations(
     populations: dict[int, pd.DataFrame],
-    cph,
+    cph: ConstantPH,
     output_path: str | Path,
 ) -> list[Path]:
     """Plot microstate population vs pH for each titratable residue.
@@ -760,9 +754,7 @@ def plot_microstate_populations(
             # A single-pH run yields one point on the pH axis; nothing to plot.
             continue
 
-        residue = next(
-            r for r in cph.explicitTopology.residues() if r.index == residue_index
-        )
+        residue = next(r for r in cph.explicitTopology.residues() if r.index == residue_index)
         fig, ax = plt.subplots(figsize=(8, 5))
         plot_df = pop_df.sort_index()
         for col in plot_df.columns:
@@ -771,11 +763,11 @@ def plot_microstate_populations(
         ax.set_xlabel("pH")
         ax.set_ylabel("Population")
         ax.set_ylim(0.0, 1.0)
-        ax.set_title(f"{residue.name}.{residue_index}")
+        ax.set_title(residue_label(residue))
         ax.legend(loc="best", fontsize=8)
         ax.grid(True, alpha=0.3)
 
-        figure_path = output_dir / f"populations_{residue.name}_{residue_index}.png"
+        figure_path = output_dir / f"populations_{residue_label_slug(residue)}.png"
         fig.tight_layout()
         fig.savefig(figure_path, dpi=150)
         plt.close(fig)
@@ -786,7 +778,7 @@ def plot_microstate_populations(
 
 def analyze_cph_results(
     df: pd.DataFrame,
-    cph,
+    cph: ConstantPH,
     output_path: str | Path,
     *,
     sample_interval_ns: float,
@@ -825,9 +817,7 @@ def analyze_cph_results(
             replica_dfs, cph, sample_interval_ns=sample_interval_ns
         )
     else:
-        pka_timeseries = compute_pka_timeseries(
-            df, cph, sample_interval_ns=sample_interval_ns
-        )
+        pka_timeseries = compute_pka_timeseries(df, cph, sample_interval_ns=sample_interval_ns)
 
     if not joint_populations.empty:
         state_idx = {name: i for i, name in enumerate(joint_populations.columns)}
@@ -837,25 +827,18 @@ def analyze_cph_results(
             .melt(id_vars="ph", var_name="state_name", value_name="population")
         )
         long_joint.insert(1, "state_idx", long_joint["state_name"].map(state_idx))
-        long_joint = (
-            long_joint.sort_values(["ph", "state_idx"])
-            .reset_index(drop=True)[
-                ["ph", "state_idx", "state_name", "population"]
-            ]
-        )
+        long_joint = long_joint.sort_values(["ph", "state_idx"]).reset_index(drop=True)[
+            ["ph", "state_idx", "state_name", "population"]
+        ]
         long_joint.to_csv(output_dir / "joint_populations.csv", index=False)
     if not residue_correlations.empty:
-        residue_correlations.to_csv(
-            output_dir / "residue_correlations.csv", index=False
-        )
+        residue_correlations.to_csv(output_dir / "residue_correlations.csv", index=False)
 
     population_frames: list[pd.DataFrame] = []
     pka_rows: list[dict[str, Any]] = []
     for residue_index, charge_pka_map in pkas.items():
         titration = cph.titrations[residue_index]
-        residue = next(
-            r for r in cph.explicitTopology.residues() if r.index == residue_index
-        )
+        residue = next(r for r in cph.explicitTopology.residues() if r.index == residue_index)
         variant_names = titration.variant_names
         charges = titration.charges
         for (c_high, c_low), (pka, pka_err) in charge_pka_map.items():
@@ -864,7 +847,9 @@ def analyze_cph_results(
             pka_rows.append(
                 {
                     "residue_index": residue_index,
-                    "residue_name": f"{residue.name}.{residue_index}",
+                    "residue_name": residue.name,
+                    "residue_id": residue.id,
+                    "chain_id": (residue.chain.id or "").strip(),
                     "charge_high": c_high,
                     "charge_low": c_low,
                     "high_variants": "/".join(high_names),
@@ -875,19 +860,17 @@ def analyze_cph_results(
             )
             if verbose:
                 print(
-                    f"  residue {residue.name}.{residue_index} "
+                    f"  residue {residue_label(residue)} "
                     f"{'/'.join(high_names)} ({c_high:+d}) -> "
                     f"{'/'.join(low_names)} ({c_low:+d}): "
                     f"pKa = {pka:.3f} +/- {pka_err:.3f}"
                 )
         if verbose:
-            print(f"populations for residue {residue.name}.{residue_index}:")
+            print(f"populations for residue {residue_label(residue)}:")
             print(populations[residue_index])
 
     for residue_index, populations_df in populations.items():
-        residue = next(
-            r for r in cph.explicitTopology.residues() if r.index == residue_index
-        )
+        residue = next(r for r in cph.explicitTopology.residues() if r.index == residue_index)
         state_idx = {name: i for i, name in enumerate(populations_df.columns)}
         frame = (
             populations_df.rename_axis("ph")
@@ -895,8 +878,10 @@ def analyze_cph_results(
             .melt(id_vars="ph", var_name="state_name", value_name="population")
         )
         frame.insert(1, "residue_index", residue_index)
-        frame.insert(2, "residue_name", f"{residue.name}.{residue_index}")
-        frame.insert(3, "state_idx", frame["state_name"].map(state_idx))
+        frame.insert(2, "residue_name", residue.name)
+        frame.insert(3, "residue_id", residue.id)
+        frame.insert(4, "chain_id", (residue.chain.id or "").strip())
+        frame.insert(5, "state_idx", frame["state_name"].map(state_idx))
         population_frames.append(frame)
 
     if population_frames:
@@ -908,6 +893,8 @@ def analyze_cph_results(
                     "ph",
                     "residue_index",
                     "residue_name",
+                    "residue_id",
+                    "chain_id",
                     "state_idx",
                     "state_name",
                     "population",
@@ -929,7 +916,7 @@ def analyze_cph_results(
 
     if verbose:
         print("\nJoint microstate populations:")
-        print(joint_populations)
+        print(joint_populations.T)
         print("\nResidue charge correlations:")
         print(residue_correlations)
         print("\nPer-residue MC stats:")

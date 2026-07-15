@@ -15,7 +15,6 @@ Example:
 from __future__ import annotations
 
 import argparse
-import math
 import subprocess
 import sys
 from pathlib import Path
@@ -149,9 +148,7 @@ def _resolve_ligand_sdf(pdb: Path, explicit: Path | None) -> Path:
             path = Path(ligand).expanduser()
             if path.exists():
                 return path.resolve()
-    raise FileNotFoundError(
-        "Could not locate a ligand SDF. Pass --ligand-sdf explicitly."
-    )
+    raise FileNotFoundError("Could not locate a ligand SDF. Pass --ligand-sdf explicitly.")
 
 
 def _sigma_to_rmin(sigma: float) -> float:
@@ -303,15 +300,9 @@ def main() -> None:
 
     auto_center, auto_griddim = _grid_from_ligand(pdb, args.grid_spacing, args.grid_padding)
     center = (
-        np.asarray(args.grid_center, dtype=float)
-        if args.grid_center is not None
-        else auto_center
+        np.asarray(args.grid_center, dtype=float) if args.grid_center is not None else auto_center
     )
-    griddim = (
-        np.asarray(args.griddim, dtype=int)
-        if args.griddim is not None
-        else auto_griddim
-    )
+    griddim = np.asarray(args.griddim, dtype=int) if args.griddim is not None else auto_griddim
 
     input_path = write_cpptraj_input(
         prmtop=prmtop,

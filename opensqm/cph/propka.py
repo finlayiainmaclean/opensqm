@@ -54,7 +54,7 @@ class PredictedPka:
         return f"{self.residue_name} {self.residue_number}{chain}"
 
     def relative_ph_adjusted_free_energy(
-        self, pH: float, *, temperature: unit.Quantity = 298.15 * unit.kelvin
+        self, ph: float, *, temperature: unit.Quantity = 298.15 * unit.kelvin
     ) -> float:
         """pH-adjusted free energy of this group's minor protonation state.
 
@@ -79,10 +79,10 @@ class PredictedPka:
         rt_ln10 = (unit.MOLAR_GAS_CONSTANT_R * temperature * _LN10).value_in_unit(
             unit.kilocalories_per_mole
         )
-        return rt_ln10 * abs(self.pka - pH)
+        return rt_ln10 * abs(self.pka - ph)
 
 
-def predict_pkas(pdb_path: str | Path, *, pH: float = 7.0) -> list[PredictedPka]:
+def predict_pkas(pdb_path: str | Path, *, ph: float = 7.0) -> list[PredictedPka]:
     """Run PROPKA on a protein PDB and return every predicted group pKa.
 
     Parameters
@@ -109,7 +109,7 @@ def predict_pkas(pdb_path: str | Path, *, pH: float = 7.0) -> list[PredictedPka]
     # PROPKA writes its full report to stdout; capture it so it does not leak
     # into the caller's logs, and disable the side-effect ``.pka`` file.
     with redirect_stdout(io.StringIO()):
-        molecular_container = single(str(pdb_path), optargs=["--pH", str(pH)], write_pka=False)
+        molecular_container = single(str(pdb_path), optargs=["--pH", str(ph)], write_pka=False)
 
     conformations = molecular_container.conformations
     # PROPKA stores an averaged conformation under "AVR"; fall back to whatever
@@ -135,7 +135,7 @@ def predict_pkas(pdb_path: str | Path, *, pH: float = 7.0) -> list[PredictedPka]
 def find_titratable_residues_near_ph(
     pdb_path: str | Path,
     *,
-    pH: float = 7.0,
+    ph: float = 7.0,
     protonation_penalty: unit.Quantity = 3.0 * unit.kilocalories_per_mole,
     temperature: unit.Quantity = 298.15 * unit.kelvin,
 ) -> list[PredictedPka]:
@@ -173,17 +173,17 @@ def find_titratable_residues_near_ph(
         strongly titrating groups first).
     """
     penalty_kcal = protonation_penalty.value_in_unit(unit.kilocalories_per_mole)
-    predictions = predict_pkas(pdb_path, pH=pH)
+    predictions = predict_pkas(pdb_path, ph=ph)
 
     def penalty(prediction: PredictedPka) -> float:
-        return prediction.relative_ph_adjusted_free_energy(pH, temperature=temperature)
+        return prediction.relative_ph_adjusted_free_energy(ph, temperature=temperature)
 
     near = [p for p in predictions if penalty(p) < penalty_kcal]
     near.sort(key=penalty)
 
     logger.info(
         f"PROPKA: {len(near)}/{len(predictions)} groups have a pH-adjusted "
-        f"protonation free energy below {penalty_kcal:.2f} kcal/mol at pH {pH}"
+        f"protonation free energy below {penalty_kcal:.2f} kcal/mol at pH {ph}"
     )
     for prediction in near:
         logger.info(

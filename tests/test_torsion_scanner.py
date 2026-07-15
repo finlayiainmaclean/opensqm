@@ -20,7 +20,6 @@ def test_autodetect_flip_dihedrals():
     # Standard autodetection run. Biphenyl naturally falls outside the boundary (Type 1),
     bonds = autodetect_flip_dihedrals(mol)
 
-
     assert len(bonds) == 1
 
     for bond in bonds:

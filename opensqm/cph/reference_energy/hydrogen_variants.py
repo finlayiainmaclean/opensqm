@@ -6,13 +6,15 @@ to capture each protomer's hydrogen layout once the OpenFF
 ``test_get_hydrogen_variants`` regression tests that round-trip through
 ``addHydrogens`` to confirm the variant list reproduces the input.
 """
+
 # pyrefly: ignore [missing-import]
 from collections import defaultdict
 
+from openmm.app import Topology
 from openmm.app import element as elem
 
 
-def get_hydrogen_variants(topology):
+def get_hydrogen_variants(topology: Topology) -> list[list[tuple[str, str]] | None]:
     """Given an OpenMM Topology, return a per-residue list of (hydrogen_name, parent_name) tuples.
 
     This produces output in the format expected by Modeller.addHydrogens(variants=...).

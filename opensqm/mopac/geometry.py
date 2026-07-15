@@ -1,4 +1,5 @@
-# ruff: noqa: D100, D103, D205, PLR2004, E501
+"""Geometry helpers: RDKit-to-MOPAC conversion, formal charge and pi-bond annotation."""
+
 import itertools
 import json
 from pathlib import Path
@@ -29,11 +30,13 @@ def get_mopac_pi_bonds(mol: Chem.Mol) -> list[tuple[int, int]]:
 
 
 def annotate_mopac_formal_charges(mol: Chem.Mol, formal_charges: dict[int, int]) -> None:
+    """Store each atom's MOPAC formal charge (0 when absent) as an integer property."""
     for i, atom in enumerate(mol.GetAtoms()):
         atom.SetIntProp("mopac_formal_charge", formal_charges.get(i, 0))
 
 
 def get_rdkit_formal_charges(mol: Chem.Mol) -> dict[int, int]:
+    """Return a mapping of atom index to formal charge for non-zero charged atoms."""
     charges = {}
     for i, atom in enumerate(mol.GetAtoms()):
         formal_charge = atom.GetFormalCharge()
@@ -43,6 +46,7 @@ def get_rdkit_formal_charges(mol: Chem.Mol) -> dict[int, int]:
 
 
 def all_combinations(items: list[tuple[int, int]]) -> list[Any]:
+    """Return the empty selection plus every non-empty combination of ``items``, sorted by size."""
     result = [{}]
     for length in range(1, len(items) + 1):
         result.extend(itertools.combinations(items, length))
@@ -51,10 +55,7 @@ def all_combinations(items: list[tuple[int, int]]) -> list[Any]:
 
 
 def get_rdkit_pi_bonds(mol: Chem.Mol) -> list[tuple[int, int]]:
-    """
-    Return list of (1-indexed begin_atom, end_atom) strings
-    for double bonds where both atoms.
-    """
+    """Return (begin_idx, end_idx) atom-index tuples for every double bond in ``mol``."""
     pi_bonds = []
     for bond in mol.GetBonds():
         a1 = bond.GetBeginAtom()
@@ -65,6 +66,7 @@ def get_rdkit_pi_bonds(mol: Chem.Mol) -> list[tuple[int, int]]:
 
 
 def write_setpi(pi_bonds: list[tuple[int, int]], setpi_path: Path) -> None:
+    """Write the SETPI file listing each pi bond as a 1-indexed atom pair."""
     pi_bonds_formatted = [f"{a1 + 1} {a2 + 1}" for a1, a2 in pi_bonds]
     setpi_path.write_text("\n".join(pi_bonds_formatted))
 
@@ -82,7 +84,10 @@ def _finalize_setpi_after_geometry(
     *,
     mopac_keywords: list[str] | None = None,
 ) -> str:
-    """Refresh ``setpi.txt`` after geometry exists. Optionally append SETPI to ``mopac_keywords``."""
+    """Refresh ``setpi.txt`` after geometry exists.
+
+    Optionally append the SETPI token to ``mopac_keywords``.
+    """
     if len(pi_bonds) == 0:
         return ""
     write_setpi(pi_bonds, setpi_path)
@@ -99,6 +104,7 @@ def rdkit_to_mopac(
     opt_mask: np.ndarray | None = None,
     conf_id: int = 0,
 ) -> None:
+    """Write ``mol`` as a MOPAC geometry file, marking each atom frozen or optimised."""
     # Get the conformer
     conf = mol.GetConformer(conf_id)
 
@@ -130,7 +136,10 @@ def rdkit_to_mopac(
         # MOPAC format: Symbol x opt y opt z opt
         # opt can be 1 (optimize) or 0 (freeze)
         optimise_atom = opt_mask[i]
-        coord_line = f"{symbol:2s} {pos.x:12.6f} {optimise_atom} {pos.y:12.6f} {optimise_atom} {pos.z:12.6f} {optimise_atom}"
+        coord_line = (
+            f"{symbol:2s} {pos.x:12.6f} {optimise_atom} "
+            f"{pos.y:12.6f} {optimise_atom} {pos.z:12.6f} {optimise_atom}"
+        )
         mopac_lines.append(coord_line)
 
     out_mopac_path.write_text("\n".join(mopac_lines))

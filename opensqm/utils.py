@@ -15,7 +15,7 @@ def run_command(
     shell: bool = True,
     ignore_errors: bool = False,
     cwd: str | Path | None = None,
-):
+) -> str | None:
     """Thin wrapper around subprocess.run that logs output and optionally raises."""
     try:
         result = subprocess.run(

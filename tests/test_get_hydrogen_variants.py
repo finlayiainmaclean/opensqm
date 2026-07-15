@@ -12,7 +12,6 @@ custom ligand. To validate them we round-trip:
         -> reload via rdkit/OpenFF using the original SMILES as a template
         -> canonical SMILES must match the input.
 """
-# ruff: noqa: PLR2004
 
 import tempfile
 from pathlib import Path
@@ -30,7 +29,7 @@ from opensqm.cph.reference_energy import (
 
 
 def _round_trip_via_get_hydrogen_variants(rdkit_mol: Chem.Mol) -> str:
-    """Apply the get_hydrogen_variants -> addHydrogens round-trip and return the resulting SMILES."""
+    """Apply the get_hydrogen_variants -> addHydrogens round-trip and return the SMILES."""
     expected_smiles = Chem.MolToSmiles(Chem.RemoveHs(rdkit_mol))
 
     offmol = Molecule.from_rdkit(rdkit_mol, allow_undefined_stereo=False)

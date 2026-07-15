@@ -1,4 +1,4 @@
-# ruff: noqa: D100, D103
+"""Build per-atom optimisation masks selecting which complex atoms MOPAC may move."""
 
 import numpy as np
 from rdkit import Chem
@@ -8,6 +8,7 @@ from opensqm.mopac.constants import OptMode
 
 
 def get_opt_mask(complex: Chem.Mol, mode: OptMode = "ligand") -> np.ndarray:
+    """Return an int mask flagging atoms to optimise for the given ``mode``."""
     opt_mask = np.zeros(complex.GetNumAtoms(), dtype=bool)
 
     match mode:

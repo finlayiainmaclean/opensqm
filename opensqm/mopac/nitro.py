@@ -1,4 +1,5 @@
-# ruff: noqa: D100, D401
+"""Handle nitro groups for MOPAC/LEWIS by adding and stripping auxiliary O-O bonds."""
+
 from rdkit import Chem
 
 # Marks O-O bonds added only for MOPAC/LEWIS (`fix_nitro_groups`).
@@ -35,7 +36,7 @@ def strip_mopac_nitro_aux_bonds(mol: Chem.Mol) -> Chem.Mol:
 
 def fix_nitro_groups(mol: Chem.Mol) -> Chem.Mol:
     """
-    Finds nitro groups in a molecule and adds single bonds between the two oxygens.
+    Find nitro groups in a molecule and add single bonds between the two oxygens.
 
     See: https://github.com/openmopac/mopac/blob/main/src/chemistry/lewis.F90
 

@@ -1,4 +1,5 @@
-# ruff: noqa: D100, D103
+"""Protein-ligand interaction energies and complex optimisation with MOPAC."""
+
 import tempfile
 
 from loguru import logger
@@ -16,6 +17,7 @@ from opensqm.rdkit_utils import get_coordinates, set_coordinates
 
 
 def run_interaction_energy(*, ligand: Chem.Mol, protein: Chem.Mol) -> dict[str, float]:
+    """Compute the ligand-protein interaction energy and its component single points."""
     # Get ligand with annoted formal charges and pi bonds for mopac
     ligand, _dE = get_correct_ligand(ligand)
 
@@ -64,14 +66,12 @@ def run_interaction_energy(*, ligand: Chem.Mol, protein: Chem.Mol) -> dict[str, 
     )
     interaction_energy = E_complex - E_protein - E_ligand
 
-    scores = {
+    return {
         "interaction_energy": interaction_energy,
         "E_complex": E_complex,
         "E_protein": E_protein,
         "E_ligand": E_ligand,
     }
-
-    return scores
 
 
 def optimise_complex(
@@ -83,6 +83,7 @@ def optimise_complex(
     use_rapid: bool = False,
     num_epochs: int = 30,
 ) -> tuple[Chem.Mol, Chem.Mol]:
+    """Optimise the protein-ligand complex and return the optimised ligand and protein."""
     mopac_keywords = [
         "PM6-D3H4X",
         "MOZYME",

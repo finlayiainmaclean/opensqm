@@ -75,7 +75,7 @@ class TestRotateTerminal:
         state = self.flipmc.simulation.context.getState(getPositions=True, enforcePeriodicBox=False)
         positions = state.getPositions()
         path = self.output / filename
-        with open(path, "w") as f:
+        with path.open("w") as f:
             app.PDBFile.writeFile(self.topology, positions, f)
         print(f"  Saved: {path}")
 

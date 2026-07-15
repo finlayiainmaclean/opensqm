@@ -18,6 +18,7 @@ single edge. :func:`_solve_reference_energies_ls` solves this linear
 system in least-squares form so cycle-redundant inputs degrade
 gracefully into a residual report instead of an inconsistency error.
 """
+
 from __future__ import annotations
 
 from collections import defaultdict, deque
@@ -26,10 +27,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from .models import Transition
 
 
-def macro_pka(micro_pkas) -> float:
+def macro_pka(micro_pkas: Iterable[float]) -> float:
     """Combine a list of micro pKas into a single macroscopic pKa.
 
     For a residue that can deprotonate via multiple parallel pathways from a
@@ -51,7 +54,7 @@ def macro_pka(micro_pkas) -> float:
     micro_pkas = np.asarray(list(micro_pkas), dtype=float)
     if micro_pkas.size == 0:
         raise ValueError("micro_pkas must contain at least one value")
-    return -np.log10(np.sum(10.0**(-micro_pkas)))
+    return -np.log10(np.sum(10.0 ** (-micro_pkas)))
 
 
 def _validate_transitions_graph(
@@ -87,8 +90,7 @@ def _validate_transitions_graph(
     if n_variants <= 1:
         if transitions:
             raise ValueError(
-                f"single-variant residue must have no transitions; "
-                f"got {len(transitions)}"
+                f"single-variant residue must have no transitions; got {len(transitions)}"
             )
         return
     if len(transitions) < n_variants - 1:
@@ -100,9 +102,7 @@ def _validate_transitions_graph(
     neighbors_of: dict[int, list[int]] = defaultdict(list)
     for t in transitions:
         if not (0 <= t.parent < n_variants and 0 <= t.child < n_variants):
-            raise ValueError(
-                f"transition indices out of range for {n_variants} variants: {t}"
-            )
+            raise ValueError(f"transition indices out of range for {n_variants} variants: {t}")
         if t.parent == t.child:
             raise ValueError(f"self-loop in transitions: {t}")
         neighbors_of[t.parent].append(t.child)
@@ -166,9 +166,7 @@ def _solve_reference_energies_ls(
         for each edge in the same order as ``transitions``.
     """
     if len(transitions) != len(measured_deltas_kj):
-        raise ValueError(
-            "transitions and measured_deltas_kj must have the same length"
-        )
+        raise ValueError("transitions and measured_deltas_kj must have the same length")
     free_idx = [i for i in range(n_variants) if i != root_idx]
     if not free_idx:
         return ([0.0] * n_variants, [])
@@ -203,7 +201,6 @@ def _solve_reference_energies_ls(
 # trees and rejects them only when they fail to span), so this redirect is
 # safe.
 _validate_transitions_tree = _validate_transitions_graph
-
 
 
 def _topological_transitions(

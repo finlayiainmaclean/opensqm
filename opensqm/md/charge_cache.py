@@ -9,6 +9,8 @@ from openff.toolkit.topology import Molecule  # type: ignore
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from opensqm.cph.run_cph import LigandSetup
+
 LIGAND_VARIANTS_DIRNAME = "ligand_variants"
 
 
@@ -21,6 +23,7 @@ def _read_molecule(path: Path) -> Molecule:
 
 
 def ligand_variant_path(output_path: Path, residue_name: str) -> Path:
+    """Return the on-disk path for a run-local cached ligand variant."""
     return output_path / LIGAND_VARIANTS_DIRNAME / f"{residue_name}.sdf"
 
 
@@ -40,12 +43,20 @@ def load_ligand_variant(output_path: Path, residue_name: str) -> Molecule | None
     return _read_molecule(path)
 
 
-def persist_ligand_setups(output_path: Path, *setups) -> None:
-    """Write all variant molecules (with charges/conformers) under ``output_path``."""
+def persist_ligand_setups(output_path: Path, *setups: LigandSetup | None) -> None:
+    """Write all variant molecules (with charges/conformers) under ``output_path``.
+
+    The union super-template (``setup.union_molecule``) is persisted too when
+    present, so a resumed run can re-register its SMIRNOFF template without
+    re-enumerating protonation states.
+    """
     for setup in setups:
         if setup is None:
             continue
-        for molecule in setup.variant_molecules:
+        molecules = list(setup.variant_molecules)
+        if setup.union_molecule is not None:
+            molecules.append(setup.union_molecule)
+        for molecule in molecules:
             if molecule.partial_charges is None:
                 continue
             save_ligand_variant(output_path, molecule)

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from opensqm.modbinddg.reweight import (
+from opensqm.modbind.reweight import (
     R_KCAL_PER_MOL_K,
     _bin_ids,
     frame_weights,
@@ -36,8 +36,10 @@ def main() -> None:
     print(f"T*={TEMP_K} K  ->  reweight exponent 1/lambda = T*/T = {exp:.3f}\n")
 
     print("=== Per-trajectory bound-well sampling ===")
-    print(f"{'rep':>3} {'frames':>7} {'in<2A':>6} {'well_ns':>8} "
-          f"{'maxbin_n':>8} {'reweighted_bound':>16}")
+    print(
+        f"{'rep':>3} {'frames':>7} {'in<2A':>6} {'well_ns':>8} "
+        f"{'maxbin_n':>8} {'reweighted_bound':>16}"
+    )
     for i, t in enumerate(trajs):
         r = np.linalg.norm(t, axis=1)
         n_in = int(np.sum(r < BOUND_CUTOFF))
@@ -61,14 +63,16 @@ def main() -> None:
     p_unbound = 404.9  # from results.csv (explicit, time-normalised)
     for target in (-5.57,):
         target_comp = target - vol_corr
-        need_ratio = np.exp(target_comp / rt)        # P_u / P_b
+        need_ratio = np.exp(target_comp / rt)  # P_u / P_b
         need_pb = p_unbound / need_ratio
         print(f"\nfor dG = {target}: need P_unbound/P_bound = {need_ratio:.2e}")
         print(f"  with explicit P_unbound={p_unbound:.0f} -> need P_bound ~ {need_pb:.3e}")
         # frames in deepest bin to reach that, per-traj averaged
         n_needed = need_pb ** (1.0 / exp)
-        print(f"  i.e. deepest bound bin needs ~{n_needed:.0f} frames "
-              f"(~{n_needed*FRAME_PS*1e-3:.2f} ns in the well per replica)")
+        print(
+            f"  i.e. deepest bound bin needs ~{n_needed:.0f} frames "
+            f"(~{n_needed * FRAME_PS * 1e-3:.2f} ns in the well per replica)"
+        )
 
     print("\n=== sanity: recompute ΔG_comp from the two populations ===")
     dg_comp = rt * np.log(p_unbound / bound_pop)

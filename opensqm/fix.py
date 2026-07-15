@@ -17,11 +17,11 @@ def _is_protein(res: Residue) -> bool:
     return "CA" in atom_names
 
 
-def _get_atom_by_name(res: Residue, name: str):
+def _get_atom_by_name(res: Residue, name: str) -> Atom | None:
     return next((a for a in res.atoms() if a.name == name), None)
 
 
-def _distance_nm(pos, a1, a2) -> float:
+def _distance_nm(pos: unit.Quantity, a1: Atom, a2: Atom) -> float:
     p1 = pos[a1.index].value_in_unit(unit.nanometer)
     p2 = pos[a2.index].value_in_unit(unit.nanometer)
     return float(np.linalg.norm(np.array(p1) - np.array(p2)))
@@ -30,7 +30,7 @@ def _distance_nm(pos, a1, a2) -> float:
 def _is_chain_break(
     prev_res: Residue,
     curr_res: Residue,
-    positions,
+    positions: unit.Quantity,
 ) -> bool:
     """
     Return True if the bond connecting prev_res → curr_res is missing or too long.
@@ -89,7 +89,7 @@ def run_pdbfixer(
     keep_waters: bool = True,
     keep_ions: bool = True,
     ph: float = 7.4,
-):
+) -> PDBFixer:
     """Run PDBFixer to add missing hydrogens, renumber chains, and write the result."""
     input_protein_path = Path(input_protein_path)
     output_protein_path = Path(output_protein_path)
@@ -157,9 +157,7 @@ def run_pdbfixer(
 
     # fixer = flip_residues(fixer)
 
-    PDBFile.writeFile(
-        fixer.topology, fixer.positions, open(str(output_protein_path), "w"), keepIds=True
-    )
+    PDBFile.writeFile(fixer.topology, fixer.positions, output_protein_path.open("w"), keepIds=True)
     return fixer
 
 
@@ -175,7 +173,7 @@ def main(
     keep_waters: bool,
     keep_ions: bool,
     ph: float,
-):
+) -> None:
     """Run PDBFixer to prepare protein structures."""
     run_pdbfixer(
         input_protein_path,

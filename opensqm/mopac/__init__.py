@@ -1,5 +1,7 @@
-# ruff: noqa: E501
-"""MOPAC integration: LEWIS/CVB, MOZYME single-point and optimisation, charges, interaction energies."""
+"""MOPAC integration.
+
+LEWIS/CVB, MOZYME single-point and optimisation, charges, interaction energies.
+"""
 
 from opensqm.mopac.charges import get_mopac_formal_charges
 from opensqm.mopac.constants import MOPAC_VDW_RADII, OptMode

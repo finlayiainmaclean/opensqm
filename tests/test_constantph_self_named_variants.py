@@ -21,13 +21,13 @@ def test_cys_pairwise_reference_builds_two_states() -> None:
     cph = ConstantPH(
         topology=pdb.topology,
         positions=pdb.positions,
-        pH=7.0,
+        ph=7.0,
         config=ConstantpHSettings(),
         references={residues[1].name: pair_reference},
         titratable_residue_indices=[1],
         ring_flip_angles=None,
     )
     titration = cph.titrations[1]
-    assert len(titration.explicitStates) == 2
-    assert [s.numHydrogens for s in titration.explicitStates] == [5, 4]
-    ReferenceEnergyFinder(cph, pKa=8.33, temperature=300)
+    assert len(titration.explicit_states) == 2
+    assert [s.num_hydrogens for s in titration.explicit_states] == [5, 4]
+    ReferenceEnergyFinder(cph, pka=8.33, temperature=300)

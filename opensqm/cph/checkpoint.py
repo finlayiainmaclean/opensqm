@@ -20,21 +20,25 @@ PRODUCTION_STATE_FILENAME = "production_state.json"
 
 
 def manifest_path(output_path: Path) -> Path:
+    """Return the run-manifest JSON path under ``output_path``."""
     return output_path / MANIFEST_FILENAME
 
 
 def checkpoint_dir(output_path: Path) -> Path:
+    """Return the checkpoints directory under ``output_path``."""
     return output_path / CHECKPOINT_DIRNAME
 
 
 def equilibrated_pdb_path(output_path: Path) -> Path:
+    """Return the equilibrated-system PDB path under ``output_path``."""
     return output_path / EQUILIBRATED_PDB
 
 
-def pH_ladder(min_pH: float, max_pH: float, pH_spacing: float) -> list[float]:
+def ph_ladder(min_ph: float, max_ph: float, ph_spacing: float) -> list[float]:
+    """Return an inclusive pH ladder from ``min_ph`` to ``max_ph`` at ``ph_spacing``."""
     import numpy as np
 
-    return [float(pH) for pH in np.arange(min_pH, max_pH + pH_spacing, pH_spacing)]
+    return [float(ph) for ph in np.arange(min_ph, max_ph + ph_spacing, ph_spacing)]
 
 
 def write_run_manifest(
@@ -45,22 +49,28 @@ def write_run_manifest(
     cofactor: str | None,
     titratable_residue_indices: list[int],
     titratable_residue_query: str | None,
-    pHs: list[float],
+    phs: list[float],
     n_replicas: int,
     integrator_step_size_ps: float,
     protonation_swap_interval_ps: float,
     cph_config: ConstantpHSettings,
+    titratable_residue_labels: list[str] | None = None,
     weights: list[float] | None = None,
     weight_equilibration_done: bool = False,
 ) -> None:
+    """Write the run manifest describing this constant-pH run's configuration."""
     payload = {
         "version": MANIFEST_VERSION,
         "protein": str(Path(protein).resolve()),
         "ligand": str(Path(ligand).resolve()) if ligand else None,
         "cofactor": str(Path(cofactor).resolve()) if cofactor else None,
         "titratable_residue_indices": titratable_residue_indices,
+        # Original-structure identifiers (e.g. "GLU 404 A"), aligned index-for-index
+        # with titratable_residue_indices, so the run's residues are traceable to the
+        # input PDB numbering without re-deriving the topology.
+        "titratable_residue_labels": titratable_residue_labels,
         "titratable_residue_query": titratable_residue_query,
-        "pHs": pHs,
+        "pHs": phs,
         "n_replicas": n_replicas,
         "integrator_step_size_ps": integrator_step_size_ps,
         "protonation_swap_interval_ps": protonation_swap_interval_ps,
@@ -72,6 +82,7 @@ def write_run_manifest(
 
 
 def read_run_manifest(output_path: Path) -> dict[str, Any]:
+    """Read and return the run manifest under ``output_path``."""
     path = manifest_path(output_path)
     if not path.exists():
         raise FileNotFoundError(f"Run manifest not found: {path}")
@@ -86,16 +97,16 @@ def validate_run_manifest(
     cofactor: str | None,
     titratable_residue_indices: list[int] | None,
     titratable_residue_query: str | None,
-    pHs: list[float],
+    phs: list[float],
     n_replicas: int,
     integrator_step_size_ps: float,
     protonation_swap_interval_ps: float,
     cph_config: ConstantpHSettings,
 ) -> None:
+    """Raise if the stored manifest disagrees with the current run's parameters."""
     if manifest.get("version") != MANIFEST_VERSION:
         raise ValueError(
-            f"Unsupported manifest version {manifest.get('version')!r}; "
-            f"expected {MANIFEST_VERSION}"
+            f"Unsupported manifest version {manifest.get('version')!r}; expected {MANIFEST_VERSION}"
         )
 
     def _check(field: str, expected: Any, *, optional_paths: bool = False) -> None:
@@ -111,7 +122,7 @@ def validate_run_manifest(
     _check("protein", protein, optional_paths=True)
     _check("ligand", ligand, optional_paths=True)
     _check("cofactor", cofactor, optional_paths=True)
-    _check("pHs", pHs)
+    _check("pHs", phs)
     _check("n_replicas", n_replicas)
     _check("integrator_step_size_ps", integrator_step_size_ps)
     _check("protonation_swap_interval_ps", protonation_swap_interval_ps)
@@ -133,6 +144,7 @@ def update_manifest_weights(
     *,
     weight_equilibration_done: bool = True,
 ) -> None:
+    """Update the stored simulated-tempering weights in the run manifest."""
     data = read_run_manifest(output_path)
     data["weights"] = weights
     data["weight_equilibration_done"] = weight_equilibration_done
@@ -146,6 +158,7 @@ def write_production_state(
     next_remd_swap_ps: float,
     results: list[tuple[float, ...]],
 ) -> None:
+    """Write the production progress state (batches, next swap, results) to disk."""
     directory.mkdir(parents=True, exist_ok=True)
     payload = {
         "batches_completed": batches_completed,
@@ -156,6 +169,7 @@ def write_production_state(
 
 
 def read_production_state(directory: Path) -> dict[str, Any]:
+    """Read production progress state from disk, or return empty defaults."""
     path = directory / PRODUCTION_STATE_FILENAME
     if not path.exists():
         return {

@@ -1,4 +1,5 @@
-# ruff: noqa: D100, D103, PLW2901
+"""MOPAC-derived atomic formal charges via a CHARGES/LEWIS single point."""
+
 import tempfile
 from pathlib import Path
 
@@ -16,10 +17,11 @@ from opensqm.mopac.runner import _run_mopac_input_file, check_mopac_was_success
 
 
 def get_mopac_formal_charges(rdmol: Chem.Mol) -> tuple[int, dict[int, int]]:
+    """Return the total charge and per-atom (0-indexed) formal charges from MOPAC."""
     rdmol = fix_nitro_groups(rdmol)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir = Path(tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir_str:
+        tmpdir = Path(tmpdir_str)
         mol_mop_path = tmpdir / "mol.mop"
         mopac_path = tmpdir / "run.mopac"
         out_path = tmpdir / "run    ac.out"

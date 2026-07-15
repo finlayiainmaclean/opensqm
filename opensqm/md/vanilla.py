@@ -91,9 +91,7 @@ def anneal_and_minimise(
     simulation.context.setPositions(positions)
     simulation.minimizeEnergy()
 
-    positions = simulation.context.getState(getPositions=True).getPositions()
-
-    return positions
+    return simulation.context.getState(getPositions=True).getPositions()
 
 
 def production(
@@ -155,7 +153,9 @@ def production(
         angles = list(np.arange(30, 210, 30))
         terminal_list = []
         for bond in terminal_dihedrals:
-            terminal_list.append(find_terminal_group(topology, int(bond[0]), int(bond[1]), angles=angles))
+            terminal_list.append(
+                find_terminal_group(topology, int(bond[0]), int(bond[1]), angles=angles)
+            )
 
         k_bt = 300 * unit.kelvin * unit.MOLAR_GAS_CONSTANT_R
         flipper = TerminalRingMC(
@@ -187,9 +187,6 @@ def production(
                         att=flipper.n_attempts,
                     )
 
-
-
-
             simulation.step(steps_per_update)
 
             # Calculate performance
@@ -199,7 +196,6 @@ def production(
 
             # Get current simulation time
             current_time_ps = (i + 1) * ps_per_update
-
 
             pbar.set_postfix({"Time": f"{current_time_ps:.0f}ps", "ns/day": f"{ns_per_day:.2f}"})
             pbar.update(1)
@@ -214,6 +210,4 @@ def production(
     simulation.reporters.clear()
 
     # Optionally return final state
-    final_state = simulation.context.getState(getPositions=True, getEnergy=True)
-
-    return final_state
+    return simulation.context.getState(getPositions=True, getEnergy=True)

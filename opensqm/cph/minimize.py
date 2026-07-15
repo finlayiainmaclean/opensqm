@@ -1,13 +1,20 @@
+"""Energy minimisation of protein termini with fixed original heavy atoms."""
+
+from pathlib import Path
 
 from openmm import LangevinIntegrator, app, unit
 
 
-def minimize(modeller: app.Modeller, ff_files: tuple = ('amber14-all.xml', 'implicit/gbn2.xml', 'amber14/tip3pfb.xml')):
+def minimize(
+    modeller: app.Modeller,
+    ff_files: tuple = ("amber14-all.xml", "implicit/gbn2.xml", "amber14/tip3pfb.xml"),
+) -> app.Modeller:
+    """Minimise added hydrogens/caps while holding original residue atoms fixed."""
     forcefield = app.ForceField(*ff_files)
 
     original_residues = set()
     for residue in modeller.topology.residues():
-        if residue.name not in ['ACE', 'NME']:
+        if residue.name not in ["ACE", "NME"]:
             original_residues.add(residue.index)
 
     # Track existing hydrogens on original residues
@@ -30,32 +37,31 @@ def minimize(modeller: app.Modeller, ff_files: tuple = ('amber14-all.xml', 'impl
     system = forcefield.createSystem(modeller.topology)
 
     for atom in modeller.topology.atoms():
-        if atom.residue.name not in ['ACE', 'NME']:
+        if atom.residue.name not in ["ACE", "NME"]:
             system.setParticleMass(atom.index, 0.0)
 
-    integrator = LangevinIntegrator(300*unit.kelvin,1/unit.picosecond,1*unit.femtosecond)
+    integrator = LangevinIntegrator(300 * unit.kelvin, 1 / unit.picosecond, 1 * unit.femtosecond)
     sim = app.Simulation(modeller.topology, system, integrator)
     sim.context.setPositions(modeller.positions)
     sim.minimizeEnergy()
 
-    modeller = app.Modeller(modeller.topology, sim.context.getState(getPositions=True).getPositions())
-    return modeller
+    return app.Modeller(modeller.topology, sim.context.getState(getPositions=True).getPositions())
 
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     # Check if we're running in test mode
     import argparse
-
 
     parser = argparse.ArgumentParser(
         description="Add capping groups ACE and NME to protein termini. "
         "Remove the hydrogens from the input pdb file before using this script"
     )
-    parser.add_argument('-i', dest='in_file', type=str, default='protein_noh.pdb',
-                        help='Input PDB file')
-    parser.add_argument('-o', dest='out_file', type=str, default='protein_noh_cap.pdb',
-                        help='Output PDB file')
+    parser.add_argument(
+        "-i", dest="in_file", type=str, default="protein_noh.pdb", help="Input PDB file"
+    )
+    parser.add_argument(
+        "-o", dest="out_file", type=str, default="protein_noh_cap.pdb", help="Output PDB file"
+    )
 
     args = parser.parse_args()
     in_file = args.in_file
@@ -66,8 +72,7 @@ if __name__ == '__main__':
     # Create initial modeller
     modeller = app.Modeller(pdb.topology, pdb.positions)
 
-
     modeller = minimize(modeller)
 
-    with open(out_file, 'w') as f:
+    with Path(out_file).open("w") as f:
         app.PDBFile.writeFile(modeller.topology, modeller.positions, f, True)

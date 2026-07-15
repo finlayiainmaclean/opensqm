@@ -25,15 +25,15 @@ from openmm import unit
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from opensqm.modbinddg.config import ModBindDGSettings
+    from opensqm.modbind.config import ModBindDGSettings
 
 # Gas constant in kcal / (mol K).
 R_KCAL_PER_MOL_K = 1.987204259e-3
 
 
-def rt_kcal(temperature_K: float) -> float:
+def rt_kcal(temperature_k: float) -> float:
     """Return RT in kcal/mol at the given temperature."""
-    return R_KCAL_PER_MOL_K * temperature_K
+    return R_KCAL_PER_MOL_K * temperature_k
 
 
 def estimate_delta_g_well(result: dict, *, rt: float) -> float:
@@ -51,19 +51,19 @@ def estimate_delta_g_well(result: dict, *, rt: float) -> float:
 
 def predict_escape_temperature_calibrated(
     *,
-    temperature_K: float,
+    temperature_k: float,
     escape_time_ns: float,
     binding_dg_kcal: float,
     target_escape_time_ns: float | None,
-    reference_temperature_K: float = 300.0,
-    min_temperature_K: float = 300.0,
-    max_temperature_K: float = 2000.0,
+    reference_temperature_k: float = 300.0,
+    min_temperature_k: float = 300.0,
+    max_temperature_k: float = 2000.0,
 ) -> float:
     """Predict the simulation temperature for a target escape time.
 
     Inverts ``ln(τ₂/τ₁) = (|ΔG°|/RT_room) (T₁/T₂ - 1)``, which matches the
     empirical observation that ligands with |ΔG°|≈5.5 kcal/mol escape in
-    roughly 1–4 ns at 650 K. ``binding_dg_kcal`` must be negative (favourable
+    roughly 1-4 ns at 650 K. ``binding_dg_kcal`` must be negative (favourable
     binding); weaker (less negative) estimates give lower temperatures for the
     same target escape time.
     """
@@ -72,12 +72,12 @@ def predict_escape_temperature_calibrated(
         or escape_time_ns <= 0
         or target_escape_time_ns is None
         or target_escape_time_ns <= 0
-        or temperature_K <= 0
+        or temperature_k <= 0
         or binding_dg_kcal >= 0
     ):
         return math.nan
 
-    rt_room = rt_kcal(reference_temperature_K)
+    rt_room = rt_kcal(reference_temperature_k)
     if rt_room <= 0:
         return math.nan
 
@@ -88,8 +88,8 @@ def predict_escape_temperature_calibrated(
     if denom <= 0:
         return math.nan
 
-    predicted = temperature_K / denom
-    return float(np.clip(predicted, min_temperature_K, max_temperature_K))
+    predicted = temperature_k / denom
+    return float(np.clip(predicted, min_temperature_k, max_temperature_k))
 
 
 @dataclass
@@ -101,12 +101,14 @@ class StatePopulation:
 
     @property
     def effective_sample_size(self) -> float:
+        """Kish effective sample size implied by the per-replica populations."""
         if self.per_replica.size == 0 or self.total <= 0:
             return 0.0
         return float(self.total**2 / np.sum(self.per_replica**2))
 
     @property
     def max_replica_fraction(self) -> float:
+        """Fraction of the total population contributed by the largest replica."""
         if self.per_replica.size == 0 or self.total <= 0:
             return 0.0
         return float(np.max(self.per_replica) / self.total)
@@ -155,16 +157,13 @@ def frame_weights(
     return weights
 
 
-def _replica_exponents(
-    exponent: float | Sequence[float], n_replicas: int
-) -> tuple[float, ...]:
+def _replica_exponents(exponent: float | Sequence[float], n_replicas: int) -> tuple[float, ...]:
     if isinstance(exponent, (int, float)):
         return (float(exponent),) * n_replicas
     exponents = tuple(float(x) for x in exponent)
     if len(exponents) != n_replicas:
         raise ValueError(
-            f"Expected {n_replicas} exponents for {n_replicas} replicas, "
-            f"got {len(exponents)}"
+            f"Expected {n_replicas} exponents for {n_replicas} replicas, got {len(exponents)}"
         )
     return exponents
 
@@ -234,11 +233,11 @@ def radial_pmf(
     keys_per_replica: list[list[tuple[int, int, int]]] = []
     radii_per_replica: list[np.ndarray] = []
     for coords in coords_list:
-        coords = np.asarray(coords, dtype=np.float64)
-        bin_idx = np.floor(coords / bin_size).astype(int)
+        coords_arr = np.asarray(coords, dtype=np.float64)
+        bin_idx = np.floor(coords_arr / bin_size).astype(int)
         keys = [tuple(int(c) for c in row) for row in bin_idx]
         keys_per_replica.append(keys)
-        radii_per_replica.append(np.linalg.norm(coords, axis=1))
+        radii_per_replica.append(np.linalg.norm(coords_arr, axis=1))
         for key in keys:
             counts[key] = counts.get(key, 0) + 1
 
@@ -288,8 +287,6 @@ def einstein_smoluchowski_unbound(
     return population, g
 
 
-
-
 def _compute_delta_g_core(
     bound_coords: list[np.ndarray],
     unbound_coords: list[np.ndarray],
@@ -314,8 +311,6 @@ def _compute_delta_g_core(
         n_unbound_escapes = 0
         unbound_ess = 0.0
     else:
-
-
         unbound_exponent = config.unbound_temperature.value_in_unit(
             unit.kelvin
         ) / config.reference_temperature.value_in_unit(unit.kelvin)
@@ -327,9 +322,7 @@ def _compute_delta_g_core(
         )
         n_unbound_escapes = len(unbound_coords)
         # Flux balance: equalise the number of escape events between states.
-        flux_factor = (
-            n_bound_escapes / n_unbound_escapes if n_unbound_escapes else 1.0
-        )
+        flux_factor = n_bound_escapes / n_unbound_escapes if n_unbound_escapes else 1.0
         # Frame-rate normalisation: populations are time/dt (Eq. 3), so rescale
         # the unbound counts (captured at a different interval) onto the bound
         # state's frame-capture interval before forming the ratio.
@@ -357,12 +350,8 @@ def _compute_delta_g_core(
         "n_unbound_escapes": n_unbound_escapes,
         "bound_ess": bound.effective_sample_size,
         "bound_max_replica_fraction": bound.max_replica_fraction,
-        "bound_population_min": (
-            float(bound.per_replica.min()) if bound.per_replica.size else 0.0
-        ),
-        "bound_population_max": (
-            float(bound.per_replica.max()) if bound.per_replica.size else 0.0
-        ),
+        "bound_population_min": (float(bound.per_replica.min()) if bound.per_replica.size else 0.0),
+        "bound_population_max": (float(bound.per_replica.max()) if bound.per_replica.size else 0.0),
         "unbound_g": unbound_g,
         "unbound_ess": unbound_ess,
     }
@@ -376,11 +365,7 @@ def compute_delta_g(
     rt: float,
 ) -> dict:
     """Compute dG and per-replica independent estimates (Eq. 14)."""
-    result = _compute_delta_g_core(
-        bound_coords, unbound_coords, config=config, rt=rt
-    )
-
-    return result
+    return _compute_delta_g_core(bound_coords, unbound_coords, config=config, rt=rt)
 
 
 def bootstrap_delta_g(
@@ -403,14 +388,10 @@ def bootstrap_delta_g(
     for _ in range(n_bootstrap):
         bound_sample = [bound_coords[i] for i in rng.integers(0, n_bound, n_bound)]
         if config.unbound_mode == "explicit" and n_unbound > 0:
-            unbound_sample = [
-                unbound_coords[i] for i in rng.integers(0, n_unbound, n_unbound)
-            ]
+            unbound_sample = [unbound_coords[i] for i in rng.integers(0, n_unbound, n_unbound)]
         else:
             unbound_sample = unbound_coords
-        result = compute_delta_g(
-            bound_sample, unbound_sample, config=config, rt=rt
-        )
+        result = compute_delta_g(bound_sample, unbound_sample, config=config, rt=rt)
         delta_g = result["delta_g"]
         if math.isfinite(delta_g):
             samples.append(delta_g)

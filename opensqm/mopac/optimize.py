@@ -1,4 +1,5 @@
-# ruff: noqa: D100, D103, PLW2901
+"""Geometry optimisation of an RDKit molecule with MOPAC."""
+
 import tempfile
 import time
 from pathlib import Path
@@ -27,13 +28,14 @@ def run_opt_from_rdmol(
     charge: int = 0,
     opt_mask: np.ndarray | None = None,
 ) -> Chem.Mol:
+    """Optimise ``rdmol`` with MOPAC and return a copy with the optimised coordinates."""
     # MOPAC optimizes the nitro-augmented graph; write coordinates back onto that
     # same mol (atom index order matches GEO_DAT / output table).
 
     rdmol_fixed = fix_nitro_groups(rdmol)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir = Path(tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir_str:
+        tmpdir = Path(tmpdir_str)
         mop_path = tmpdir / "mol.mop"
         setpi_path = tmpdir / "setpi.txt"
         mopac_path = tmpdir / "run.mopac"

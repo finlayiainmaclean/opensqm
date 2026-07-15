@@ -1,4 +1,5 @@
-# ruff: noqa: D100, D103, E501
+"""Invoke the MOPAC executable and validate that a job completed successfully."""
+
 import os
 import subprocess
 from pathlib import Path
@@ -9,7 +10,10 @@ MOPAC_BIN = os.getenv("MOPAC_BIN", "mopac")
 
 
 def _run_mopac_input_file(mopac_input: Path, *, cwd: Path) -> None:
-    """Run MOPAC on a control file using list subprocess (no shell), matching pymopac.MopacInput.silentRun."""
+    """Run MOPAC on a control file via a list subprocess (no shell).
+
+    Mirrors ``pymopac.MopacInput.silentRun``.
+    """
     result = subprocess.run(
         [MOPAC_BIN, str(mopac_input)],
         cwd=str(cwd),
@@ -25,6 +29,7 @@ def _run_mopac_input_file(mopac_input: Path, *, cwd: Path) -> None:
 
 
 def check_mopac_was_success(output_str: str) -> None:
+    """Raise ``MOPACError`` unless the output shows a normal, successful MOPAC run."""
     if "IMAGINARY FREQUENCIES" in output_str:
         raise MOPACError(f"IMAGINARY FREQUENCIES: {output_str}")
     if "EXCESS NUMBER OF OPTIMIZATION CYCLES" in output_str:

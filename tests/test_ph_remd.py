@@ -15,7 +15,7 @@ from opensqm.cph.reference_energy.finder import _make_pair_reference
 from opensqm.cph.simulation_config import ConstantpHSettings
 
 
-def _build_cys_cph(pH: float, *, state_index: int = 0) -> ConstantPH:
+def _build_cys_cph(ph: float, *, state_index: int = 0) -> ConstantPH:
     pdb = PDBFile("opensqm/cph/model-compounds/CYS.pdb")
     residues = list(pdb.topology.residues())
     pair_reference = _make_pair_reference(
@@ -28,13 +28,13 @@ def _build_cys_cph(pH: float, *, state_index: int = 0) -> ConstantPH:
     cph = ConstantPH(
         topology=pdb.topology,
         positions=pdb.positions,
-        pH=pH,
+        ph=ph,
         config=ConstantpHSettings(),
         references={residues[1].name: pair_reference},
         titratable_residue_indices=[1],
         ring_flip_angles=None,
     )
-    cph.setResidueState(1, state_index, relax=False)
+    cph.set_residue_state(1, state_index, relax=False)
     return cph
 
 
@@ -75,7 +75,7 @@ def test_remd_single_replica_defaults_to_lowest_ph() -> None:
     remd = ConstantPHRemd(
         topology=pdb.topology,
         positions=pdb.positions,
-        pH=ladder,
+        ph=ladder,
         config=ConstantpHSettings(),
         references={residues[1].name: pair_reference},
         titratable_residue_indices=[1],
@@ -83,7 +83,7 @@ def test_remd_single_replica_defaults_to_lowest_ph() -> None:
         ring_flip_angles=None,
     )
     assert remd.current_ph_values() == [4.0]
-    assert remd.attemptAdjacentExchanges() == []
+    assert remd.attempt_adjacent_exchanges() == []
 
 
 def test_remd_initialises_two_replicas_on_ladder_endpoints() -> None:
@@ -100,7 +100,7 @@ def test_remd_initialises_two_replicas_on_ladder_endpoints() -> None:
     remd = ConstantPHRemd(
         topology=pdb.topology,
         positions=pdb.positions,
-        pH=ladder,
+        ph=ladder,
         config=ConstantpHSettings(),
         references={residues[1].name: pair_reference},
         titratable_residue_indices=[1],
@@ -126,23 +126,23 @@ def test_remd_swap_exchanges_ph_and_protonation() -> None:
     remd = ConstantPHRemd(
         topology=pdb.topology,
         positions=pdb.positions,
-        pH=ladder,
+        ph=ladder,
         config=ConstantpHSettings(),
         references={residues[1].name: pair_reference},
         titratable_residue_indices=[1],
         n_replicas=2,
         ring_flip_angles=None,
     )
-    remd.replicas[0].setResidueState(1, 0, relax=False)
-    remd.replicas[1].setResidueState(1, 1, relax=False)
+    remd.replicas[0].set_residue_state(1, 0, relax=False)
+    remd.replicas[1].set_residue_state(1, 1, relax=False)
     remd.replicas[0].currentPHIndex = 0
     remd.replicas[1].currentPHIndex = 1
 
     np.random.seed(0)
-    assert remd.attemptReplicaExchange(0, 1)
+    assert remd.attempt_replica_exchange(0, 1)
 
-    assert remd.replicas[0].titrations[1].currentIndex == 1
-    assert remd.replicas[1].titrations[1].currentIndex == 0
+    assert remd.replicas[0].titrations[1].current_index == 1
+    assert remd.replicas[1].titrations[1].current_index == 0
     assert remd.replicas[0].currentPHIndex == 1
     assert remd.replicas[1].currentPHIndex == 0
 
@@ -164,7 +164,7 @@ def test_remd_checkpoint_roundtrip(tmp_path) -> None:
     remd = ConstantPHRemd(
         topology=pdb.topology,
         positions=pdb.positions,
-        pH=ladder,
+        ph=ladder,
         config=ConstantpHSettings(),
         references=references,
         titratable_residue_indices=titratable,
@@ -173,7 +173,7 @@ def test_remd_checkpoint_roundtrip(tmp_path) -> None:
     )
     remd.set_weights([0.0, 1.5, 3.0])
     remd.step(25)
-    remd.replicas[0].setResidueState(1, 1, relax=False)
+    remd.replicas[0].set_residue_state(1, 1, relax=False)
     remd.replicas[0].currentPHIndex = 2
     remd.replicas[1].currentPHIndex = 0
     expected_steps = remd.replicas[0].simulation.currentStep
@@ -184,7 +184,7 @@ def test_remd_checkpoint_roundtrip(tmp_path) -> None:
     restored = ConstantPHRemd(
         topology=pdb.topology,
         positions=pdb.positions,
-        pH=ladder,
+        ph=ladder,
         config=ConstantpHSettings(),
         references=references,
         titratable_residue_indices=titratable,
@@ -195,6 +195,6 @@ def test_remd_checkpoint_roundtrip(tmp_path) -> None:
 
     assert restored.weights == remd.weights
     assert restored.replicas[0].simulation.currentStep == expected_steps
-    assert restored.replicas[0].titrations[1].currentIndex == 1
+    assert restored.replicas[0].titrations[1].current_index == 1
     assert restored.replicas[0].currentPHIndex == 2
     assert restored.replicas[1].currentPHIndex == 0

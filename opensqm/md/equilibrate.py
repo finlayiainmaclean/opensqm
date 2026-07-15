@@ -1,4 +1,5 @@
 """Module containing equilibration protocol."""
+
 import time
 
 import mdtraj as md
@@ -27,7 +28,9 @@ class EquilibrationSettings(BaseModel):
     integrator_step_size: OpenMMQuantity[unit.picosecond] = 0.004 * unit.picoseconds
     npt_time: OpenMMQuantity[unit.picosecond] = 200 * unit.picoseconds
     warmup_time: OpenMMQuantity[unit.picosecond] = 100 * unit.picoseconds
-    restraint_force: OpenMMQuantity[unit.kilocalories_per_mole / unit.angstroms**2] = 4.0 * unit.kilocalories_per_mole / unit.angstroms**2
+    restraint_force: OpenMMQuantity[unit.kilocalories_per_mole / unit.angstroms**2] = (
+        4.0 * unit.kilocalories_per_mole / unit.angstroms**2
+    )
 
 
 def _check_volume_plateau(
@@ -76,11 +79,7 @@ def _recenter_ligand_positions(
     if box_vectors is None:
         return positions
 
-    ligand_sel = [
-        atom.index
-        for atom in topology.atoms()
-        if atom.residue.name == ligand_resname
-    ]
+    ligand_sel = [atom.index for atom in topology.atoms() if atom.residue.name == ligand_resname]
     if not ligand_sel:
         return positions
 
@@ -179,9 +178,7 @@ def equilibrate(
             pbar.update(1)
 
     # Save warmup state including box vectors
-    warmup_state = simulation.context.getState(
-        getPositions=True, enforcePeriodicBox=periodic
-    )
+    warmup_state = simulation.context.getState(getPositions=True, enforcePeriodicBox=periodic)
     warmup_positions = warmup_state.getPositions()
     warmup_box = warmup_state.getPeriodicBoxVectors() if periodic else None
 
@@ -278,5 +275,3 @@ def equilibrate(
         positions = _recenter_ligand_positions(topology, positions)
 
     return topology, positions
-
-

@@ -46,7 +46,7 @@ _ION_RESNAMES = ("NA", "CL")
 # snapshot are taken from the pH-7 stratum.
 _MMGBSA_PH = 7.0
 # +/-4 pH units around the target, one fixed-pH replica per rung.
-_MMGBSA_PH_LADDER = [_MMGBSA_PH - 4, _MMGBSA_PH - 2, _MMGBSA_PH + 0, _MMGBSA_PH + 2, _MMGBSA_PH + 4]
+_MMGBSA_PH_LADDER = [_MMGBSA_PH - 7, _MMGBSA_PH + 0, _MMGBSA_PH + 7]
 
 
 class MMGBSASettings(BaseModel):
@@ -90,7 +90,7 @@ def _cph_snapshot(
             # target pH (target_ph) rather than across the ladder.
             simulated_annealing=False,
             mmgbsa_n_closest_waters=config.n_closest_waters,
-            protonation_penalty=3.0 * unit.kilocalories_per_mole,
+            protonation_penalty=5.0 * unit.kilocalories_per_mole,
             titratable_residue_query="(protein within 5 of resn LIG) or (resn LIG)",
         ),
         resume=False,

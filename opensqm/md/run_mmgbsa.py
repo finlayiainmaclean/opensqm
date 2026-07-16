@@ -90,7 +90,7 @@ def _cph_snapshot(
             # target pH (target_ph) rather than across the ladder.
             simulated_annealing=False,
             mmgbsa_n_closest_waters=config.n_closest_waters,
-            protonation_penalty=5.0 * unit.kilocalories_per_mole,
+            protonation_penalty=3.0 * unit.kilocalories_per_mole,
             titratable_residue_query="(protein within 5 of resn LIG) or (resn LIG)",
         ),
         resume=False,

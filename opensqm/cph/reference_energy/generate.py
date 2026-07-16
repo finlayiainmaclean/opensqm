@@ -233,6 +233,7 @@ def generate_ligand_reference(
             titratable_residue_indices=[ligand_res_idx],
             ligand_variant_molecules=variant_molecules,
             ring_flip_angles=None,
+            log_transitions=False,  # fitting scans many pHs; don't flood the log
         )
         logger.info(f"Computing reference energy for {pair_label} (pKa={t.pka})")
         finder = ReferenceEnergyFinder(cph, pka=t.pka, temperature=config.temperature)

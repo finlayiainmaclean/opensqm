@@ -11,7 +11,14 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 from openff.toolkit.topology import Molecule  # type: ignore
-from openmm import Context, LangevinIntegrator, MonteCarloBarostat, System, unit
+from openmm import (
+    Context,
+    CustomExternalForce,
+    LangevinIntegrator,
+    MonteCarloBarostat,
+    System,
+    unit,
+)
 from openmm.app import CutoffNonPeriodic, ForceField, HBonds, Modeller, PDBFile, Topology
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_units import OpenMMQuantity
@@ -42,8 +49,9 @@ from opensqm.cph.pka import (
     analyze_cph_results,
     build_replica_overlay_timeseries,
     compute_pka_timeseries,
+    joint_microstate_label,
 )
-from opensqm.cph.propka import find_titratable_residues_near_ph, predict_pkas
+from opensqm.cph.propka import PredictedPka, predict_pkas
 from opensqm.cph.reference_energy import (
     build_protonation_states,
     build_transitions_tree,
@@ -58,7 +66,7 @@ from opensqm.cph.trajectory import (
     trajectories_dir,
 )
 from opensqm.md.charge_cache import load_ligand_variant, persist_ligand_setups
-from opensqm.md.equilibrate import EquilibrationSettings, equilibrate
+from opensqm.md.equilibrate import EquilibrationSettings, _check_volume_plateau
 from opensqm.md.prepare import prepare_protein, prepare_system
 from opensqm.rdkit_utils import set_residue_info
 from opensqm.torsion_scanner import autodetect_flip_dihedrals_named
@@ -92,8 +100,11 @@ class ConstantpHRunSettings(BaseModel):
     titratable_residue_query: str | None = None
     # Intersect the query selection with the residues PROPKA predicts are near
     # their pKa at some pH in the ladder, so only residues that are both
-    # requested and actually titrating are driven. The ligand/cofactor are
-    # exempt (PROPKA only sees the protein). See ``_propka_titratable_indices``.
+    # requested and actually titrating are driven. A residue whose charged state
+    # is out of reach but that still has charge-neutral tautomers (histidine's
+    # HID/HIE) is kept titratable but masked to those tautomers rather than
+    # frozen. The ligand/cofactor are exempt (PROPKA only sees the protein).
+    # See ``_propka_selection``.
     restrict_titratable_to_near_ph: bool = True
 
     ligand_terminal_ring_mc: bool = False
@@ -115,14 +126,17 @@ class ConstantpHRunSettings(BaseModel):
     use_ph_remd: bool = True
     n_replicas: int = 3
     ph: float | list[float] = Field(default_factory=lambda: [1.0, 7.0, 14.0])
-    # pH at which ligand/cofactor protomers are ENUMERATED (the uniKa
-    # distribution used to pick which protonation states to model). Defaults to
-    # ``ph`` - so a multi-pH pKa ladder enumerates every protomer relevant
-    # across the ladder. Set this to a single pH to decouple enumeration from
-    # sampling: e.g. a tight REMD ladder around pH 7 for better sampling, while
-    # still enumerating only the pH-7-relevant protomers (avoids a protomer
-    # explosion and the associated reference-energy cost).
-    protomer_enumeration_ph: float | None = None
+    # pH at which the ligand/cofactor protomer distribution is enumerated. When
+    # ``None`` the sampling ladder (``ph``) is used, matching the sampled
+    # protonation window; set it to decouple protomer enumeration from the
+    # ladder (e.g. enumerate at pH 7 while sampling a ladder around it).
+    target_ph: float | None = None
+    # Sampling strategy across the pH ladder. ``True`` (default): each replica
+    # walks the whole ladder by simulated tempering, so the tempering weights
+    # are optimised first and ``n_replicas`` is free. ``False``: place one
+    # fixed-pH replica per ladder rung (``n_replicas`` is forced to the ladder
+    # length) with simulated tempering off, so no weights need optimising.
+    simulated_annealing: bool = True
 
 
 @dataclass(frozen=True)
@@ -163,16 +177,12 @@ def _build_small_molecule_variants(
     molecule_rdmol = set_residue_info(Chem.MolFromMolFile(molecule_path, removeHs=False))
 
     if config.ligand_protonation:
-        # Enumerate protomers at a single pH when requested, else across the
+        # Enumerate protomers at ``target_ph`` when set, else across the
         # (possibly multi-pH) sampling ladder. Decoupling lets a tight REMD
         # ladder improve sampling without pulling in ladder-edge protomers.
-        enumeration_ph = (
-            config.protomer_enumeration_ph
-            if config.protomer_enumeration_ph is not None
-            else config.ph
-        )
+        distribution_ph = config.ph if config.target_ph is None else config.target_ph
         molecule_distribution = unipka.get_distribution(
-            molecule_rdmol, pH=enumeration_ph
+            molecule_rdmol, pH=distribution_ph
         ).reset_index(drop=True)
         ligand_protonation_penalty = config.protonation_penalty.value_in_unit(
             unit.kilocalories_per_mole
@@ -190,7 +200,7 @@ def _build_small_molecule_variants(
             return_template=True,
         )
         logger.info(f"Number of {residue_name} protonation states: {len(molecule_mols)}")
-        print(molecule_distribution[['smiles','population']].T)
+        print(molecule_distribution[["smiles", "population"]].T)
         # Most populated protomer at the run pH (variants share the sorted,
         # reset-index order of molecule_distribution) - used to seed the
         # ligand's starting protonation state in the constant-pH run.
@@ -340,9 +350,7 @@ def _ligand_entries_from_setups(
 
 def _log_titratable_residues(topology: Topology, titratable_residue_indices: list[int]) -> None:
     residues_by_index = {r.index: r for r in topology.residues()}
-    formatted = ", ".join(
-        residue_label(residues_by_index[i]) for i in titratable_residue_indices
-    )
+    formatted = ", ".join(residue_label(residues_by_index[i]) for i in titratable_residue_indices)
     logger.info(f"Titratable residues: {formatted}")
 
 
@@ -411,87 +419,42 @@ def _seed_initial_variant_indices(
     return seeds
 
 
-def _target_ph_variant_probabilities(
-    reference: Any, ph: float, temperature: unit.Quantity
-) -> np.ndarray:
-    """Boltzmann probability over a residue's variants at ``ph`` (isolated).
-
-    ``p(i) ∝ exp(reference_energy[i]/kT - charge[i]·ln(10)·pH)`` - the stationary
-    distribution of the MC acceptance with the environment term dropped, using
-    formal charge as the proton-count proxy (Δprotons == Δcharge for a
-    protonation change). This is the "energy penalty from the target pH" weight:
-    the target-pH-favoured state gets the most weight, strongly-penalised
-    protomers little.
-    """
-    kT = (unit.MOLAR_GAS_CONSTANT_R * temperature).value_in_unit(unit.kilojoules_per_mole)
-    energies = np.asarray(reference.reference_energies_kj_per_mole, dtype=float)
-    charges = np.asarray(reference.charges, dtype=float)
-    logits = energies / kT - charges * np.log(10.0) * ph
-    logits -= logits.max()
-    weights = np.exp(logits)
-    return weights / weights.sum()
-
-
-def _replica_initial_variant_indices(
-    deterministic_seed: dict[int, int],
-    topology: Topology,
-    residue_reference_dict: dict,
-    titratable_residue_indices: list[int],
-    ph: float,
-    temperature: unit.Quantity,
-    n_replicas: int,
-) -> list[dict[int, int]]:
-    """One starting-variant map per replica for diversified initial conditions.
-
-    Replica 0 keeps ``deterministic_seed`` (the PROPKA/dominant best guess);
-    replicas 1+ draw each residue's starting variant from its target-pH
-    Boltzmann distribution (:func:`_target_ph_variant_probabilities`). This
-    spreads the initial replica ensemble across macrostates weighted by energy -
-    likely states often, high-penalty ones rarely - so pH-REMD has real
-    macrostate diversity to exchange instead of every replica starting
-    identically (which low-acceptance MC alone would never diversify).
-    """
-    seeds = [dict(deterministic_seed)]
-    if n_replicas <= 1:
-        return seeds
-    residues = list(topology.residues())
-    probs: dict[int, np.ndarray] = {}
-    for res_index in titratable_residue_indices:
-        reference = residue_reference_dict.get(residues[res_index].name)
-        if reference is not None and len(reference.charges) > 1:
-            probs[res_index] = _target_ph_variant_probabilities(reference, ph, temperature)
-    for _ in range(1, n_replicas):
-        seeds.append(
-            {
-                res_index: int(np.random.choice(len(p), p=p))
-                for res_index, p in probs.items()
-            }
-        )
-    return seeds
-
-
-def _propka_titratable_indices(
+def _propka_selection(
     protein_pdb: str | Path,
     topology: Topology,
+    references: "dict[str, Any]",
     allowed_indices: set[int],
     phs: list[float],
     *,
     protonation_penalty: unit.Quantity,
     temperature: unit.Quantity,
-) -> set[int]:
-    """Topology residue indices PROPKA flags as near-titrating at any pH.
+) -> tuple[set[int], dict[int, list[int]]]:
+    """Split PROPKA-scored residues into fully-titratable and tautomer-only.
 
-    For each pH in ``pHs``, PROPKA is run on the dry protein ``protein_pdb`` and
-    every group whose minor protonation state lies within ``protonation_penalty``
-    of that pH is matched back to its topology residue. Only indices in
-    ``allowed_indices`` (residues that have a titratable reference and are not
-    disulfide-bonded) can be returned, so PROPKA never introduces a residue the
-    constant-pH model has no states for.
+    PROPKA is run once on the dry protein ``protein_pdb`` (its pKa values are
+    pH-independent) and every ionisable group is matched back to a topology
+    residue in ``allowed_indices`` (residues that have a titratable reference
+    and are not disulfide-bonded). Each residue is scored by the pH-adjusted
+    free energy of its minor protonation state at the nearest pH in ``phs``.
+    Returns ``(near_ph_indices, variant_masks)``:
+
+    * ``near_ph_indices`` -- residues whose charge-changing transition is
+      accessible (penalty below ``protonation_penalty``) at some pH; these
+      titrate over their full variant set.
+    * ``variant_masks`` -- ``residue index -> allowed variant indices`` for
+      residues that are *not* near-pH yet still carry >=2 variants of the
+      majority-protonation charge. Today only histidine qualifies: when its
+      charged HIP is out of reach the two neutral tautomers HID/HIE remain, so
+      the residue stays titratable but is masked to those tautomers (the
+      ``protonation_penalty`` gates the charge-changing move to HIP, not the
+      charge-neutral HID<->HIE flip). Residues in neither collection should be
+      pruned (frozen at their prepared protonation).
 
     Residues are matched on ``(chain, resSeq, resname)``; when chain ids differ
     between PROPKA and the topology (e.g. blank chains) a unique
     ``(resSeq, resname)`` match is used as a fallback.
     """
+    residues_by_index = {r.index: r for r in topology.residues()}
     by_full_key: dict[tuple[str, int, str], int] = {}
     by_num_name: dict[tuple[int, str], list[int]] = defaultdict(list)
     for residue in topology.residues():
@@ -505,25 +468,50 @@ def _propka_titratable_indices(
         by_full_key[(chain_id, res_num, residue.name)] = residue.index
         by_num_name[(res_num, residue.name)].append(residue.index)
 
-    indices: set[int] = set()
-    for ph in phs:
-        for prediction in find_titratable_residues_near_ph(
-            protein_pdb,
-            ph=ph,
-            protonation_penalty=protonation_penalty,
-            temperature=temperature,
-        ):
-            key = (prediction.chain_id, prediction.residue_number, prediction.residue_name)
-            index = by_full_key.get(key)
-            if index is None:
-                candidates = by_num_name.get(
-                    (prediction.residue_number, prediction.residue_name), []
-                )
-                if len(candidates) == 1:
-                    index = candidates[0]
-            if index is not None:
-                indices.add(index)
-    return indices
+    def _match(prediction: PredictedPka) -> int | None:
+        key = (prediction.chain_id, prediction.residue_number, prediction.residue_name)
+        index = by_full_key.get(key)
+        if index is not None:
+            return index
+        candidates = by_num_name.get((prediction.residue_number, prediction.residue_name), [])
+        return candidates[0] if len(candidates) == 1 else None
+
+    def min_penalty(prediction: PredictedPka) -> float:
+        return min(
+            prediction.relative_ph_adjusted_free_energy(ph, temperature=temperature) for ph in phs
+        )
+
+    predictions = predict_pkas(protein_pdb, ph=phs[0])
+    by_index: dict[int, list[PredictedPka]] = defaultdict(list)
+    for prediction in predictions:
+        index = _match(prediction)
+        if index is not None:
+            by_index[index].append(prediction)
+
+    penalty_kcal = protonation_penalty.value_in_unit(unit.kilocalories_per_mole)
+    near_indices: set[int] = set()
+    variant_masks: dict[int, list[int]] = {}
+    for index, preds in by_index.items():
+        # The group closest to the ladder governs the residue's titration.
+        governing = min(preds, key=min_penalty)
+        if min_penalty(governing) < penalty_kcal:
+            near_indices.add(index)
+            continue
+        # Far from every rung: the charge-changing transition is inaccessible.
+        # Keep only the majority-protonation-charge variants; if two or more
+        # remain (histidine's neutral HID/HIE), stay titratable but masked to
+        # them. The sign of (pH - pKa) is constant across the ladder here, so
+        # the nearest rung fixes the majority charge.
+        reference = references.get(residues_by_index[index].name)
+        if reference is None:
+            continue
+        charges = list(reference.charges)
+        closest_ph = min(phs, key=lambda ph: abs(governing.pka - ph))
+        majority_charge = max(charges) if closest_ph < governing.pka else min(charges)
+        allowed = [i for i, c in enumerate(charges) if c == majority_charge]
+        if len(allowed) >= 2:
+            variant_masks[index] = allowed
+    return near_indices, variant_masks
 
 
 def _apply_barostat(remd: ConstantPHRemd, config: ConstantpHRunSettings) -> None:
@@ -538,6 +526,137 @@ def _apply_barostat(remd: ConstantPHRemd, config: ConstantpHRunSettings) -> None
         # re-apply the current protonation variants afterwards.
         replica.simulation.context.reinitialize(preserveState=True)
         replica.apply_current_states()
+
+
+def _add_equilibration_restraints(cph: "ConstantPH", restraint_force: unit.Quantity) -> int:
+    """Add backbone + ligand-heavy-atom position restraints to a replica's system.
+
+    Restrains the same atom set as :func:`opensqm.md.restraints.add_restraints`
+    (protein backbone N/CA/C and ligand/cofactor heavy atoms) via a ``k``-scaled
+    ``CustomExternalForce`` anchored to the current positions, so the strength can
+    be annealed off during NPT with ``setParameter("k", ...)``. Returns the index
+    of the added force.
+    """
+    positions = cph.simulation.context.getState(getPositions=True).getPositions()
+    restraint = CustomExternalForce("k*periodicdistance(x, y, z, x0, y0, z0)^2")
+    restraint.addGlobalParameter("k", restraint_force)
+    for name in ("x0", "y0", "z0"):
+        restraint.addPerParticleParameter(name)
+    for i, atom in enumerate(cph.explicitTopology.atoms()):
+        resname = atom.residue.name
+        is_backbone = atom.name in ("CA", "C", "N") and resname not in (
+            "LIG",
+            "COF",
+            "ACE",
+            "NME",
+        )
+        is_ligand_heavy = atom.name[0] != "H" and resname in ("LIG", "COF")
+        is_solvent = resname in ("HOH", "SOL", "WAT", "NA", "CL", "MG", "K", "ZN")
+        if (is_backbone or is_ligand_heavy) and not is_solvent:
+            restraint.addParticle(i, positions[i].value_in_unit(unit.nanometer))
+    return cph.simulation.system.addForce(restraint)
+
+
+def _equilibrate_seeded_replicas(remd: ConstantPHRemd, config: EquilibrationSettings) -> None:
+    """Equilibrate replica 0 in its seeded protonation state, then mirror it to all replicas.
+
+    ``ConstantPH`` builds its master topology maximally protonated and then
+    switches to the initial-guess protonation (the seed) at construction, so this
+    relaxes the geometry and its solvent shell around *exactly* the protonation
+    the run starts in - leaving no vertical energy gap for the protonation MC to
+    cross.
+
+    The protocol follows :func:`opensqm.md.equilibrate.equilibrate`, run on the
+    constant-pH explicit context:
+
+    1. **NVT warmup** with position restraints (backbone + ligand heavy atoms) at
+       a short timestep, gradually heating from 10 K to the run temperature - no
+       barostat, so the box is fixed while the system heats.
+    2. **NPT equilibration** with the barostat added and the restraints annealed
+       from their initial strength down to 1 kcal/mol/A^2 as the box density
+       settles.
+
+    Both temporary forces are then removed, restoring the production (seeded,
+    unrestrained, NVT) context, and every other replica is set to this single
+    relaxed state so all replicas start identically. ``reinitialize`` reverts
+    per-particle protonation parameters to the System's maximal state, so
+    ``apply_current_states`` is called after every ``reinitialize`` to restore the
+    seed (the same pattern as :func:`_apply_barostat`).
+    """
+    cph = remd.replicas[0]
+    simulation = cph.simulation
+    system = simulation.system
+    integrator = simulation.integrator
+    temperature = cph.temperature
+    temperature_k = temperature.value_in_unit(unit.kelvin)
+    production_step = integrator.getStepSize()
+    n_windows = 30
+    restraint_kcal = config.restraint_force.value_in_unit(
+        unit.kilocalories_per_mole / unit.angstroms**2
+    )
+
+    # --- Phase 1: NVT warmup with restraints, gradual heating, no barostat ---
+    restraint_index = _add_equilibration_restraints(cph, config.restraint_force)
+    simulation.context.reinitialize(preserveState=True)
+    cph.apply_current_states()
+    simulation.minimizeEnergy()
+
+    warmup_step = 0.001 * unit.picoseconds  # 1 fs, matching opensqm.md.equilibrate
+    integrator.setStepSize(warmup_step)
+    simulation.context.setVelocitiesToTemperature(10 * unit.kelvin)
+    warmup_per_window = max(1, int(config.warmup_time / warmup_step) // n_windows)
+    with tqdm(total=n_windows, desc="CpH Warmup", unit="window") as pbar:
+        for target_k in np.linspace(10.0, temperature_k, n_windows):
+            integrator.setTemperature(target_k * unit.kelvin)
+            simulation.step(warmup_per_window)
+            pbar.set_postfix(Temp=f"{target_k:.0f}K")
+            pbar.update(1)
+    integrator.setTemperature(temperature)
+    integrator.setStepSize(production_step)
+
+    # --- Phase 2: NPT with barostat, annealing the restraints off ---
+    barostat_index = system.addForce(MonteCarloBarostat(1 * unit.atmosphere, temperature))
+    simulation.context.reinitialize(preserveState=True)
+    cph.apply_current_states()
+    simulation.minimizeEnergy()
+    simulation.context.setVelocitiesToTemperature(temperature)
+
+    npt_per_window = max(1, int(config.npt_time / production_step) // n_windows)
+    volumes_nm3: list[float] = []
+    with tqdm(total=n_windows, desc="CpH NPT Equil", unit="window") as pbar:
+        for k in np.linspace(restraint_kcal, 1.0, n_windows):
+            simulation.step(npt_per_window)
+            simulation.context.setParameter(
+                "k", float(k) * unit.kilocalories_per_mole / unit.angstroms**2
+            )
+            volume = (
+                simulation.context.getState()
+                .getPeriodicBoxVolume()
+                .value_in_unit(unit.nanometer**3)
+            )
+            volumes_nm3.append(volume)
+            pbar.set_postfix(k=f"{k:.2f}", vol=f"{volume:.1f}")
+            pbar.update(1)
+    _check_volume_plateau(np.array(volumes_nm3))
+
+    # Drop the temporary forces and restore the production (seeded, unrestrained,
+    # NVT) context, then reset the step counter for production reporting.
+    for index in sorted((restraint_index, barostat_index), reverse=True):
+        system.removeForce(index)
+    simulation.context.reinitialize(preserveState=True)
+    cph.apply_current_states()
+    simulation.currentStep = 0
+
+    # Mirror the single relaxed state (coordinates, velocities, box) onto every
+    # other replica; their seeded protonation is already set from construction.
+    state = simulation.context.getState(
+        getPositions=True, getVelocities=True, enforcePeriodicBox=True
+    )
+    for replica in remd.replicas[1:]:
+        replica.simulation.context.setPeriodicBoxVectors(*state.getPeriodicBoxVectors())
+        replica.simulation.context.setPositions(state.getPositions())
+        replica.simulation.context.setVelocities(state.getVelocities())
+        replica.simulation.currentStep = 0
 
 
 def _optimize_remd_weights(remd: ConstantPHRemd) -> np.ndarray:
@@ -706,11 +825,12 @@ def _ligand_rdmol_for_state(
 def _state_label_to_joint_label(cph: "ConstantPH | None", state_label: str) -> "str | None":
     """Convert a frame signature ("0_0_1_...") to the joint-population column label.
 
-    Mirrors ``compute_joint_populations._joint_label`` (per-residue
-    ``"<resname>.<idx>:<variant>"`` joined by " | ", ordered by
-    ``sorted(cph.titrations)``) so a frame's microstate can be matched against
-    the joint-population table, whose columns are these human-readable labels.
-    Returns ``None`` if the label cannot be mapped.
+    Delegates to :func:`opensqm.cph.pka.joint_microstate_label` so the label
+    exactly matches the joint-population table's columns (per-residue
+    ``"<residue_label>:<variant>"`` joined by " | ", ordered by
+    ``sorted(cph.titrations)``), letting a frame's microstate be matched against
+    that table. Returns ``None`` if the signature cannot be mapped (wrong arity
+    or an out-of-range variant index).
     """
     if cph is None:
         return None
@@ -721,14 +841,63 @@ def _state_label_to_joint_label(cph: "ConstantPH | None", state_label: str) -> "
         return None
     if len(indices) != len(titratable_indices):
         return None
-    resname_by_index = {r.index: r.name for r in cph.explicitTopology.residues()}
-    parts = []
     for res_idx, state in zip(titratable_indices, indices, strict=False):
-        titration = cph.titrations[res_idx]
-        if not 0 <= state < len(titration.variant_names):
+        if not 0 <= state < len(cph.titrations[res_idx].variant_names):
             return None
-        parts.append(f"{resname_by_index.get(res_idx)}.{res_idx}:{titration.variant_names[state]}")
-    return " | ".join(parts)
+    return joint_microstate_label(cph, indices)
+
+
+def _joint_microstate_mmgbsa(
+    frame_records: list[dict],
+    cph: "ConstantPH | None",
+    joint_populations: pd.DataFrame,
+) -> pd.DataFrame:
+    """MMGBSA interaction energy per joint microstate, pooled across pH.
+
+    MMGBSA for a fixed protonation microstate is pH-invariant: pH never enters
+    the interaction energy, only which microstates are populated. Every frame of
+    a microstate - whichever pH replica sampled it - is a draw from the same
+    (fixed-protonation, fixed-temperature) ensemble, so they are pooled into a
+    single per-microstate estimate rather than split by pH (which would only add
+    sampling noise). Only ``energy_type == "mmgbsa"`` records are used.
+
+    Returns a frame indexed by joint microstate label (ordered to follow
+    ``joint_populations``) with ``mmgbsa_mean``/``mmgbsa_std``/``mmgbsa_min``
+    (kcal/mol) and the backing ``mmgbsa_n_frames``. The overall pH-dependent
+    score is recovered from these and the populations as
+    ``E(pH) = sum_s p_s(pH) * E_s``. Empty when there are no MMGBSA records.
+    """
+    grouped: dict[str, list[float]] = defaultdict(list)
+    for record in frame_records:
+        if record.get("energy_type") != "mmgbsa":
+            continue
+        label = _state_label_to_joint_label(cph, record["state_label"])
+        if label is None:
+            continue
+        grouped[label].append(float(record["energy"]))
+    if not grouped:
+        return pd.DataFrame()
+
+    rows: list[dict] = []
+    for label, energies in grouped.items():
+        arr = np.asarray(energies, dtype=float)
+        rows.append(
+            {
+                "microstate": label,
+                "mmgbsa_mean": float(arr.mean()),
+                "mmgbsa_std": float(arr.std()) if arr.size > 1 else 0.0,
+                "mmgbsa_min": float(arr.min()),
+                "mmgbsa_n_frames": int(arr.size),
+            }
+        )
+    table = pd.DataFrame(rows).set_index("microstate")
+    # Order rows to follow the joint-population table; append any microstate that
+    # was sampled for MMGBSA but is absent there (e.g. dropped-to-zero columns).
+    if not joint_populations.empty:
+        ordered = [c for c in joint_populations.columns if c in table.index]
+        extra = [c for c in table.index if c not in ordered]
+        table = table.reindex(ordered + extra)
+    return table
 
 
 def _build_ph_results(
@@ -815,12 +984,17 @@ def _analyze_remd_results(
     ligand_path: str | None = None,
     run_mmgbsa: bool = False,
     mmgbsa_n_closest_waters: int = 5,
+    mmgbsa_score_phs: list[float] | None = None,
     protonation_swap_steps: int = 1,
     ph_ladder: list[float] | None = None,
     cph_config: ConstantpHSettings | None = None,
     ligand_variant_molecules: "list[Molecule] | None" = None,
 ) -> dict[str, Any]:
-    """Analyze REMD results pooled across all replicas."""
+    """Analyze REMD results pooled across all replicas.
+
+    ``mmgbsa_score_phs`` restricts MMGBSA scoring to those pH strata (used to
+    score only the target pH); ``None`` scores every pH sampled.
+    """
     n_replicas = len(remd.replicas)
     replica_dfs = [
         pd.DataFrame(
@@ -873,6 +1047,7 @@ def _analyze_remd_results(
             protonation_swap_steps=protonation_swap_steps,
             ph_ladder=ph_ladder,
             n_closest_waters=mmgbsa_n_closest_waters,
+            score_phs=mmgbsa_score_phs,
         )
         frame_records = mmgbsa.pop("mmgbsa_frames", [])
     elif cph_config is not None and ph_ladder:
@@ -889,10 +1064,26 @@ def _analyze_remd_results(
         ligand_variant_molecules=ligand_variant_molecules,
     )
 
+    # Per-joint-microstate MMGBSA table (only populated when MMGBSA frames were
+    # scored, i.e. a ligand is present). Pooled across pH since MMGBSA is
+    # pH-invariant for a fixed microstate; written next to the pH-stratified
+    # summary and returned for downstream reporting.
+    joint_mmgbsa = _joint_microstate_mmgbsa(
+        frame_records, cph, analysis.get("joint_populations", pd.DataFrame())
+    )
+    if not joint_mmgbsa.empty:
+        mmgbsa_dir = output_path / "mmgbsa"
+        mmgbsa_dir.mkdir(parents=True, exist_ok=True)
+        joint_mmgbsa.to_csv(mmgbsa_dir / "by_joint_microstate.csv")
+        if verbose:
+            logger.info("MMGBSA per joint microstate (kcal/mol, pooled over pH):")
+            print(joint_mmgbsa)
+
     return {
         **analysis,
         **mmgbsa,
         "ph_results": ph_results,
+        "mmgbsa_by_joint_microstate": joint_mmgbsa,
     }
 
 
@@ -932,6 +1123,10 @@ def run_cph(
     protonation_swap_interval_ps = config.protonation_swap_interval.value_in_unit(unit.picosecond)
     phs = [config.ph] if isinstance(config.ph, float) else list(config.ph)
     skip_pka = len(phs) == 1
+    # With simulated tempering off (simulated_annealing=False) each ladder rung
+    # gets its own fixed-pH replica; otherwise the configured count applies and
+    # each replica walks the whole ladder.
+    n_replicas = config.n_replicas if config.simulated_annealing else len(phs)
     ckpt_dir = checkpoint_dir(output_path)
     unipka = UnipKa()
 
@@ -942,6 +1137,10 @@ def run_cph(
     ligand_setup: LigandSetup | None = None
     cofactor_setup: LigandSetup | None = None
     titratable_residue_indices: list[int]
+    # Per-residue variant masks (topology index -> allowed variant indices) for
+    # residues kept titratable only for a charge-neutral tautomer flip (e.g. a
+    # neutral histidine restricted to HID/HIE). ``None`` when nothing is masked.
+    allowed_variant_indices: dict[int, list[int]] | None = None
 
     if resume_setup:
         manifest = read_run_manifest(output_path)
@@ -953,12 +1152,17 @@ def run_cph(
             titratable_residue_indices=None,
             titratable_residue_query=config.titratable_residue_query,
             phs=phs,
-            n_replicas=config.n_replicas,
+            n_replicas=n_replicas,
             integrator_step_size_ps=integrator_step_size_ps,
             protonation_swap_interval_ps=protonation_swap_interval_ps,
             cph_config=config.cph_config,
         )
         titratable_residue_indices = manifest["titratable_residue_indices"]
+        # Restore the variant masks recorded when the run was first prepared, so
+        # a resumed histidine keeps the same neutral-tautomer-only restriction.
+        stored_masks = manifest.get("allowed_variant_indices")
+        if stored_masks:
+            allowed_variant_indices = {int(k): list(v) for k, v in stored_masks.items()}
         logger.info("Resuming from equilibrated system on disk")
 
         if ligand is not None or manifest.get("ligand") is not None:
@@ -1006,20 +1210,27 @@ def run_cph(
         protein_pdb = PDBFile(str(protein))
         protein_modeller = Modeller(protein_pdb.topology, protein_pdb.positions)
 
+        # Build the system in each small molecule's maximally-protonated variant
+        # (variant 0 / the union template): ConstantPH builds its master topology
+        # from this maximal state and then switches to the initial-guess
+        # protonation, so the solute is equilibrated in the seeded state later
+        # (see _equilibrate_seeded_replicas), not here.
         small_molecules: list[tuple[Molecule, str]] = []
         if ligand_setup is not None:
             small_molecules.append((ligand_setup.variant_molecules[0], "LIG"))
         if cofactor_setup is not None:
             small_molecules.append((cofactor_setup.variant_molecules[0], "COF"))
 
+        # The forcefield is discarded: ConstantPH builds its own explicit/implicit
+        # force fields, and equilibration now runs on the constant-pH context.
         if small_molecules:
-            omm_top, omm_pos, forcefield = prepare_system(
+            omm_top, omm_pos, _forcefield = prepare_system(
                 protein_modeller=protein_modeller,
                 small_molecules=small_molecules,
                 padding=1.0,
             )
         else:
-            omm_top, omm_pos, forcefield = prepare_protein(
+            omm_top, omm_pos, _forcefield = prepare_protein(
                 protein_modeller,
                 padding=1.0,
             )
@@ -1046,17 +1257,23 @@ def run_cph(
         )
 
         if config.restrict_titratable_to_near_ph:
+            # Which pH(s) decide "near titrating": ``target_ph`` alone when set
+            # (so only residues actually titrating at the target pH are driven,
+            # mirroring the ligand protomer enumeration), else the whole sampling
+            # ladder.
+            selection_phs = [config.target_ph] if config.target_ph is not None else phs
             # Universe of titratable residues (references matched, disulfides
             # dropped); PROPKA hits are matched within it.
             titratable_universe = set(
                 select_titratable_residue_indices(omm_top, system_pdb, residue_reference_dict, None)
             )
             try:
-                propka_indices = _propka_titratable_indices(
+                near_indices, variant_masks = _propka_selection(
                     protein,
                     omm_top,
+                    residue_reference_dict,
                     titratable_universe,
-                    phs,
+                    selection_phs,
                     protonation_penalty=config.protonation_penalty,
                     temperature=config.cph_config.temperature,
                 )
@@ -1066,47 +1283,66 @@ def run_cph(
                     "keeping the base selection"
                 )
             else:
-                if not propka_indices:
+                if not near_indices and not variant_masks:
                     # Most likely a structure/numbering mismatch rather than a
                     # genuinely inert protein; pruning to nothing would be worse.
                     logger.warning(
-                        f"PROPKA flagged no protein residues near the pH ladder "
-                        f"{phs}; keeping the base selection rather than pruning it away"
+                        f"PROPKA flagged no protein residues near pH "
+                        f"{selection_phs}; keeping the base selection rather than pruning it away"
                     )
                 else:
-                    # Keep only residues that are both requested and near-pKa, but
-                    # always retain the ligand/cofactor (PROPKA only sees protein).
+                    # Keep residues that are near-pKa (full variant set) or kept
+                    # solely for a charge-neutral tautomer flip (masked, e.g. a
+                    # neutral histidine restricted to HID/HIE), and always the
+                    # ligand/cofactor (PROPKA only sees protein).
                     small_molecule_indices = {
                         r.index for r in omm_top.residues() if r.name in ("LIG", "COF")
                     }
-                    keep = propka_indices | small_molecule_indices
+                    keep = near_indices | set(variant_masks) | small_molecule_indices
                     removed = set(titratable_residue_indices) - keep
                     if removed:
                         removed_names = ", ".join(
-                            residue_label(r)
-                            for r in omm_top.residues()
-                            if r.index in removed
+                            residue_label(r) for r in omm_top.residues() if r.index in removed
                         )
                         logger.info(
                             f"PROPKA pruned {len(removed)} titratable residue(s) far "
-                            f"from the pH ladder {phs}: {removed_names}"
+                            f"from pH {selection_phs}: {removed_names}"
                         )
                     titratable_residue_indices = sorted(set(titratable_residue_indices) & keep)
+                    # Restrict the surviving masked residues to their allowed
+                    # (charge-neutral) variants; drop masks whose residue was
+                    # pruned for another reason (e.g. not requested by the query).
+                    allowed_variant_indices = {
+                        idx: variant_masks[idx]
+                        for idx in titratable_residue_indices
+                        if idx in variant_masks
+                    } or None
+                    if allowed_variant_indices:
+                        masked_names = ", ".join(
+                            f"{residue_label(r)} -> "
+                            + "/".join(
+                                residue_reference_dict[r.name].variant_names[i]
+                                for i in variant_masks[r.index]
+                            )
+                            for r in omm_top.residues()
+                            if r.index in allowed_variant_indices
+                        )
+                        logger.info(
+                            f"PROPKA restricted {len(allowed_variant_indices)} residue(s) to "
+                            f"charge-neutral tautomers (charged state out of reach at pH "
+                            f"{selection_phs}): {masked_names}"
+                        )
 
         if not titratable_residue_indices:
             raise RuntimeError("No titratable residues were found in the supplied topology")
 
         _log_titratable_residues(omm_top, titratable_residue_indices)
 
-        omm_top, omm_pos = equilibrate(
-            omm_top,
-            omm_pos,
-            forcefield,
-            config=config.equilibration_config,
-        )
-        with equilibrated_pdb_path(output_path).open("w") as pdb_file:
-            PDBFile.writeFile(omm_top, omm_pos, pdb_file, keepIds=True)
-
+        # Equilibration happens later, on the constant-pH context in its seeded
+        # (initial-guess) protonation state - see _equilibrate_seeded_replicas.
+        # ``equilibrated.pdb`` (the resume marker) is written there too, so a
+        # fresh run that has not yet finished equilibration is not mistaken for a
+        # resumable one.
         residues_by_index = {r.index: r for r in omm_top.residues()}
         write_run_manifest(
             output_path,
@@ -1117,9 +1353,10 @@ def run_cph(
             titratable_residue_labels=[
                 residue_label(residues_by_index[i]) for i in titratable_residue_indices
             ],
+            allowed_variant_indices=allowed_variant_indices,
             titratable_residue_query=config.titratable_residue_query,
             phs=phs,
-            n_replicas=config.n_replicas,
+            n_replicas=n_replicas,
             integrator_step_size_ps=integrator_step_size_ps,
             protonation_swap_interval_ps=protonation_swap_interval_ps,
             cph_config=config.cph_config,
@@ -1151,14 +1388,15 @@ def run_cph(
             if setup.union_molecule is not None:
                 variant_molecules.append(setup.union_molecule)
 
-    # Seed each residue's starting protonation near equilibrium (PROPKA for the
-    # protein, dominant protomer for the ligand) rather than fully protonated.
-    # Replica 0 gets that deterministic best guess; replicas 1+ are seeded from
-    # each residue's target-pH Boltzmann distribution, so pH-REMD starts with a
-    # real spread of macrostates to exchange.
-    initial_variant_indices: dict[int, int] | list[dict[int, int]] | None = None
+    # Seed every residue's starting protonation to the target-pH best guess
+    # (PROPKA for the protein, dominant protomer for the ligand/cofactor) rather
+    # than the fully-protonated default. All replicas start from this single
+    # equilibrated/relaxed state - the same protonation the system was
+    # equilibrated in - so no replica begins with a vertical energy gap between
+    # its geometry and its protonation.
+    initial_variant_indices: dict[int, int] | None = None
     if config.seed_initial_protonation:
-        seed_ph = phs[len(phs) // 2]
+        seed_ph = config.target_ph if config.target_ph is not None else phs[len(phs) // 2]
         deterministic_seed = _seed_initial_variant_indices(
             omm_top,
             residue_reference_dict,
@@ -1179,17 +1417,8 @@ def run_cph(
                     else str(variant_index)
                 )
                 seeded.append(f"{residue_label(residues[res_index])} -> {variant_name}")
-            logger.info(f"Seeded replica-0 protonation (pH {seed_ph}): {', '.join(seeded)}")
-            initial_variant_indices = _replica_initial_variant_indices(
-                deterministic_seed,
-                omm_top,
-                residue_reference_dict,
-                titratable_residue_indices,
-                seed_ph,
-                config.cph_config.temperature,
-                config.n_replicas,
-            )
-
+            logger.info(f"Seeded protonation (pH {seed_ph}): {', '.join(seeded)}")
+            initial_variant_indices = deterministic_seed
 
     remd = ConstantPHRemd(
         topology=omm_top,
@@ -1198,13 +1427,28 @@ def run_cph(
         config=config.cph_config,
         references=residue_reference_dict,
         titratable_residue_indices=titratable_residue_indices,
-        n_replicas=config.n_replicas,
+        n_replicas=n_replicas,
         ligand_variant_molecules=variant_molecules or None,
         weights=weights,
         initial_variant_indices=initial_variant_indices,
+        allowed_variant_indices=allowed_variant_indices,
+        simulated_tempering=config.simulated_annealing,
     )
     persist_ligand_setups(output_path, ligand_setup, cofactor_setup)
     cph = remd.replicas[0]
+
+    # Fresh setup: equilibrate the seeded (initial-guess) protonation state now
+    # that the master topology has been built and switched to the seed, then
+    # persist the relaxed master topology as the resume marker. On resume the
+    # equilibrated state is reloaded (above) and this is skipped.
+    if not resume_setup:
+        logger.info("Equilibrating the initial-guess protonation state")
+        _equilibrate_seeded_replicas(remd, config.equilibration_config)
+        eq_state = cph.simulation.context.getState(getPositions=True, enforcePeriodicBox=True)
+        cph.explicitTopology.setPeriodicBoxVectors(eq_state.getPeriodicBoxVectors())
+        with equilibrated_pdb_path(output_path).open("w") as pdb_file:
+            PDBFile.writeFile(cph.explicitTopology, eq_state.getPositions(), pdb_file, keepIds=True)
+
     _apply_barostat(remd, config)
 
     resume_production = resume and (ckpt_dir / REMD_STATE_FILENAME).exists()
@@ -1240,7 +1484,16 @@ def run_cph(
         )
     else:
         manifest = read_run_manifest(output_path) if resume_setup else {}
-        if resume_setup and manifest.get("weight_equilibration_done"):
+        if not config.simulated_annealing:
+            # Fixed-pH replicas do no simulated tempering, so the tempering
+            # weights are never consulted; skip the (expensive) optimisation and
+            # leave weights at zero.
+            logger.info(
+                "simulated_annealing=False: one fixed-pH replica per rung; "
+                "skipping simulated-tempering weight optimisation"
+            )
+            cur_weights = np.zeros(len(phs))
+        elif resume_setup and manifest.get("weight_equilibration_done"):
             saved_weights = manifest.get("weights") or weights
             if saved_weights is None:
                 raise ValueError(
@@ -1260,7 +1513,7 @@ def run_cph(
         results = []
         next_remd_swap_ps = remd_swap_interval_ps
         logger.info(
-            f"pH-REMD with {config.n_replicas} replicas across pHs: {phs}; "
+            f"pH-REMD with {n_replicas} replicas across pHs: {phs}; "
             f"initial replica pHs: {remd.current_ph_values()}"
         )
 
@@ -1329,9 +1582,7 @@ def run_cph(
 
                 iter_time = time.time() - iter_start
                 sim_time_ns = ps_per_batch / 1000.0
-                ns_per_day = (
-                    config.n_replicas * sim_time_ns * 86400 / iter_time if iter_time > 0 else 0
-                )
+                ns_per_day = n_replicas * sim_time_ns * 86400 / iter_time if iter_time > 0 else 0
                 pbar.set_postfix(
                     Time=f"{current_time_ps:.0f}ps",
                     ns_per_day=f"{ns_per_day:.2f}",
@@ -1365,6 +1616,10 @@ def run_cph(
         ligand_path=ligand_path_for_mmgbsa,
         run_mmgbsa=ligand_path_for_mmgbsa is not None,
         mmgbsa_n_closest_waters=config.mmgbsa_n_closest_waters,
+        # When a target pH is set, the ladder only serves to improve protonation
+        # sampling; score MMGBSA at the target pH alone (it is pH-invariant per
+        # microstate) rather than spending compute on the other rungs.
+        mmgbsa_score_phs=[config.target_ph] if config.target_ph is not None else None,
         protonation_swap_steps=protonation_swap_steps,
         ph_ladder=phs,
         cph_config=config.cph_config,

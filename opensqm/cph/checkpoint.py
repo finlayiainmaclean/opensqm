@@ -55,6 +55,7 @@ def write_run_manifest(
     protonation_swap_interval_ps: float,
     cph_config: ConstantpHSettings,
     titratable_residue_labels: list[str] | None = None,
+    allowed_variant_indices: dict[int, list[int]] | None = None,
     weights: list[float] | None = None,
     weight_equilibration_done: bool = False,
 ) -> None:
@@ -69,6 +70,16 @@ def write_run_manifest(
         # with titratable_residue_indices, so the run's residues are traceable to the
         # input PDB numbering without re-deriving the topology.
         "titratable_residue_labels": titratable_residue_labels,
+        # Per-residue variant masks (topology residue index -> allowed variant
+        # indices) for residues kept titratable only for a charge-neutral
+        # tautomer flip (e.g. neutral histidine restricted to HID/HIE). JSON
+        # object keys are strings; reload converts them back to int. ``None``
+        # when no residue is masked.
+        "allowed_variant_indices": (
+            {str(k): list(v) for k, v in allowed_variant_indices.items()}
+            if allowed_variant_indices
+            else None
+        ),
         "titratable_residue_query": titratable_residue_query,
         "pHs": phs,
         "n_replicas": n_replicas,

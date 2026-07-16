@@ -60,6 +60,29 @@ def compute_populations(df: pd.DataFrame, cph: ConstantPH) -> dict[int, pd.DataF
     return populations
 
 
+def joint_microstate_label(cph: ConstantPH, state_tuple: Sequence[int]) -> str:
+    """Human-readable label for a joint protonation microstate.
+
+    ``state_tuple`` holds one variant index per titratable residue, ordered by
+    ``sorted(cph.titrations)`` - the same order used for the columns of
+    :func:`compute_joint_populations` and for the trajectory manager's
+    ``system_state`` signature. Each residue contributes
+    ``"<residue_label>:<variant_name>"`` and the parts are joined by " | ", using
+    the residue's *original* structure numbering (see :func:`residue_label`) so
+    the label is stable across the run and can be matched against the
+    joint-population table.
+    """
+    titratable_indices = sorted(cph.titrations.keys())
+    residues_by_index = {r.index: r for r in cph.explicitTopology.residues()}
+    parts = []
+    for res_idx, state in zip(titratable_indices, state_tuple, strict=False):
+        titration = cph.titrations[res_idx]
+        parts.append(
+            f"{residue_label(residues_by_index[res_idx])}:{titration.variant_names[state]}"
+        )
+    return " | ".join(parts)
+
+
 def compute_joint_populations(df: pd.DataFrame, cph: ConstantPH) -> pd.DataFrame:
     """Return joint microstate populations as a function of pH.
 
@@ -103,16 +126,7 @@ def compute_joint_populations(df: pd.DataFrame, cph: ConstantPH) -> pd.DataFrame
             fractions[state] = 0.0
     fractions = fractions[list(all_joint_states)]
 
-    def _joint_label(state_tuple: tuple[int, ...]) -> str:
-        parts = []
-        for res_idx, state in zip(titratable_indices, state_tuple, strict=False):
-            titration = cph.titrations[res_idx]
-            residue = next(r for r in cph.explicitTopology.residues() if r.index == res_idx)
-            name = titration.variant_names[state]
-            parts.append(f"{residue_label(residue)}:{name}")
-        return " | ".join(parts)
-
-    fractions.columns = [_joint_label(col) for col in fractions.columns]
+    fractions.columns = [joint_microstate_label(cph, col) for col in fractions.columns]
     return fractions
 
 
@@ -919,8 +933,6 @@ def analyze_cph_results(
         print(joint_populations.T)
         print("\nResidue charge correlations:")
         print(residue_correlations)
-        print("\nPer-residue MC stats:")
-        print(cph.summary().T)
 
     return {
         "results": df,

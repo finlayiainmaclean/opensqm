@@ -1,12 +1,14 @@
 """MMGBSA interaction energy from a constant-pH run at the target pH.
 
-A single-pH constant-pH MD run at pH 7 samples the protein-ligand complex in the
-protonation ensemble appropriate for that pH. Because a ligand is present,
+A constant-pH MD run over a tight pH-REMD ladder of +/-2 pH units around pH 7
+(one fixed-pH replica per rung) samples the protein-ligand complex in the
+protonation ensemble appropriate for each pH. Because a ligand is present,
 ``run_cph`` computes the n-closest-waters MMGBSA interaction energy over the
-trajectory (``compute_replica_mmgbsa``, written to ``mmgbsa/overall.csv``) - so
-that IS the score, and no separate production MD is run. The lowest-energy frame
-of the dominant macrostate is the representative snapshot, split into a protein
-(plus its closest waters) PDB and a protonated-ligand SDF in the frame pose.
+trajectory (``compute_replica_mmgbsa``, written per pH to ``mmgbsa/by_ph.csv``) -
+so that IS the score, and no separate production MD is run. Scoring and the
+snapshot are taken from the pH-7 stratum: the lowest-energy frame of its dominant
+macrostate is the representative snapshot, split into a protein (plus its closest
+waters) PDB and a protonated-ligand SDF in the frame pose.
 
 Inputs (protein, ligand) and the output location may each be a local path or an
 ``s3://`` URI: inputs are staged into a temp dir, all work happens locally, and
@@ -38,13 +40,13 @@ RDLogger.DisableLog("rdApp.warning")
 _WATER_RESNAMES = ("HOH", "WAT", "TIP3", "TIP4", "TIP5")
 _ION_RESNAMES = ("NA", "CL")
 
-# MMGBSA is defined at pH 7. A tight pH-REMD ladder around it improves
-# protonation-state sampling (replicas swap pH, shuttling macrostates onto the
-# pH-7 replica) while keeping strong swap overlap; scoring and the snapshot are
-# taken from the pH-7 stratum.
+# MMGBSA is defined at pH 7. A tight pH-REMD ladder of +/-2 pH units around it
+# improves protonation-state sampling (replicas swap pH, shuttling macrostates
+# onto the pH-7 replica) while keeping strong swap overlap; scoring and the
+# snapshot are taken from the pH-7 stratum.
 _MMGBSA_PH = 7.0
-_MMGBSA_PH_LADDER = (6.5, 7.0, 7.5)
-_MMGBSA_N_REPLICAS = 3
+# +/-4 pH units around the target, one fixed-pH replica per rung.
+_MMGBSA_PH_LADDER = [_MMGBSA_PH - 4, _MMGBSA_PH - 2, _MMGBSA_PH + 0, _MMGBSA_PH + 2, _MMGBSA_PH + 4]
 
 
 class MMGBSASettings(BaseModel):
@@ -53,8 +55,8 @@ class MMGBSASettings(BaseModel):
     model_config = ConfigDict(frozen=True)
     n_closest_waters: int = 5
     ligand_resname: str = "LIG"
-    # Constant-pH MD time at pH 7. This is the only sampling: MMGBSA is scored over
-    # this trajectory and its lowest-energy frame becomes the representative pose.
+    # Constant-pH MD time per replica. This is the only sampling: MMGBSA is scored
+    # over this trajectory and its lowest-energy frame becomes the representative pose.
     cph_production_time: OpenMMQuantity[unit.nanosecond] = 0.5 * unit.nanosecond
 
 
@@ -73,21 +75,20 @@ def _cph_snapshot(
     protonation state at pH 7.
     """
     production_ns = config.cph_production_time.value_in_unit(unit.nanosecond)
-    logger.info(
-        f"Running {production_ns} ns CpH with pH-REMD ladder {list(_MMGBSA_PH_LADDER)}"
-    )
+    logger.info(f"Running {production_ns} ns CpH with pH-REMD ladder {_MMGBSA_PH_LADDER}")
     cph_result = run_cph(
         protein,
         output=str(cph_output),
         ligand=ligand,
         config=ConstantpHRunSettings(
-            ph=_MMGBSA_PH,
-            # Enumerate ligand protomers at pH 7 only; the ladder is for
-            # sampling, not for widening the protomer set.
-            protomer_enumeration_ph=_MMGBSA_PH,
+            ph=_MMGBSA_PH_LADDER,
+            target_ph=_MMGBSA_PH,
             production_time=config.cph_production_time,
             use_ph_remd=True,
-            n_replicas=_MMGBSA_N_REPLICAS,
+            # One fixed-pH replica per rung (pH 5/7/9); no simulated-tempering
+            # weights to optimise. The ligand protomers are enumerated at the
+            # target pH (target_ph) rather than across the ladder.
+            simulated_annealing=False,
             mmgbsa_n_closest_waters=config.n_closest_waters,
             protonation_penalty=3.0 * unit.kilocalories_per_mole,
             titratable_residue_query="(protein within 5 of resn LIG) or (resn LIG)",
@@ -197,6 +198,23 @@ def _read_mmgbsa_scores(cph_output: Path) -> pd.Series:
     )
 
 
+def _read_joint_microstate_mmgbsa(cph_output: Path) -> pd.DataFrame | None:
+    """Read the per-joint-microstate MMGBSA table written by the CpH run, if present.
+
+    Rows are joint protonation microstate labels (ligand protomer + each
+    titratable residue variant, in the run's original PDB numbering); columns are
+    the n-closest-waters MMGBSA interaction-energy summary (``mmgbsa_mean``/
+    ``mmgbsa_std``/``mmgbsa_min`` in kcal/mol and the backing ``mmgbsa_n_frames``).
+    MMGBSA is pH-invariant for a fixed microstate, so each microstate's frames are
+    pooled across all pH strata into one estimate; the pH dependence of the score
+    lives in the populations. Returns ``None`` when the CpH run produced no table.
+    """
+    csv_path = cph_output / "mmgbsa" / "by_joint_microstate.csv"
+    if not csv_path.exists():
+        return None
+    return pd.read_csv(csv_path, index_col=0)
+
+
 def run_mmgbsa(
     protein: str,
     ligand: str,
@@ -205,11 +223,12 @@ def run_mmgbsa(
 ) -> tuple[str, str, pd.Series]:
     """Run a CpH MMGBSA calculation for one protein-ligand pair.
 
-    A single-pH constant-pH MD run at pH 7 samples the complex, picks the dominant
-    ligand protonation state, and (because a ligand is present) computes the
-    n-closest-waters MMGBSA over the trajectory. The score comes straight from that
-    CpH MMGBSA summary; the representative outputs are the lowest-energy frame of
-    the dominant macrostate, split into protein-plus-close-waters and ligand.
+    A constant-pH MD run over a +/-2 pH ladder around pH 7 (one fixed-pH replica
+    per rung) samples the complex, picks the dominant ligand protonation state at
+    the target pH, and (because a ligand is present) computes the n-closest-waters
+    MMGBSA over the trajectory. The score comes straight from the pH-7 stratum of
+    that CpH MMGBSA summary; the representative outputs are the lowest-energy frame
+    of the dominant macrostate, split into protein-plus-close-waters and ligand.
 
     ``protein``, ``ligand`` and ``output`` may each be a local path or an
     ``s3://`` URI. Returns the published protein and ligand locations (same scheme
@@ -220,6 +239,10 @@ def run_mmgbsa(
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_dir = Path(tmpdir)
+
+        tmp_dir = Path("/tmp/cph")
+
+        tmp_dir.mkdir(parents=True, exist_ok=True)
 
         # Stage inputs locally (downloading from S3 when needed). All heavy work
         # runs in the temp dir; only the three artifacts below are published.
@@ -237,8 +260,9 @@ def run_mmgbsa(
 
         run_pdbfixer(local_protein, fixed_protein)
 
-        # Single-pH CpH at pH 7 is the whole calculation: it samples the complex and
-        # scores MMGBSA over its trajectory. The snapshot is the representative frame.
+        # The +/-2 pH ladder CpH run is the whole calculation: it samples the complex
+        # and scores MMGBSA over its trajectory. The snapshot is the representative
+        # frame of the pH-7 stratum.
         snapshot = _cph_snapshot(fixed_protein, local_ligand, cph_output, config)
 
         # Representative complex frame trimmed to protein + ligand + n closest waters.
@@ -280,7 +304,17 @@ def run_mmgbsa(
         scores = _read_mmgbsa_scores(cph_output)
         scores.to_csv(score_path, header=False)
 
-        # Publish the three artifacts to the destination (local dir or S3 prefix).
+        # Per-joint-microstate MMGBSA (ligand protomer x titratable residue
+        # variants, per pH). Logged for inspection and published alongside the
+        # scalar score when the CpH run produced it.
+        joint_mmgbsa = _read_joint_microstate_mmgbsa(cph_output)
+        if joint_mmgbsa is not None and not joint_mmgbsa.empty:
+            logger.info(
+                "MMGBSA per joint microstate (kcal/mol, pooled over pH):\n"
+                f"{joint_mmgbsa.to_string()}"
+            )
+
+        # Publish the artifacts to the destination (local dir or S3 prefix).
         out_dir = AnyPath(output)
         out_dir.mkdir(parents=True, exist_ok=True)
         out_prot, out_lig, out_scores = (
@@ -291,6 +325,10 @@ def run_mmgbsa(
         out_prot.write_bytes(prot_path.read_bytes())
         out_lig.write_bytes(lig_path.read_bytes())
         out_scores.write_bytes(score_path.read_bytes())
+
+        joint_csv = cph_output / "mmgbsa" / "by_joint_microstate.csv"
+        if joint_csv.exists():
+            (out_dir / "mmgbsa_by_microstate.csv").write_bytes(joint_csv.read_bytes())
 
         logger.info(f"Saved scores to {out_scores}")
         logger.info(f"Saved representative protein to {out_prot}")
@@ -330,6 +368,3 @@ def main(
 
 if __name__ == "__main__":
     main()
-
-
-    

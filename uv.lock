@@ -502,6 +502,15 @@ wheels = [
 ]
 
 [[package]]
+name = "docutils"
+version = "0.17.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/4c/17/559b4d020f4b46e0287a2eddf2d8ebf76318fd3bd495f1625414b052fdc9/docutils-0.17.1.tar.gz", hash = "sha256:686577d2e4c32380bb50cbb22f575ed742d58168cee37e99117a854bcd88f125", size = 2016138, upload-time = "2021-04-17T14:13:28.434Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4c/5e/6003a0d1f37725ec2ebd4046b657abb9372202655f96e76795dca8c0063c/docutils-0.17.1-py2.py3-none-any.whl", hash = "sha256:cf316c8370a737a022b72b56874f6602acf974a37a9fba42ec2876387549fc61", size = 575533, upload-time = "2021-04-17T14:13:24.796Z" },
+]
+
+[[package]]
 name = "executing"
 version = "2.2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1011,6 +1020,15 @@ wheels = [
 ]
 
 [[package]]
+name = "mmcif-pdbx"
+version = "2.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0a/01/6bee9fe8eb6ba1f5f8cc26f57cd27de2aadd549d6e8202f1dc9183822438/mmcif_pdbx-2.1.0.tar.gz", hash = "sha256:456b2f548d18306b82db6578cdc4f18c45be16960950db8ca7064d3ee66ebfc8", size = 18864, upload-time = "2026-04-26T15:53:32.744Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/89/26/0bd767ced9e87a189041fe8469d7e9167f04025cbdceda4eb9ba63e1a8e2/mmcif_pdbx-2.1.0-py3-none-any.whl", hash = "sha256:b52cc4063f57fa5f982c693a3dc394aaf7104054d68d7a2b4d26920950ea01a7", size = 19972, upload-time = "2026-04-26T15:53:31.513Z" },
+]
+
+[[package]]
 name = "mpmath"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1393,6 +1411,7 @@ dependencies = [
     { name = "numpy" },
     { name = "openmm" },
     { name = "pandas" },
+    { name = "pdb2pqr" },
     { name = "propka" },
     { name = "pydantic" },
     { name = "pymbar" },
@@ -1428,6 +1447,7 @@ requires-dist = [
     { name = "numpy" },
     { name = "openmm", specifier = ">=8.5.1" },
     { name = "pandas" },
+    { name = "pdb2pqr" },
     { name = "propka" },
     { name = "pydantic" },
     { name = "pymbar" },
@@ -1573,6 +1593,22 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/81/76/a1e769043c0c0c9fe391b702539d594731a4362334cdf4dc25d0c09761e7/parso-0.8.6.tar.gz", hash = "sha256:2b9a0332696df97d454fa67b81618fd69c35a7b90327cbe6ba5c92d2c68a7bfd", size = 401621, upload-time = "2026-02-09T15:45:24.425Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b6/61/fae042894f4296ec49e3f193aff5d7c18440da9e48102c3315e1bc4519a7/parso-0.8.6-py2.py3-none-any.whl", hash = "sha256:2c549f800b70a5c4952197248825584cb00f033b29c692671d3bf08bf380baff", size = 106894, upload-time = "2026-02-09T15:45:21.391Z" },
+]
+
+[[package]]
+name = "pdb2pqr"
+version = "3.7.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "docutils" },
+    { name = "mmcif-pdbx" },
+    { name = "numpy" },
+    { name = "propka" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a5/f2/f63603a19b30518d20f7900a5d7597f6dc9447d09b501e864191b370fa38/pdb2pqr-3.7.1.tar.gz", hash = "sha256:05b5c464022a3ad11c9597c6fc7f70c56061c4669b1497a51958da90d959152f", size = 13436854, upload-time = "2024-12-28T03:43:19.74Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/55/fb/6c702588f9c6de3ca17adb35952dfdd662856f913e4844032a7a01e2a7db/pdb2pqr-3.7.1-py3-none-any.whl", hash = "sha256:15f7422a41ea4c789e564e2ef00ac10b8f020b589b650f6225e627a5901305ea", size = 207930, upload-time = "2024-12-28T03:43:17.284Z" },
 ]
 
 [[package]]

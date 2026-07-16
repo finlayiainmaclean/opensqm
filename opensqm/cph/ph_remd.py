@@ -2,17 +2,21 @@ r"""pH replica-exchange wrapper around :class:`~opensqm.cph.constantph.ConstantP
 
 Each replica carries the full pH ladder and may walk it via simulated
 tempering (as in a single-replica :class:`ConstantPH` run).  Adjacent
-replicas periodically attempt to exchange their full thermodynamic states
-(coordinates, velocities, protonation pattern, and active pH index).
+replicas periodically attempt to exchange their *configurations*
+(coordinates, velocities, and protonation pattern); each replica keeps its
+own pH, so replica ``k`` always samples ladder rung ``k`` and adjacent-pair
+exchanges always compare adjacent pH values.  (Swapping the pH label instead
+of - or in addition to - the configuration would leave the pooled ensemble
+unchanged, i.e. a pure relabelling.)
 
-The acceptance probability for exchanging replicas *i* and *j* depends
-only on the difference in titratable protons and the pH values, as in
-explicit-solvent CpHMD (Mongan *et al.*, eq. 3):
+The acceptance probability for exchanging the configurations of replicas
+*i* and *j* depends only on the difference in titratable protons and the pH
+values, as in explicit-solvent CpHMD (Mongan *et al.*, eq. 3):
 
 .. math::
 
     P_\\mathrm{acc} = \\min\\!\\left(1,\\;
-        10^{(N_i - N_j)(\\mathrm{pH}_j - \\mathrm{pH}_i)}\\right)
+        10^{(N_i - N_j)(\\mathrm{pH}_i - \\mathrm{pH}_j)}\\right)
 
 Because the underlying potential at fixed protonation does not depend on
 the replica pH label, no explicit-solvent energy difference enters the
@@ -47,12 +51,20 @@ def num_titratable_protons(cph: ConstantPH) -> int:
 
 
 def replica_exchange_log_probability(cph_i: ConstantPH, cph_j: ConstantPH) -> float:
-    """Log acceptance probability for a pH-REMD swap between two replicas."""
+    """Log Metropolis acceptance for exchanging two replicas' configurations.
+
+    Exchanging the configurations swaps which pH each proton count experiences.
+    The pH-coupled part of the effective energy (``U + N ln10 pH``) changes by
+    ``ln10 (N_i - N_j)(pH_j - pH_i)``, so the log-acceptance is its negative,
+    ``ln10 (N_i - N_j)(pH_i - pH_j)``. It is >= 0 (always accept) when the swap
+    moves the more-protonated configuration toward lower pH, and < 0 when it
+    would push it toward higher pH.
+    """
     n_i = num_titratable_protons(cph_i)
     n_j = num_titratable_protons(cph_j)
     ph_i = cph_i.ph[cph_i.currentPHIndex]
     ph_j = cph_j.ph[cph_j.currentPHIndex]
-    return (n_i - n_j) * np.log(10.0) * (ph_j - ph_i)
+    return (n_i - n_j) * np.log(10.0) * (ph_i - ph_j)
 
 
 def _protonation_snapshot(cph: ConstantPH) -> dict[int, int]:
@@ -118,6 +130,17 @@ class ConstantPHRemd:
         Simulated-tempering weights for the pH ladder.  ``None`` triggers
         Wang-Landau auto-tuning independently on each replica until
         :meth:`set_weights` is called.
+    simulated_tempering
+        When ``False``, each replica is pinned at its starting pH index and
+        never proposes a simulated-tempering pH move; combined with one replica
+        per ladder rung this gives a fixed-pH pH-REMD run for which the
+        simulated-tempering weights are unnecessary. ``True`` (default) keeps
+        per-replica simulated tempering across the full ladder.
+    allowed_variant_indices
+        Optional map of topology residue index -> allowed variant indices,
+        shared by every replica and forwarded to each :class:`ConstantPH`. Used
+        to forbid a charge-changing variant while keeping a charge-neutral
+        tautomer flip (e.g. a neutral histidine restricted to HID/HIE).
     ligand_variant_molecules, ring_flip_angles, platform, properties
         Forwarded to each :class:`ConstantPH` replica.
     """
@@ -137,6 +160,8 @@ class ConstantPHRemd:
         ring_flip_angles: Sequence[float] | None = None,
         weights: list[float] | None = None,
         initial_variant_indices: "dict[int, int] | list[dict[int, int]] | None" = None,
+        allowed_variant_indices: "dict[int, Iterable[int]] | None" = None,
+        simulated_tempering: bool = True,
         platform: Platform | None = None,
         properties: dict | None = None,
     ) -> None:
@@ -189,6 +214,8 @@ class ConstantPHRemd:
                 ring_flip_angles=ring_flip_angles,
                 weights=weights,
                 initial_variant_indices=replica_variant_indices,
+                allowed_variant_indices=allowed_variant_indices,
+                simulated_tempering=simulated_tempering,
                 platform=platform,
                 properties=properties,
             )
@@ -228,8 +255,11 @@ class ConstantPHRemd:
     def attempt_replica_exchange(self, i: int = 0, j: int = 1) -> bool:
         """Attempt a pH-REMD exchange between replicas ``i`` and ``j``.
 
-        Swaps coordinates, velocities, protonation states, and active pH
-        indices when the Metropolis criterion is satisfied.
+        On acceptance, swaps the two replicas' configurations (coordinates,
+        velocities, box, and protonation pattern) while leaving each replica's pH
+        fixed - equivalent to swapping the pH labels, so the same Metropolis
+        criterion applies (Swails & Roitberg, JCTC 2014,
+        ``P = min{1, 10^((N_i - N_j)(pH_i - pH_j))}``).
         """
         if i < 0 or j < 0 or i >= self.n_replicas or j >= self.n_replicas:
             raise IndexError(f"replica indices ({i}, {j}) out of range")
@@ -257,10 +287,16 @@ class ConstantPHRemd:
 
     @staticmethod
     def _swap_replica_states(rep_a: ConstantPH, rep_b: ConstantPH) -> None:
+        """Exchange the two replicas' configurations, leaving each replica's pH fixed.
+
+        Coordinates, velocities, box vectors, and the protonation pattern move
+        between the two replicas; ``currentPHIndex`` is deliberately *not*
+        swapped, so replica ``a`` keeps sampling its pH while receiving ``b``'s
+        configuration (and vice versa). Swapping the pH label as well would
+        cancel the configuration swap, leaving the pooled ensemble unchanged.
+        """
         protonation_a = _protonation_snapshot(rep_a)
         protonation_b = _protonation_snapshot(rep_b)
-        ph_index_a = rep_a.currentPHIndex
-        ph_index_b = rep_b.currentPHIndex
 
         md_state_a = _capture_md_state(rep_a)
         md_state_b = _capture_md_state(rep_b)
@@ -270,9 +306,6 @@ class ConstantPHRemd:
 
         _apply_md_state(rep_a, md_state_b)
         _apply_md_state(rep_b, md_state_a)
-
-        rep_a.currentPHIndex = ph_index_b
-        rep_b.currentPHIndex = ph_index_a
 
         _sync_auxiliary_contexts(rep_a)
         _sync_auxiliary_contexts(rep_b)

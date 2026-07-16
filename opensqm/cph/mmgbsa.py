@@ -100,12 +100,23 @@ def compute_replica_mmgbsa(
     protonation_swap_steps: int,
     ph_ladder: list[float] | None = None,
     n_closest_waters: int = 5,
+    score_phs: list[float] | None = None,
 ) -> dict[str, Any]:
-    """Run pH-stratified and overall n-closest-waters MMGBSA across all replicas."""
+    """Run pH-stratified and overall n-closest-waters MMGBSA across all replicas.
+
+    When ``score_phs`` is given, only frames whose active pH (snapped to
+    ``ph_ladder``) falls in that set are scored. MMGBSA is pH-invariant for a
+    fixed protonation microstate, so scoring a single target pH still yields the
+    correct per-microstate energies while skipping the (expensive)
+    interaction-energy evaluation on the other ladder rungs. ``None`` scores
+    every pH sampled.
+    """
     mmgbsa_dir = output_path / "mmgbsa"
     mmgbsa_dir.mkdir(parents=True, exist_ok=True)
     close_traj = mmgbsa_dir / "_close.dcd"
     close_top = mmgbsa_dir / "_close.pdb"
+
+    score_ph_set = {_snap_ph(p, ph_ladder) for p in score_phs} if score_phs is not None else None
 
     ph_summaries: dict[float, list[float]] = defaultdict(list)
     all_energies: list[float] = []
@@ -139,6 +150,10 @@ def compute_replica_mmgbsa(
                 protonation_swap_steps,
                 ph_ladder,
             )
+            if score_ph_set is not None:
+                ph_groups = {ph: idx for ph, idx in ph_groups.items() if ph in score_ph_set}
+            if not ph_groups:
+                continue
             state_rows = traj_csv[traj_csv["system_state"] == state_label]
             frame_to_time = dict(
                 zip(state_rows["frame_ix"].astype(int), state_rows["time_ns"], strict=False)

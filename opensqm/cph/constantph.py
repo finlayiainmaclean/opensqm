@@ -15,8 +15,9 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
+from loguru import logger
 from openmm import Context, GBSAOBCForce, NonbondedForce, Platform, System, unit
-from openmm.app import ForceField, Modeller, PDBFile, Simulation, Topology, element
+from openmm.app import ForceField, Modeller, PDBFile, Residue, Simulation, Topology, element
 from openmm.app.forcefield import NonbondedGenerator
 from openmm.app.internal import compiled
 from openmm.unit import MOLAR_GAS_CONSTANT_R, elementary_charge, nanometers
@@ -107,6 +108,12 @@ class ResidueTitration:
     explicit_hydrogen_indices: list = field(default_factory=list)
     protonated_index: int = -1
     current_index: int = -1
+    # Variant indices the MC may occupy for this residue. ``None`` (the default)
+    # allows every built variant. A subset forbids the excluded variants as both
+    # proposal targets and the active state - used to mask out a charge-changing
+    # variant (e.g. histidine's charged HIP) while keeping the charge-neutral
+    # tautomer flip (HID<->HIE). See ``run_cph._propka_selection``.
+    allowed_state_indices: "set[int] | None" = None
     n_state_attempts: int = 0
     n_state_accepted: int = 0
     n_standalone_flip_attempts: int = 0
@@ -322,15 +329,15 @@ _ION_ELEMENTS = (
 )
 
 
-def _is_solvent_residue(residue) -> bool:
-    """True for water or a single-atom monatomic ion (added by solvation)."""
+def _is_solvent_residue(residue: Residue) -> bool:
+    """Identify water or a single-atom monatomic ion (added by solvation)."""
     return residue.name == "HOH" or (
         len(residue) == 1 and next(residue.atoms()).element in _ION_ELEMENTS
     )
 
 
-def residue_label(residue) -> str:
-    """Human-readable identifier using the residue's *original* structure numbering.
+def residue_label(residue: Residue) -> str:
+    """Return a human-readable identifier using the residue's *original* structure numbering.
 
     Returns ``"<resname> <resid> <chain>"`` (e.g. ``"GLU 404 A"``), matching the
     numbering PROPKA and the input PDB report; the chain suffix is dropped when
@@ -344,12 +351,12 @@ def residue_label(residue) -> str:
     return f"{residue.name} {residue.id}{f' {chain}' if chain else ''}"
 
 
-def residue_label_slug(residue) -> str:
-    """Filesystem-safe form of :func:`residue_label` (spaces to underscores)."""
+def residue_label_slug(residue: Residue) -> str:
+    """Return a filesystem-safe form of :func:`residue_label` (spaces to underscores)."""
     return residue_label(residue).replace(" ", "_")
 
 
-def write_solute_pdb(topology: Topology, positions, path: Path | str) -> None:
+def write_solute_pdb(topology: Topology, positions: "unit.Quantity", path: Path | str) -> None:
     """Write ``topology``/``positions`` to ``path`` with solvent stripped.
 
     Constant-pH residue selection loads this PDB into RDKit to evaluate the
@@ -532,6 +539,22 @@ class ConstantPH(object):
         listed keep the default. Used to seed near equilibrium - e.g.
         PROPKA-predicted protonation for protein residues and the dominant
         protomer for a ligand. ``None`` keeps the fully-protonated start.
+    allowed_variant_indices : dict[int, Iterable[int]], optional
+        Map of topology residue index -> the variant indices (into the
+        residue's ``reference.variants``) the MC is allowed to occupy. Residues
+        listed here can never enter or start in an excluded variant; residues
+        absent from the map may occupy any built variant. Used to forbid a
+        charge-changing state while keeping a charge-neutral tautomer flip -
+        e.g. restricting a histidine PROPKA predicts is neutral to ``[HID, HIE]``
+        so it still flips tautomer but never visits the charged HIP. ``None``
+        allows every variant of every residue.
+    simulated_tempering : bool, optional
+        When ``True`` (default) and more than one pH is supplied, each MC step
+        also proposes a simulated-tempering move across the pH ladder (requiring
+        tuned ``weights``). Pass ``False`` to pin the replica at its starting
+        pH index and drive protonation MC at that single pH only - used by
+        pH-REMD runs that place one fixed-pH replica per ladder rung, where the
+        simulated-tempering weights are unnecessary.
     platform : openmm.Platform, optional
     properties : dict, optional
         Platform-specific properties to pass to the Context's constructor.
@@ -550,6 +573,9 @@ class ConstantPH(object):
         ring_flip_angles: Sequence[float] | None = DEFAULT_RING_FLIP_ANGLES,
         weights: list[float] | None = None,
         initial_variant_indices: "dict[int, int] | None" = None,
+        allowed_variant_indices: "dict[int, Iterable[int]] | None" = None,
+        simulated_tempering: bool = True,
+        log_transitions: bool = True,
         platform: Platform | None = None,
         properties: dict | None = None,
     ) -> None:
@@ -565,6 +591,11 @@ class ConstantPH(object):
             ph = [ph]
         self.set_ph(ph, weights)
         self.currentPHIndex = 0
+        self.simulated_tempering = simulated_tempering
+        # Emit an INFO line on each accepted protonation change / ring flip.
+        # Disabled during reference-energy fitting, which runs many MC steps over
+        # an internal pH scan and would otherwise flood the log.
+        self._log_transitions = log_transitions
         self._explicitArgs = explicitArgs
         self._implicitArgs = implicitArgs
         self.relaxationSteps = config.relaxation_steps
@@ -587,7 +618,18 @@ class ConstantPH(object):
                     f"available reference residue names: {sorted(references)}"
                 )
             reference = references[residue.name]
-            self.titrations[res_index] = ResidueTitration(reference=reference)
+            titration = ResidueTitration(reference=reference)
+            if allowed_variant_indices is not None and res_index in allowed_variant_indices:
+                allowed = {int(i) for i in allowed_variant_indices[res_index]}
+                n_variants = len(reference.variants)
+                if not allowed or any(not (0 <= i < n_variants) for i in allowed):
+                    raise ValueError(
+                        f"allowed_variant_indices for residue {residue_label(residue)} "
+                        f"must be a non-empty subset of range({n_variants}); got "
+                        f"{sorted(allowed_variant_indices[res_index])}"
+                    )
+                titration.allowed_state_indices = allowed
+            self.titrations[res_index] = titration
             residueVariants[res_index] = list(reference.variants)
 
         implicitToExplicitResidueMap = []
@@ -914,6 +956,16 @@ class ConstantPH(object):
                 if 0 <= variant_index < len(titration.implicit_states):
                     titration.current_index = variant_index
 
+        # Keep every residue's starting variant inside its allowed set. The
+        # fully-protonated default (``protonated_index``) and any seed applied
+        # above can land on a masked-out variant (e.g. HIP on a histidine
+        # restricted to its neutral HID/HIE tautomers); that must never be the
+        # active state, so fall back to the lowest allowed variant index.
+        for titration in self.titrations.values():
+            allowed = titration.allowed_state_indices
+            if allowed is not None and titration.current_index not in allowed:
+                titration.current_index = min(allowed)
+
         # Record the indices of nonbonded exceptions and the 1-4 Coulomb scale
         # factors, read straight off the Systems / topologies / force field.
 
@@ -1036,6 +1088,15 @@ class ConstantPH(object):
         self.ringFlipAttempts = 0
         self.ringFlipAccepted = 0
 
+        # Human-readable labels (e.g. "GLU 404 A") for the driven residues, used
+        # when logging accepted protonation changes and ring flips.
+        label_indices = set(self.titrations) | set(self.ringFlips)
+        self._residue_labels: dict[int, str] = {
+            residue.index: residue_label(residue)
+            for residue in self.explicitTopology.residues()
+            if residue.index in label_indices
+        }
+
         self.temperature = self.simulation.integrator.getTemperature()
 
     def set_ph(self, ph: Sequence, weights: list[float] | None = None) -> None:
@@ -1111,9 +1172,10 @@ class ConstantPH(object):
             state.getPeriodicBoxVectors().value_in_unit(nanometers)
         )
 
-        # Perform simulated tempering.
+        # Perform simulated tempering. Skipped when disabled (e.g. fixed-pH
+        # pH-REMD replicas), leaving the replica pinned at its current pH index.
 
-        if len(self.ph) > 1:
+        if self.simulated_tempering and len(self.ph) > 1:
             self._attempt_ph_change()
 
         # Process the residues in random order.
@@ -1251,11 +1313,17 @@ class ConstantPH(object):
 
             anyChange = True
 
-            # Apply the new state.
-
+            # Apply the new state. Collect the per-residue transitions so a
+            # multisite (coupled) proposal that changes two residues at once is
+            # logged as a single coupled event, not two unrelated lines.
+            changes: list[str] = []
             for i, t in zip(state_index, titrations, strict=False):
+                old_index = t.current_index
                 t.current_index = i
                 t.n_state_accepted += 1
+                if i != old_index:
+                    new_res_index = t.explicit_states[i].residue_index
+                    changes.append(f"{self._residue_labels.get(new_res_index, new_res_index)} ")
                 self._apply_state_to_context(
                     t.explicit_states[i],
                     self.simulation.context,
@@ -1271,11 +1339,21 @@ class ConstantPH(object):
                     self.explicit14Scale,
                 )
 
+            if changes and self._log_transitions:
+                kind = "Coupled protonation change" if len(changes) > 1 else "Protonation change"
+                logger.info(f"{kind} (pH {self.ph[self.currentPHIndex]:.2f}): {', '.join(changes)}")
+
             if coupled_flip is not None:
                 flip_res_index, flip_record_idx, flip_angle_deg, _ = coupled_flip
                 accepted_coupled_flips.append((flip_res_index, flip_record_idx, flip_angle_deg))
                 self.ringFlipAccepted += 1
                 self.titrations[flip_res_index].n_coupled_flip_accepted += 1
+                if self._log_transitions:
+                    logger.info(
+                        f"Ring flip (coupled, pH {self.ph[self.currentPHIndex]:.2f}): "
+                        f"{self._residue_labels.get(flip_res_index, flip_res_index)} "
+                        f"rotated {flip_angle_deg:+.0f} deg"
+                    )
 
         # If anything changed, run some dynamics to let the water relax.
 
@@ -1471,6 +1549,12 @@ class ConstantPH(object):
         self.ringFlipAccepted += 1
         if stats_titration is not None:
             stats_titration.n_standalone_flip_accepted += 1
+        if self._log_transitions:
+            logger.info(
+                f"Ring flip (pH {self.ph[self.currentPHIndex]:.2f}): "
+                f"{self._residue_labels.get(res_index, res_index)} "
+                f"rotated {angle_deg:+.0f} deg"
+            )
         return True
 
     @staticmethod
@@ -1768,22 +1852,38 @@ class ConstantPH(object):
     def _select_new_state(titration: ResidueTitration) -> int:
         """Randomly choose a new state for a ResidueTitration.
 
+        Proposals are drawn uniformly from the residue's allowed variants
+        (all built variants when ``allowed_state_indices`` is ``None``) other
+        than the current one. Because the allowed set is fixed - it does not
+        depend on the current state - the forward and reverse proposal
+        densities are equal, so detailed balance holds even when a
+        charge-changing variant is masked out (e.g. histidine's HIP, leaving
+        the charge-neutral HID<->HIE flip).
+
         ``numStates == 1`` is permitted for ring-flip-only residues
         (e.g. ASN, GLN) that are registered for terminal-group MC but
-        carry no protonation transitions; the only valid "new" state
-        is the current one. The protonation MC loop in
-        :meth:`attemptMCStep` skips these residues outright, so the
-        no-op return is purely defensive.
+        carry no protonation transitions; a singleton allowed set behaves the
+        same way. In both cases the only valid "new" state is the current one.
+        The protonation MC loop in :meth:`attempt_mc_step` skips these residues
+        outright, so the no-op return is purely defensive.
         """
-        numStates = len(titration.implicit_states)
-        if numStates == 1:
+        if titration.allowed_state_indices is None:
+            numStates = len(titration.implicit_states)
+            if numStates == 1:
+                return titration.current_index
+            if numStates == 2:
+                return 1 - titration.current_index
+            state_index = titration.current_index
+            while state_index == titration.current_index:
+                state_index = np.random.randint(numStates)
+            return state_index
+
+        others = [
+            i for i in sorted(titration.allowed_state_indices) if i != titration.current_index
+        ]
+        if not others:
             return titration.current_index
-        if numStates == 2:
-            return 1 - titration.current_index
-        state_index = titration.current_index
-        while state_index == titration.current_index:
-            state_index = np.random.randint(numStates)
-        return state_index
+        return int(others[np.random.randint(len(others))])
 
     def _find_neighbors(
         self,

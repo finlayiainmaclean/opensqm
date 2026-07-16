@@ -176,7 +176,18 @@ class StateSplitTrajectoryManager:
         self._always_ghost: frozenset[int] = frozenset()
 
         self._channels: dict[tuple[int, ...], _StateChannel] = {}
-        self._initial_frame_ix = self._restore_frame_counts_from_csv()
+        # Only inherit per-state frame counters when appending to an existing run.
+        # On a fresh run (append=False) the sidecar CSV is truncated and each
+        # per-state DCD is rewritten from frame 0; seeding the counter from a
+        # prior run's CSV would then log frame_ix values past the freshly written
+        # DCD's end, and downstream frame lookups (e.g. MMGBSA) would index out of
+        # bounds. Also clear any per-state trajectory files a prior run left in
+        # this directory so they are not globbed as if they belonged to this run.
+        if self.append:
+            self._initial_frame_ix = self._restore_frame_counts_from_csv()
+        else:
+            self._initial_frame_ix = {}
+            self._remove_stale_state_files()
         self._step_size_ps = float(
             self.simulation.integrator.getStepSize().value_in_unit(unit.picosecond)
         )
@@ -217,6 +228,23 @@ class StateSplitTrajectoryManager:
                 signature = tuple(int(x) for x in row["system_state"].split("_"))
                 counts[signature] = int(row["frame_ix"]) + 1
         return counts
+
+    def _remove_stale_state_files(self) -> None:
+        """Delete per-state DCD/PDB files from a prior run sharing this base path.
+
+        A fresh (non-append) run only rewrites a state's DCD the first time that
+        state is visited, so DCDs for states this run never enters would linger
+        and be picked up by :func:`iter_replica_state_trajectories` - mixing a
+        prior run's frames into this run's analysis. Removing them up front keeps
+        the on-disk trajectory set consistent with this run's CSV.
+        """
+        parent = self.base_path.parent
+        for pattern in (f"{self.base_path.name}.*.dcd", f"{self.base_path.name}.*.pdb"):
+            for stale in parent.glob(pattern):
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
 
     # ------------------------------------------------------------------
     # OpenMM reporter protocol
@@ -315,7 +343,7 @@ class StateSplitTrajectoryManager:
         else:
             sub_topology, sub_positions = self._build_sub_topology(keep)
             with pdb_path.open("w") as f:
-                PDBFile.writeFile(sub_topology, sub_positions, f)
+                PDBFile.writeFile(sub_topology, sub_positions, f, keepIds=True)
 
         mode = "r+b" if append_dcd else "wb"
         out_handle = dcd_path.open(mode)

@@ -290,6 +290,7 @@ def _compute_pairwise_reference_energy(
         references=references,
         titratable_residue_indices=[1],
         ring_flip_angles=None,
+        log_transitions=False,  # fitting scans many pHs; don't flood the log
     )
     logger.info(f"Computing reference energy for {cache_name} with pKa={pka}")
     finder = ReferenceEnergyFinder(cph, pka=pka, temperature=config.temperature)

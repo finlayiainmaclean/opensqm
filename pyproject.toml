@@ -25,7 +25,7 @@ dependencies = [
     "scipy",
     "pyyaml",
     "sqlitedict>=2.1.0",
-    "openmm>=8.5.1", "pypdf>=6.13.2,<7",
+    "openmm>=8.3", "pypdf>=6.13.2,<7",
     "propka",
     "pdb2pqr",
     "cloudpathlib[s3]"
@@ -45,12 +45,11 @@ openff-toolkit = "*"
 openff-nagl = "*"
 openff-nagl-models = "*"
 openmmforcefields = "*"
-openff-bespokefit = "*"
 pydantic-units = "*"
 xtb-python = "*"
 ambertools = "*"
 mdtraj = "*"
-pymbar = "<4"
+pymbar = ">=4"
 xmltodict = ">=1.0.2,<2"
 pytest = ">=9.0.3,<10"
 openmm-ml = "*"

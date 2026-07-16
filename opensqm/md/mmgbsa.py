@@ -319,11 +319,11 @@ def get_interaction_energy(
     energy = np.array(energies)
 
     # Find equilibrated and decorrelated frames/energies
-    t0, g, _Neff_max = timeseries.detect_equilibration(energy)
+    t0, g, _Neff_max = timeseries.detectEquilibration(energy)
 
     energy_eq = energy[t0:]
     closest_xyz_eq = closest_xyz[t0:]
-    idx = timeseries.subsample_correlated_data(energy_eq, g=g)
+    idx = timeseries.subsampleCorrelatedData(energy_eq, g=g)
     energy = energy_eq[idx]
 
     # Update the final exported closest trajectory with decorrelated frames

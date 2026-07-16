@@ -44,7 +44,7 @@ def _check_volume_plateau(
         msg = f"Insufficient volume samples ({len(volumes_nm3)}) to verify NPT plateau"
         raise RuntimeError(msg)
 
-    t0, _g, _ = timeseries.detectEquilibration(volumes_nm3)
+    t0, _g, _ = timeseries.detect_equilibration(volumes_nm3)
     equilibrated = volumes_nm3[t0:]
     equilibrated_fraction = len(equilibrated) / len(volumes_nm3)
 

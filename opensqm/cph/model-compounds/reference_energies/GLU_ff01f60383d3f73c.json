@@ -1,27 +1,27 @@
 {
-  "residue_name": "LYS",
-  "main_variant": "LYS",
+  "residue_name": "GLU",
+  "main_variant": "GLH",
   "variant_names": [
-    "LYS",
-    "LYN"
+    "GLH",
+    "GLU"
   ],
   "variants": [
-    "LYS",
-    "LYN"
+    "GLH",
+    "GLU"
   ],
   "charges": [
-    1,
-    0
+    0,
+    -1
   ],
   "reference_energies_kj_per_mole": [
     0.0,
-    -86.2319527716933
+    -120.10536278942729
   ],
   "transitions": [
     {
       "parent": 0,
       "child": 1,
-      "pka": 10.4
+      "pka": 4.3
     }
   ],
   "ring_flip_bonds": []

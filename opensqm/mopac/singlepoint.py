@@ -1,4 +1,5 @@
-# ruff: noqa: D100, D103, PLW2901
+"""Single-point energy evaluation of an RDKit molecule with MOPAC."""
+
 import tempfile
 import time
 from pathlib import Path
@@ -27,6 +28,7 @@ def run_singlepoint_from_rdmol(
     solvent: Literal["cosmo", "cosmo2"] | None = "cosmo2",
     charge: int = 0,
 ) -> float:
+    """Run a MOPAC single point and return the heat of formation in kcal/mol."""
     rdmol = fix_nitro_groups(rdmol)
 
     mopac_keywords = [
@@ -56,8 +58,8 @@ def run_singlepoint_from_rdmol(
 
     mopac_keywords = list(mopac_keywords)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir = Path(tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir_str:
+        tmpdir = Path(tmpdir_str)
         mop_path = tmpdir / "mol.mop"
         setpi_path = tmpdir / "setpi.txt"
         mopac_path = tmpdir / "run.mopac"

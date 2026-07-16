@@ -6,17 +6,17 @@ followed by population reweighting back to room temperature to recover the
 standard binding free energy.
 """
 
-from opensqm.modbinddg.analyze import analyze_modbinddg
-from opensqm.modbinddg.config import ModBindDGSettings
-from opensqm.modbinddg.reweight import (
+from opensqm.modbind.analyze import analyze_modbinddg
+from opensqm.modbind.config import ModBindDGSettings
+from opensqm.modbind.reweight import (
     bootstrap_delta_g,
     compute_delta_g,
     einstein_smoluchowski_unbound,
     radial_pmf,
     reweight_state,
 )
-from opensqm.modbinddg.simulate import ModBindDGData, collect_trajectories
-from opensqm.modbinddg.states import (
+from opensqm.modbind.simulate import ModBindDGData, collect_trajectories
+from opensqm.modbind.states import (
     PreparedState,
     SystemState,
     build_bound_state_from_state,

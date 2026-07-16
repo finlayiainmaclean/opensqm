@@ -5,7 +5,7 @@ from opensqm.md.mmgbsa import get_interaction_energy
 equil_pdb_path = "data/outputs/PL-REX/003-CK2/1F0Q/equil.pdb"
 trajectory_path = "data/outputs/PL-REX/003-CK2/1F0Q/replica_0/com.dcd"
 close_trajectory_path = "data/outputs/PL-REX/003-CK2/1F0Q/replica_0/com.close.dcd"
-close_top_path = "data/outputs/PL-REX/003-CK2/1F0Q/replica_0/com.close.prmtop"
+close_top_path = "data/outputs/PL-REX/003-CK2/1F0Q/replica_0/com.close.pdb"
 ligand = "data/inputs/PL-REX/003-CK2/1F0Q.sdf"
 n_closest_waters = 5
 

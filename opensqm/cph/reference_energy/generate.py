@@ -22,6 +22,7 @@ Shipped amino-acid references are cached under
 references are cached under ``.cache/cph/reference_energies`` at the
 project root (gitignored).
 """
+
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +30,7 @@ import xxhash
 from loguru import logger
 from openff.toolkit.topology import Molecule  # type: ignore
 from rdkit import Chem
+from tqdm import tqdm
 
 from opensqm.cph.constantph import ConstantPH
 from opensqm.cph.inchi import to_inchikey_non_standard
@@ -141,7 +143,9 @@ def generate_ligand_reference(
 
     transitions_resolved = _resolve_named_transitions(list(transitions), names)
     _validate_transitions_graph(
-        transitions_resolved, len(variant_molecules), root_idx=0,
+        transitions_resolved,
+        len(variant_molecules),
+        root_idx=0,
     )
 
     main_mol = variant_molecules[0]
@@ -162,13 +166,11 @@ def generate_ligand_reference(
     # Cache key encodes the full tree shape (parent/child indices + pKa) so
     # that two different ladders with the same set of pKas don't collide.
     edge_str = "-".join(
-        f"{t.parent}>{t.child}@{np.round(t.pka, 1)}".replace(".", "")
-        for t in transitions_resolved
+        f"{t.parent}>{t.child}@{np.round(t.pka, 1)}".replace(".", "") for t in transitions_resolved
     )
 
     cache_path = (
-        _ligand_reference_cache_dir()
-        / f"{main_name}_{xxhash_str}_{edge_str}_{config.hash()}.json"
+        _ligand_reference_cache_dir() / f"{main_name}_{xxhash_str}_{edge_str}_{config.hash()}.json"
     )
 
     user_ring_flip_bonds = [tuple(b) for b in (ring_flip_bonds or [])]
@@ -189,7 +191,9 @@ def generate_ligand_reference(
     lig_explicit_ff = config.get_explicit_forcefield(variant_molecules)
 
     omm_top, omm_pos = solvate_ligand(
-        rdkit_mols[0], lig_explicit_ff, residue_name=main_name,
+        rdkit_mols[0],
+        lig_explicit_ff,
+        residue_name=main_name,
     )
     ligand_residues = [r for r in omm_top.residues() if r.name == main_name]
     if len(ligand_residues) != 1:
@@ -206,7 +210,10 @@ def generate_ligand_reference(
     ordered_transitions = _topological_transitions(transitions_resolved, root_idx=0)
     measured_deltas_kj: list[float] = []
     for t in ordered_transitions:
-        pair_variants: list[VariantSpec] = [per_state_variants[t.parent], per_state_variants[t.child]]
+        pair_variants: list[VariantSpec] = [
+            per_state_variants[t.parent],
+            per_state_variants[t.child],
+        ]
         pair_names = [names[t.parent], names[t.child]]
         pair_charges = [charges[t.parent], charges[t.child]]
         pair_label = f"{names[t.parent]}-{names[t.child]}"
@@ -220,27 +227,25 @@ def generate_ligand_reference(
         cph = ConstantPH(
             topology=omm_top,
             positions=omm_pos,
-            pH=7.0,
+            ph=7.0,
             config=config,
             references={main_name: pair_reference},
             titratable_residue_indices=[ligand_res_idx],
             ligand_variant_molecules=variant_molecules,
             ring_flip_angles=None,
+            log_transitions=False,  # fitting scans many pHs; don't flood the log
         )
         logger.info(f"Computing reference energy for {pair_label} (pKa={t.pka})")
-        finder = ReferenceEnergyFinder(cph, pKa=t.pka, temperature=config.temperature)
-        finder.findReferenceEnergies(
+        finder = ReferenceEnergyFinder(cph, pka=t.pka, temperature=config.temperature)
+        finder.find_reference_energies(
             substeps=substeps,
             max_iterations=iterations,
-            progress_desc=f"{pair_label} (pKa={t.pka})",
         )
-        ref_energies = cph.titrations[ligand_res_idx].referenceEnergies
-        logger.info(
-            f"Computed reference energy for {pair_label} (pKa={t.pka}): {ref_energies}"
-        )
+        ref_energies = cph.titrations[ligand_res_idx].reference_energies
+        logger.info(f"Computed reference energy for {pair_label} (pKa={t.pka}): {ref_energies}")
         measured_deltas_kj.append(float(ref_energies[1]._value))
 
-    energies_kj, _edge_residuals_kj = _solve_reference_energies_ls(
+    energies_kj, _ = _solve_reference_energies_ls(
         ordered_transitions,
         measured_deltas_kj,
         n_variants=len(variant_molecules),
@@ -267,7 +272,8 @@ def generate_residue_reference_dict(
     ligands: list[
         tuple[list[Molecule], list[NamedTransition]]
         | tuple[list[Molecule], list[NamedTransition], list[tuple[str, str]]]
-    ] | None = None,
+    ]
+    | None = None,
     iterations: int = 20_000,
     substeps: int = 20,
 ) -> dict[str, TitratableResidueReference]:
@@ -284,8 +290,7 @@ def generate_residue_reference_dict(
     ----------
     config : SimulationConfig
         Simulation configuration. Forcefield definitions, temperature, and
-        the ligand parameterisation choices (``partial_charge_method``,
-        ``bespoke_ligand_forcefield``) all participate in the cache hash.
+        the ligand ``partial_charge_method`` all participate in the cache hash.
     ligands : list, optional
         Each entry is a 2-tuple ``(variant_molecules, transitions)`` or a
         3-tuple ``(variant_molecules, transitions, ring_flip_bonds)``
@@ -313,7 +318,12 @@ def generate_residue_reference_dict(
 
     references: dict[str, TitratableResidueReference] = {}
 
-    for residue_name, info in MODEL_COMPOUNDS.items():
+    for residue_name, info in tqdm(
+        MODEL_COMPOUNDS.items(),
+        total=len(MODEL_COMPOUNDS),
+        desc="Residue references",
+        unit="res",
+    ):
         pdb_name = info["pdb_name"]
         main_variant = info["main_variant"]
         variants = list(info["variants"])
@@ -334,9 +344,7 @@ def generate_residue_reference_dict(
         transitions_resolved = _resolve_named_transitions(raw_transitions, variants)
         _validate_transitions_graph(transitions_resolved, len(variants), root_idx=0)
 
-        reference_path = (
-            reference_energies_dir / f"{residue_name}_{config.hash()}.json"
-        )
+        reference_path = reference_energies_dir / f"{residue_name}_{config.hash()}.json"
         if reference_path.exists():
             logger.info(f"Skipping {residue_name}: cached at {reference_path}")
             cached = TitratableResidueReference.load(reference_path)
@@ -388,7 +396,7 @@ def generate_residue_reference_dict(
         references[residue_name] = reference
 
     if ligands is not None:
-        for entry in ligands:
+        for entry in tqdm(ligands, desc="Ligand references", unit="lig"):
             if len(entry) == 2:
                 variant_molecules, transitions = entry
                 lig_ring_flip_bonds: list[tuple[str, str]] = []

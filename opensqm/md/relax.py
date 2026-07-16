@@ -1,4 +1,5 @@
-# ruff: noqa: D100, D103, E501
+"""Relax protein-ligand complexes with restrained annealing and minimisation."""
+
 import copy
 import io
 import logging
@@ -8,12 +9,12 @@ from typing import Any, Final
 
 import numpy as np
 from openff.toolkit.topology import Molecule  # type: ignore
-from openff.toolkit.utils.toolkits import AmberToolsToolkitWrapper  # type: ignore
 from openmm import LangevinMiddleIntegrator, app, unit
 from openmm.app import Modeller, PDBFile
 from openmmforcefields.generators import SMIRNOFFTemplateGenerator
 from rdkit import Chem
 
+from opensqm.md.prepare import assign_ligand_charges
 from opensqm.md.restraints import add_distal_restraints, add_restraints
 from opensqm.rdkit_utils import get_coordinates, set_coordinates
 
@@ -24,9 +25,13 @@ logging.getLogger("openmmforcefields.generators.template_generators").setLevel(l
 def relax_complex(
     *, ligand: Chem.Mol, protein: Chem.Mol, simulation_time: float = 60
 ) -> tuple[Chem.Mol, Chem.Mol]:
+    """Relax a protein-ligand complex with implicit-solvent annealing.
 
+    Return the input ligand and protein RDKit molecules with their
+    coordinates updated to the relaxed complex geometry.
+    """
     offmol = Molecule.from_rdkit(ligand, allow_undefined_stereo=True)
-    offmol.assign_partial_charges("am1bcc", toolkit_registry=AmberToolsToolkitWrapper())
+    assign_ligand_charges(offmol)
 
     smirnoff = SMIRNOFFTemplateGenerator(forcefield="openff-2.2.0.offxml", molecules=offmol)
 
@@ -67,13 +72,14 @@ def relax_complex(
 
     with tempfile.TemporaryDirectory() as tmpdir:
         minimised_pdb_path = Path(tmpdir) / "com.pdb"
-        # OpenFF RDKit import uses int residue numbers; PDBFile.writeFile(keepIds=True) requires str ids.
+        # OpenFF RDKit import uses int residue numbers; PDBFile.writeFile(keepIds=True)
+        # requires str ids.
         for res in modeller.topology.residues():
             res.id = str(res.id)
         app.PDBFile.writeFile(
             modeller.topology,
             positions,
-            open(str(minimised_pdb_path), "w"),
+            minimised_pdb_path.open("w"),
             keepIds=True,
         )
         complex_opt = Chem.MolFromPDBFile(
@@ -118,6 +124,12 @@ def anneal_and_minimise(
     integrator_ps_per_step: float = 0.002,
     annealing_time: float = 60.0,
 ) -> unit.Quantity:
+    """Anneal then minimise positions in stages with position restraints.
+
+    Run restrained simulated annealing (50 -> 300 -> 50 K), then two restrained
+    energy minimisations and a final unrestrained minimisation, returning the
+    final positions.
+    """
     system = copy.deepcopy(system)
 
     integrator = LangevinMiddleIntegrator(
@@ -166,9 +178,7 @@ def anneal_and_minimise(
     simulation.context.setPositions(positions)
     simulation.minimizeEnergy(maxIterations=1000)
 
-    positions = simulation.context.getState(getPositions=True).getPositions()
-
-    return positions
+    return simulation.context.getState(getPositions=True).getPositions()
 
 
 if __name__ == "__main__":

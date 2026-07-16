@@ -1,4 +1,5 @@
-# ruff: noqa: D100, PLW2901, PLR2004, E501
+"""Select the MOZYME ligand configuration whose SCF energy best matches the exact SCF."""
+
 import tempfile
 from pathlib import Path
 
@@ -25,9 +26,12 @@ from opensqm.mopac.runner import _run_mopac_input_file, check_mopac_was_success
 
 
 def get_correct_ligand(ligand: Chem.Mol) -> tuple[Chem.Mol, float]:
-    """Find the MOZYME ligand configuration that best approximates the SCF energy *without* the MOZYME approximation."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir = Path(tmpdir)
+    """Find the MOZYME ligand configuration that best approximates the SCF energy.
+
+    "Best" means closest to the SCF energy computed *without* the MOZYME approximation.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir_str:
+        tmpdir = Path(tmpdir_str)
         mol_mop_path = tmpdir / "mol.mop"
         setpi_path = tmpdir / "setpi.txt"
         mopac_path = tmpdir / "run.mopac"

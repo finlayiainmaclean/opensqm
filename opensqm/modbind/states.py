@@ -19,10 +19,10 @@ from loguru import logger
 from openmm import XmlSerializer, unit
 from openmm.app import PDBxFile
 
+from opensqm.cph.run_cph import SystemState
 from opensqm.md.equilibrate import EquilibrationSettings, equilibrate
 from opensqm.md.prepare import build_complex_forcefield, create_system, prepare_complex
 from opensqm.md.restraints import add_distal_restraints
-from opensqm.run_cph import SystemState
 
 if TYPE_CHECKING:
     from openmm.app.topology import Topology
@@ -54,9 +54,6 @@ def _ligand_heavy_atom_indices(topology: Topology) -> list[int]:
 
 def build_bound_state_from_state(
     state: SystemState,
-    *,
-    ligand_rdmol: Chem.Mol | None = None,
-    bespoke_ligand_forcefield: bool = False,
 ) -> PreparedState:
     """Build the restrained bound-state system from a pre-equilibrated snapshot.
 
@@ -69,19 +66,15 @@ def build_bound_state_from_state(
     exact protonation state of this frame). ``ligand_rdmol`` is a fallback for
     when CpH did not record one.
     """
-    ligand = state.ligand if state.ligand is not None else ligand_rdmol
-    if ligand is None:
-        raise ValueError(
-            "build_bound_state_from_state needs a ligand: state.ligand is None "
-            "and no ligand_rdmol fallback was provided"
-        )
+    if state.ligand is None:
+        raise ValueError("build_bound_state_from_state needs a ligand: state.ligand is None ")
+
     topology = state.topology
     positions = state.positions
 
     logger.info("Building bound-state system from pre-equilibrated snapshot")
     forcefield = build_complex_forcefield(
-        ligand,
-        bespoke_ligand_forcefield=bespoke_ligand_forcefield,
+        state.ligand,
         solvent_mode="explicit",
     )
 
@@ -114,7 +107,6 @@ def build_bound_state_from_state(
 def build_unbound_state(
     ligand_rdmol: Chem.Mol,
     *,
-    bespoke_ligand_forcefield: bool = False,
     equilibration_config: EquilibrationSettings,
     box_shape: str = "cube",
     padding: unit.Quantity = 1.2 * unit.nanometer,
@@ -125,7 +117,6 @@ def build_unbound_state(
     logger.info("Preparing unbound ligand (ligand in water)")
     topology, positions, forcefield = prepare_complex(
         ligand_rdmol,
-        bespoke_ligand_forcefield=bespoke_ligand_forcefield,
         padding=padding_nm,
         protein_modeller=None,
         box_shape=box_shape,

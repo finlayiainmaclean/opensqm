@@ -1,13 +1,13 @@
 {
-  "residue_name": "ASP",
-  "main_variant": "ASH",
+  "residue_name": "CYS",
+  "main_variant": "CYS",
   "variant_names": [
-    "ASH",
-    "ASP"
+    "CYS",
+    "CYX"
   ],
   "variants": [
-    "ASH",
-    "ASP"
+    "CYS",
+    "CYX"
   ],
   "charges": [
     0,
@@ -15,13 +15,13 @@
   ],
   "reference_energies_kj_per_mole": [
     0.0,
-    -110.67246116683948
+    -322.37913116046605
   ],
   "transitions": [
     {
       "parent": 0,
       "child": 1,
-      "pka": 3.7
+      "pka": 8.33
     }
   ],
   "ring_flip_bonds": []

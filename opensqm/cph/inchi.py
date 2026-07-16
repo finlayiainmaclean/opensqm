@@ -1,3 +1,4 @@
+"""Non-standard InChIKey generation from RDKit molecules."""
 
 from rdkit import Chem
 
@@ -9,7 +10,7 @@ def _process_inchi_options(
     tautomerism_keto_enol: bool = True,
     tautomerism_15: bool = True,
     options: list[str] | None = None,
-):
+) -> str:
     inchi_options = []
 
     if fixed_hydrogen_layer:
@@ -30,8 +31,7 @@ def _process_inchi_options(
     if options is not None:
         inchi_options.extend(options)
 
-    inchi_options = " ".join(inchi_options)
-    return inchi_options
+    return " ".join(inchi_options)
 
 
 def to_inchikey_non_standard(

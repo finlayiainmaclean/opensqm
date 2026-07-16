@@ -334,7 +334,7 @@ def autodetect_flip_dihedrals(
             continue
 
         MIN_TS_ENERGY = 5
-        MAX_TS_ENERGY = 30
+        MAX_TS_ENERGY = 26.5
 
         print(f"Barrier height: {barrier_height}")
 
@@ -345,9 +345,7 @@ def autodetect_flip_dihedrals(
             a, b = bond
             identified_flips.add((a, b) if a < b else (b, a))
         else:
-            logger.info(
-                "--> [SKIP] Fluctuation rate not bound to simulation bottleneck regimes."
-            )
+            logger.info("--> [SKIP] Fluctuation rate not bound to simulation bottleneck regimes.")
 
     return identified_flips
 

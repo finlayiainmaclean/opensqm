@@ -8,8 +8,8 @@ import numpy as np
 import pytest
 from openmm import unit
 
-from opensqm.modbinddg.config import ModBindDGSettings
-from opensqm.modbinddg.reweight import (
+from opensqm.modbind.config import ModBindDGSettings
+from opensqm.modbind.reweight import (
     compute_delta_g,
     einstein_smoluchowski_unbound,
     predict_escape_temperature_calibrated,
@@ -24,24 +24,16 @@ def _single_bin_trajectory(n_frames: int, bin_coord: tuple[int, int, int]) -> np
 
 def test_uniform_temperature_matches_single_exponent() -> None:
     trajectories = [_single_bin_trajectory(3, (0, 0, 0)), _single_bin_trajectory(5, (0, 0, 0))]
-    single = reweight_state(
-        trajectories, bin_size=4.0, exponent=2.0, radius=10.0
-    )
-    per_replica = reweight_state(
-        trajectories, bin_size=4.0, exponent=(2.0, 2.0), radius=10.0
-    )
+    single = reweight_state(trajectories, bin_size=4.0, exponent=2.0, radius=10.0)
+    per_replica = reweight_state(trajectories, bin_size=4.0, exponent=(2.0, 2.0), radius=10.0)
     assert single.total == pytest.approx(per_replica.total)
     np.testing.assert_allclose(single.per_replica, per_replica.per_replica)
 
 
 def test_different_replica_temperatures_change_population() -> None:
     trajectories = [_single_bin_trajectory(4, (0, 0, 0)), _single_bin_trajectory(4, (0, 0, 0))]
-    low_t = reweight_state(
-        trajectories, bin_size=4.0, exponent=(1.5, 1.5), radius=10.0
-    )
-    mixed = reweight_state(
-        trajectories, bin_size=4.0, exponent=(1.5, 2.5), radius=10.0
-    )
+    low_t = reweight_state(trajectories, bin_size=4.0, exponent=(1.5, 1.5), radius=10.0)
+    mixed = reweight_state(trajectories, bin_size=4.0, exponent=(1.5, 2.5), radius=10.0)
     assert mixed.total != pytest.approx(low_t.total)
     assert mixed.per_replica[0] == pytest.approx(low_t.per_replica[0])
     assert mixed.per_replica[1] > low_t.per_replica[1]
@@ -85,11 +77,10 @@ def test_einstein_unbound_uses_completed_bound_replica_count() -> None:
     assert result["unbound_population"] == pytest.approx(pop5)
 
 
-
 def test_calibrated_escape_temperature_matches_650k_anchor() -> None:
-    # |ΔG°|≈5.5 kcal/mol ligands escape in ~1–4 ns at 650 K.
+    # |ΔG°|≈5.5 kcal/mol ligands escape in ~1-4 ns at 650 K.
     predicted = predict_escape_temperature_calibrated(
-        temperature_K=650.0,
+        temperature_k=650.0,
         escape_time_ns=2.0,
         binding_dg_kcal=-5.5,
         target_escape_time_ns=1.0,
@@ -99,13 +90,13 @@ def test_calibrated_escape_temperature_matches_650k_anchor() -> None:
 
 def test_calibrated_escape_temperature_weaker_binding_needs_cooler() -> None:
     strong = predict_escape_temperature_calibrated(
-        temperature_K=900.0,
+        temperature_k=900.0,
         escape_time_ns=0.2,
         binding_dg_kcal=-5.5,
         target_escape_time_ns=1.0,
     )
     weak = predict_escape_temperature_calibrated(
-        temperature_K=900.0,
+        temperature_k=900.0,
         escape_time_ns=0.2,
         binding_dg_kcal=-2.5,
         target_escape_time_ns=1.0,
@@ -116,7 +107,7 @@ def test_calibrated_escape_temperature_weaker_binding_needs_cooler() -> None:
 
 def test_calibrated_escape_temperature_fast_high_t_extrapolation() -> None:
     predicted = predict_escape_temperature_calibrated(
-        temperature_K=1200.0,
+        temperature_k=1200.0,
         escape_time_ns=0.07,
         binding_dg_kcal=-5.5,
         target_escape_time_ns=1.0,
@@ -127,7 +118,7 @@ def test_calibrated_escape_temperature_fast_high_t_extrapolation() -> None:
 def test_calibrated_escape_temperature_skips_none_or_zero_target() -> None:
     for target in (None, 0.0):
         predicted = predict_escape_temperature_calibrated(
-            temperature_K=650.0,
+            temperature_k=650.0,
             escape_time_ns=2.0,
             binding_dg_kcal=-5.5,
             target_escape_time_ns=target,

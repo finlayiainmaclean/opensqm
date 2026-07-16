@@ -1,7 +1,8 @@
 """Module containing vanilla MD protocols."""
 
 import logging
-from typing import Literal, Sequence
+from functools import lru_cache
+from typing import TYPE_CHECKING, Literal, Sequence
 
 from loguru import logger
 from openff.toolkit.topology import Molecule  # type: ignore
@@ -23,6 +24,11 @@ from rdkit import Chem
 from opensqm.md.rest import apply_rest
 from opensqm.utils import LIGAND_FORCEFIELD_DIR
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from openff.toolkit.utils.nagl_wrapper import NAGLToolkitWrapper
+
 logging.getLogger("openff.interchange.smirnoff").setLevel(logging.WARNING)
 
 _PROTEIN_FORCEFIELD_FILES = (
@@ -40,7 +46,15 @@ _IMPLICIT_FORCEFIELD_FILES = (
 
 SolventMode = Literal["explicit", "implicit"]
 
-_SOLVENT_RESIDUE_NAMES = frozenset({"HOH", "WAT", "SOL", "TIP3", "TIP", "NA", "CL", "K", "MG", "ZN", "CA", "CS"})
+PartialChargeMethod = Literal["nagl", "sqm"]
+DEFAULT_PARTIAL_CHARGE_METHOD: PartialChargeMethod = "nagl"
+
+# OpenFF's production graph-net AM1-BCC surrogate model.
+NAGL_MODEL = "openff-gnn-am1bcc-1.0.0.pt"
+
+_SOLVENT_RESIDUE_NAMES = frozenset(
+    {"HOH", "WAT", "SOL", "TIP3", "TIP", "NA", "CL", "K", "MG", "ZN", "CA", "CS"}
+)
 _ION_SYMBOLS = frozenset({"Na", "Cl", "K", "Mg", "Zn", "Ca", "Cs"})
 
 
@@ -63,24 +77,72 @@ def strip_solvent(modeller: Modeller) -> Modeller:
     return cleaned
 
 
+@lru_cache(maxsize=1)
+def _nagl_charger() -> "tuple[NAGLToolkitWrapper, Path]":
+    """Build the NAGL toolkit wrapper and resolve its AM1-BCC model path once.
+
+    NAGL is OpenFF's cross-platform graph-net surrogate for AM1-BCC. Its native
+    PyTorch backend needs no ``dgl``, so it works on macOS. Cached so the
+    wrapper build and model lookup happen at most once per process.
+    """
+    from openff.nagl_models import validate_nagl_model_path
+    from openff.toolkit.utils.nagl_wrapper import NAGLToolkitWrapper
+
+    return NAGLToolkitWrapper(), validate_nagl_model_path(NAGL_MODEL)
+
+
+def _assign_sqm_charges(ligand: Molecule) -> None:
+    """Assign AM1-BCC charges with AmberTools (the ``sqm`` semi-empirical engine)."""
+    # Reuse the molecule's existing conformer(s) instead of letting the
+    # toolkit regenerate one. OpenFF otherwise embeds a fresh ETKDG
+    # conformer, and for large multi-titratable ligands (e.g. the CpH
+    # protomers here, with aromatic-NH3+ / free -COOH groups) that can
+    # seed a geometry whose AM1 minimisation never converges in sqm,
+    # making antechamber abort with a fatal error. The pre-built
+    # protomer conformers are well-formed, so passing them keeps sqm
+    # well-behaved.
+    use_conformers = ligand.conformers if ligand.n_conformers else None
+    ligand.assign_partial_charges(
+        "am1bcc",
+        toolkit_registry=AmberToolsToolkitWrapper(),
+        use_conformers=use_conformers,
+    )
+
+
 def assign_ligand_charges(
     ligand: Molecule,
-    partial_charge_method: Literal["am1bcc"] = "am1bcc",
+    partial_charge_method: PartialChargeMethod = DEFAULT_PARTIAL_CHARGE_METHOD,
 ) -> None:
-    """Assign partial charges to the ligand."""
+    """Assign partial charges to the ligand.
+
+    ``nagl`` (the default) uses OpenFF's cross-platform GNN AM1-BCC model. It
+    ships a chemical-domain check and raises ``ValueError`` for chemistry
+    outside its training set (unusual bonds/elements); any such failure — or a
+    backend error — falls back to ``sqm``. ``sqm`` runs AmberTools AM1-BCC
+    directly, reusing the molecule's existing conformer(s) when present.
+    """
     if ligand.partial_charges is not None:
         return
     match partial_charge_method:
-        case "am1bcc":
-            toolkit_registry = AmberToolsToolkitWrapper()
-            ligand.assign_partial_charges("am1bcc", toolkit_registry=toolkit_registry)
+        case "nagl":
+            try:
+                wrapper, model_path = _nagl_charger()
+                ligand.assign_partial_charges(model_path, toolkit_registry=wrapper)
+            except Exception as exc:
+                # Fall back to sqm on any NAGL failure (not installed, backend
+                # error, or chemistry outside the model's chemical domain).
+                logger.warning(
+                    f"NAGL charges failed ({type(exc).__name__}: {exc}); falling back to sqm"
+                )
+                _assign_sqm_charges(ligand)
+        case "sqm":
+            _assign_sqm_charges(ligand)
 
 
 def get_ligand_forcefield(
     ligand: Molecule | list[Molecule],
-    bespoke_ligand_forcefield: bool = False,
     forcefield: ForceField | None = None,
-    partial_charge_method: Literal["am1bcc"] = "am1bcc",
+    partial_charge_method: PartialChargeMethod = DEFAULT_PARTIAL_CHARGE_METHOD,
 ) -> ForceField:
     """Register a SMIRNOFF template generator per ligand on a ForceField.
 
@@ -88,14 +150,11 @@ def get_ligand_forcefield(
     protonation states of the same ligand for constant-pH simulations).
     Partial charges are assigned to each molecule if not already present.
 
-    When `bespoke_ligand_forcefield` is True, `generate_bespoke_offxml` is
-    called once per molecule and the resulting OFFXML is used as the base
-    forcefield for that molecule's `SMIRNOFFTemplateGenerator`. If bespoke
-    fitting fails or returns nothing, the molecule falls back to the standard
-    `openff-2.2.0.offxml`. Each molecule gets its own template generator
-    registered on the forcefield; OpenMM's residue matching iterates through
-    the registered generators and each one only claims its own molecule (via
-    OpenFF's isomorphism check), so they coexist without conflict.
+    Each molecule is parameterised with the standard `openff-2.2.0.offxml`
+    (Sage) forcefield and gets its own template generator registered on the
+    forcefield; OpenMM's residue matching iterates through the registered
+    generators and each one only claims its own molecule (via OpenFF's
+    isomorphism check), so they coexist without conflict.
 
     If `forcefield` is None, a fresh empty `app.ForceField()` is created and
     returned. Otherwise the SMIRNOFF generators are registered on the supplied
@@ -111,29 +170,14 @@ def get_ligand_forcefield(
     standard_smirnoff_cache = (LIGAND_FORCEFIELD_DIR / "smirnoff.json").resolve()
 
     for lig in ligands:
-        ligand_forcefield_file: str | None = None
-        if bespoke_ligand_forcefield:
-            ligand_forcefield_file = None
-
-            # try:
-            #     bespoke_path = generate_bespoke_offxml(lig)
-            # except Exception as e:
-            #     logger.error(f"Failed to generate bespoke forcefield for {lig.to_smiles()}: {e}")
-            #     bespoke_path = None
-            # ligand_forcefield_file = (
-            #     str(Path(bespoke_path).resolve()) if bespoke_path else None
-            # )
-
         smirnoff = SMIRNOFFTemplateGenerator(
-            forcefield=ligand_forcefield_file or "openff-2.2.0.offxml",
+            forcefield="openff-2.2.0.offxml",
             molecules=lig,
             cache=str(standard_smirnoff_cache),
         )
         forcefield.registerTemplateGenerator(smirnoff.generator)
 
     return forcefield
-
-
 
 
 def solvate_ligand(
@@ -206,7 +250,6 @@ def prepare_system(
     protein_modeller: Modeller | None = None,
     small_molecules: Sequence[tuple[Chem.Mol | Molecule, str]] | None = None,
     padding: float = 1.2,
-    bespoke_ligand_forcefield: bool = True,
     ionic_strength: float = 0.15,
     box_shape: str = "cube",
     solvent_mode: SolventMode = "explicit",
@@ -214,7 +257,9 @@ def prepare_system(
     """Build a system from optional small molecules and/or protein."""
     if not small_molecules:
         if protein_modeller is None:
-            raise ValueError("prepare_system requires protein_modeller when small_molecules is empty")
+            raise ValueError(
+                "prepare_system requires protein_modeller when small_molecules is empty"
+            )
         if solvent_mode == "implicit":
             raise ValueError("implicit solvent requires at least one small molecule")
         return prepare_protein(
@@ -233,7 +278,7 @@ def prepare_system(
         else:
             modeller.add(lig_top, lig_pos)
 
-    forcefield = get_ligand_forcefield(offmols, bespoke_ligand_forcefield)
+    forcefield = get_ligand_forcefield(offmols)
     if solvent_mode == "explicit":
         forcefield.loadFile(_PROTEIN_FORCEFIELD_FILES)
     else:
@@ -259,7 +304,7 @@ def prepare_system(
 
 
 def prepare_complex(
-    ligand: Chem.Mol | Molecule, bespoke_ligand_forcefield: bool = True,
+    ligand: Chem.Mol | Molecule,
     padding: float = 1.2,
     protein_modeller: Modeller | None = None,
     box_shape: str = "cube",
@@ -270,7 +315,6 @@ def prepare_complex(
         protein_modeller=protein_modeller,
         small_molecules=[(ligand, "LIG")],
         padding=padding,
-        bespoke_ligand_forcefield=bespoke_ligand_forcefield,
         box_shape=box_shape,
         solvent_mode=solvent_mode,
     )
@@ -279,7 +323,6 @@ def prepare_complex(
 def build_complex_forcefield(
     ligand: Chem.Mol | Molecule,
     *,
-    bespoke_ligand_forcefield: bool = True,
     solvent_mode: SolventMode = "explicit",
 ) -> ForceField:
     """Build a ForceField for an already-assembled ligand-protein topology.
@@ -293,7 +336,7 @@ def build_complex_forcefield(
         offmol = ligand
     else:
         offmol = Molecule.from_rdkit(ligand, allow_undefined_stereo=True)
-    forcefield = get_ligand_forcefield([offmol], bespoke_ligand_forcefield)
+    forcefield = get_ligand_forcefield([offmol])
     if solvent_mode == "explicit":
         forcefield.loadFile(_PROTEIN_FORCEFIELD_FILES)
     else:
@@ -355,14 +398,9 @@ def create_system(
     return system
 
 
-
 def create_integrator(
     integrator_ps_per_step: OpenMMQuantity[unit.picosecond],
     temperature: OpenMMQuantity[unit.kelvin] = 300 * unit.kelvin,
 ) -> LangevinMiddleIntegrator:
     """Create a Langevin Middle Integrator at the given temperature."""
-    return LangevinMiddleIntegrator(
-        temperature,
-        1 / unit.picosecond,
-        integrator_ps_per_step
-    )
+    return LangevinMiddleIntegrator(temperature, 1 / unit.picosecond, integrator_ps_per_step)

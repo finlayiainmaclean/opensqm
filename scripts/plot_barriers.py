@@ -10,7 +10,7 @@ import numpy as np
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
-from opensqm.torsion_scanner import get_barrier_kcal  # noqa: E402
+from opensqm.torsion_scanner import get_barrier_kcal  # noqa: E402  (import follows sys.path setup)
 
 
 def main():

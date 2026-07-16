@@ -1,27 +1,27 @@
 {
-  "residue_name": "CYS",
-  "main_variant": "CYS",
+  "residue_name": "LYS",
+  "main_variant": "LYS",
   "variant_names": [
-    "CYS",
-    "CYX"
+    "LYS",
+    "LYN"
   ],
   "variants": [
-    "CYS",
-    "CYX"
+    "LYS",
+    "LYN"
   ],
   "charges": [
-    0,
-    -1
+    1,
+    0
   ],
   "reference_energies_kj_per_mole": [
     0.0,
-    -324.17685698329933
+    -86.30443368011083
   ],
   "transitions": [
     {
       "parent": 0,
       "child": 1,
-      "pka": 8.33
+      "pka": 10.4
     }
   ],
   "ring_flip_bonds": []

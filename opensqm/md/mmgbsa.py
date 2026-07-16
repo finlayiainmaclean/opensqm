@@ -1,6 +1,7 @@
 """Module for calculating MMGBSA interaction energies."""
 
 import copy
+from pathlib import Path
 from typing import Any
 
 import mdtraj as md
@@ -62,21 +63,17 @@ def make_system(topology: Topology, forcefield: ForceField) -> Any:
     openmm.System
         The created system.
     """
-    system = forcefield.createSystem(
+    return forcefield.createSystem(
         topology,
         nonbondedMethod=CutoffNonPeriodic,
         constraints=HBonds,
     )
 
-    return system
-
 
 def calculate_average_waters_per_residue(
     traj: md.Trajectory, cutoff: float = 0.4
 ) -> dict[int, float]:
-    """
-    Calculate the average number of water molecules within a cutoff distance
-    of each protein residue over a trajectory.
+    """Calculate the average number of waters near each protein residue over a trajectory.
 
     Parameters
     ----------
@@ -174,8 +171,7 @@ def get_interaction_energy(
         ligand_rdmol = Chem.AddHs(Chem.MolFromMolFile(ligand_path, removeHs=False), addCoords=True)
         offmol = Molecule.from_rdkit(ligand_rdmol, allow_undefined_stereo=True)
 
-    # Image in mdtraj
-    imaged_traj_path = str(traj_path).replace(".dcd", "_imaged.dcd")
+    # Image in mdtraj (kept in memory; the imaged trajectory is never persisted)
     ref = md.load(str(pdb_path))
     traj_md = md.load(str(traj_path), top=str(pdb_path))
     if frame_indices is not None:
@@ -185,7 +181,6 @@ def get_interaction_energy(
     traj_md = traj_md.superpose(
         traj_md[0], atom_indices=protein_idxs, ref_atom_indices=protein_idxs
     )
-    traj_md.save(imaged_traj_path)
 
     # Clean up protein/ligand
     # We want: protein, the ligand, and all waters.
@@ -246,13 +241,13 @@ def get_interaction_energy(
     traj_closest = md.Trajectory(xyz=closest_xyz, topology=openmm_top_mdtraj)
 
     # Save a PDB as the topology and DCD for the trajectory
-    traj_closest[0].save_pdb(str(close_top_path).replace(".prmtop", ".pdb"))
+    traj_closest[0].save_pdb(str(close_top_path))
     traj_closest.save_dcd(str(close_traj_path))
 
     lig_mask = traj_closest.topology.select(f"resname {ligand_resname}")
     prot_mask = traj_closest.topology.select(f"not resname {ligand_resname}")
 
-    forcefield_complex = get_ligand_forcefield(offmol, True)
+    forcefield_complex = get_ligand_forcefield(offmol)
     forcefield_ligand = copy.deepcopy(forcefield_complex)
     forcefield_ligand.loadFile("implicit/obc1.xml")
 
@@ -277,7 +272,6 @@ def get_interaction_energy(
     system_ligand = make_system(ligand.topology, forcefield_ligand)
     system_protein = make_system(protein.topology, forcefield_protein)
     system_complex = make_system(complex.topology, forcefield_complex)
-
 
     integrator_complex = LangevinMiddleIntegrator(
         300 * unit.kelvin, 1 / unit.picosecond, 0.002 * unit.picoseconds
@@ -337,7 +331,7 @@ def get_interaction_energy(
     traj_final = md.Trajectory(xyz=final_eq_xyz, topology=openmm_top_mdtraj)
     traj_final.save_dcd(str(close_traj_path))
 
-    return energies, rmsd, str(close_top_path).replace(".prmtop", ".pdb"), str(close_traj_path)
+    return energies, rmsd, str(close_top_path), str(close_traj_path)
 
 
 if __name__ == "__main__":
@@ -349,18 +343,16 @@ if __name__ == "__main__":
     ligand_rdmol = Chem.MolFromMolFile(ligand, removeHs=False)
     protein = PDBFile(protein)
 
-    topology, positions, forcefield = prepare_complex(
-        ligand_rdmol, protein, bespoke_ligand_forcefield=True
-    )
+    topology, positions, forcefield = prepare_complex(ligand_rdmol, protein)
 
-    PDBFile.writeFile(topology, positions, open("/tmp/com.pdb", "w"), keepIds=True)
+    PDBFile.writeFile(topology, positions, Path("/tmp/com.pdb").open("w"), keepIds=True)
 
     energies, rmsd, close_top_path, close_traj_path = get_interaction_energy(
         ligand_path=ligand,
         pdb_path="/tmp/com.pdb",
         traj_path="/tmp/com.pdb",
         close_traj_path="/tmp/com.close.dcd",
-        close_top_path="/tmp/com.close.prmtop",
+        close_top_path="/tmp/com.close.pdb",
     )
     print(energies)
     print(rmsd)

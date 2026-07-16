@@ -1,14 +1,23 @@
+"""Constant-pH molecular-dynamics machinery ported from OpenMM.
+
+Defines :class:`ConstantPH` (the constant-pH / simulated-tempering MC driver),
+the per-residue titration state containers (:class:`ResidueState`,
+:class:`ResidueTitration`), and the helpers used to select which topology
+residues to titrate in a complex.
+"""
+
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
-from openmm import Context, GBSAOBCForce, NonbondedForce
-from openmm.app import Modeller, Simulation, element
+from loguru import logger
+from openmm import Context, GBSAOBCForce, NonbondedForce, Platform, System, unit
+from openmm.app import ForceField, Modeller, PDBFile, Residue, Simulation, Topology, element
 from openmm.app.forcefield import NonbondedGenerator
 from openmm.app.internal import compiled
 from openmm.unit import MOLAR_GAS_CONSTANT_R, elementary_charge, nanometers
@@ -29,6 +38,7 @@ if TYPE_CHECKING:
     from openff.toolkit.topology import Molecule  # type: ignore
 
     from opensqm.cph.reference_energy.models import TitratableResidueReference
+    from opensqm.cph.reference_energy.types import VariantSpec
     from opensqm.cph.simulation_config import ConstantpHSettings
 
 
@@ -43,9 +53,10 @@ DEFAULT_RING_FLIP_ANGLES: tuple[float, ...] = (180.0,)
 
 @dataclass
 class _RingFlipRecord:
-    """Per-residue terminal-group rotation move, resolved against ConstantPH's
-    internal explicit and implicit topologies (both of which have had
-    ``Modeller.addHydrogens`` called on them).
+    """Per-residue terminal-group rotation move.
+
+    Resolved against ConstantPH's internal explicit and implicit topologies
+    (both of which have had ``Modeller.addHydrogens`` called on them).
     """
 
     angles: list[float]
@@ -54,12 +65,21 @@ class _RingFlipRecord:
 
 
 class ResidueState(object):
-    def __init__(self, residueIndex, atomIndices, particleParameters, exceptionParameters, numHydrogens):
-        self.residueIndex = residueIndex
-        self.atomIndices = atomIndices
-        self.particleParameters = particleParameters
-        self.exceptionParameters = exceptionParameters
-        self.numHydrogens = numHydrogens
+    """Force-field parameters for one protonation variant of a titratable residue."""
+
+    def __init__(
+        self,
+        residue_index: int,
+        atom_indices: dict[str, int],
+        particle_parameters: dict[int, dict[str, Any]],
+        exception_parameters: dict[int, dict[Any, Any]],
+        num_hydrogens: int,
+    ) -> None:
+        self.residue_index = residue_index
+        self.atom_indices = atom_indices
+        self.particle_parameters = particle_parameters
+        self.exception_parameters = exception_parameters
+        self.num_hydrogens = num_hydrogens
 
 
 @dataclass
@@ -82,12 +102,18 @@ class ResidueTitration:
     """
 
     reference: "TitratableResidueReference"
-    referenceEnergies: list = field(default_factory=list)
-    explicitStates: list = field(default_factory=list)
-    implicitStates: list = field(default_factory=list)
-    explicitHydrogenIndices: list = field(default_factory=list)
-    protonatedIndex: int = -1
-    currentIndex: int = -1
+    reference_energies: list = field(default_factory=list)
+    explicit_states: list = field(default_factory=list)
+    implicit_states: list = field(default_factory=list)
+    explicit_hydrogen_indices: list = field(default_factory=list)
+    protonated_index: int = -1
+    current_index: int = -1
+    # Variant indices the MC may occupy for this residue. ``None`` (the default)
+    # allows every built variant. A subset forbids the excluded variants as both
+    # proposal targets and the active state - used to mask out a charge-changing
+    # variant (e.g. histidine's charged HIP) while keeping the charge-neutral
+    # tautomer flip (HID<->HIE). See ``run_cph._propka_selection``.
+    allowed_state_indices: "set[int] | None" = None
     n_state_attempts: int = 0
     n_state_accepted: int = 0
     n_standalone_flip_attempts: int = 0
@@ -95,54 +121,55 @@ class ResidueTitration:
     n_coupled_flip_attempts: int = 0
     n_coupled_flip_accepted: int = 0
 
-    def __post_init__(self):
-        if not self.referenceEnergies:
-            self.referenceEnergies = list(self.reference.reference_energies)
+    def __post_init__(self) -> None:
+        """Materialise a mutable local copy of the shared reference energies."""
+        if not self.reference_energies:
+            self.reference_energies = list(self.reference.reference_energies)
 
     @property
-    def variants(self):
+    def variants(self) -> "list[VariantSpec]":
         """Per-state variants as accepted by ``Modeller.addHydrogens``."""
         return self.reference.variants
 
     @property
-    def variant_names(self):
+    def variant_names(self) -> list[str]:
         """Per-state human-readable variant labels (e.g. ``["HIP", "HID", "HIE"]``)."""
         return self.reference.variant_names
 
     @property
-    def charges(self):
+    def charges(self) -> list[int]:
         """Per-state formal charges (e.g. ``[1, 0, 0]`` for HIS)."""
         return self.reference.charges
 
     @property
-    def currentCharge(self):
+    def current_charge(self) -> int | None:
         """Formal charge of the currently-active variant, or ``None`` if unknown."""
-        if self.currentIndex < 0:
+        if self.current_index < 0:
             return None
-        return self.charges[self.currentIndex]
+        return self.charges[self.current_index]
 
     @property
-    def state_acceptance_rate(self):
+    def state_acceptance_rate(self) -> float:
         """Fraction of state-swap proposals touching this residue that were accepted."""
         if self.n_state_attempts == 0:
             return 0.0
         return self.n_state_accepted / self.n_state_attempts
 
     @property
-    def standalone_flip_acceptance_rate(self):
+    def standalone_flip_acceptance_rate(self) -> float:
         """Fraction of stand-alone ring-flip proposals on this residue that were accepted."""
         if self.n_standalone_flip_attempts == 0:
             return 0.0
         return self.n_standalone_flip_accepted / self.n_standalone_flip_attempts
 
     @property
-    def coupled_flip_acceptance_rate(self):
+    def coupled_flip_acceptance_rate(self) -> float:
         """Fraction of (state-swap + flip) coupled proposals on this residue that were accepted."""
         if self.n_coupled_flip_attempts == 0:
             return 0.0
         return self.n_coupled_flip_accepted / self.n_coupled_flip_attempts
 
-    def reset_stats(self):
+    def reset_stats(self) -> None:
         """Zero all MC counters for this residue."""
         self.n_state_attempts = 0
         self.n_state_accepted = 0
@@ -172,15 +199,15 @@ def _min_image_distance_matrix(
         diffs -= c * np.round(diffs[..., 2:3] / c[2])
         diffs -= b * np.round(diffs[..., 1:2] / b[1])
         diffs -= a * np.round(diffs[..., 0:1] / a[0])
-    return np.sqrt((diffs ** 2).sum(-1))
+    return np.sqrt((diffs**2).sum(-1))
 
 
 def select_titratable_residues(
-    topology,
-    positions,
+    topology: Topology,
+    positions: unit.Quantity,
     references: "dict[str, TitratableResidueReference]",
     ligand_residue_name: str | Sequence[str] | None = None,
-    cutoff=None,
+    cutoff: unit.Quantity | None = None,
 ) -> list[int]:
     """Pick the titratable residue indices to drive in a complex simulation.
 
@@ -227,23 +254,17 @@ def select_titratable_residues(
     from openmm import unit  # local import to avoid hard dep at module load
 
     if cutoff is None:
-        return sorted(
-            r.index for r in topology.residues() if r.name in references
-        )
+        return sorted(r.index for r in topology.residues() if r.name in references)
 
     if ligand_residue_name is None:
-        raise ValueError(
-            "ligand_residue_name is required when cutoff is not None"
-        )
+        raise ValueError("ligand_residue_name is required when cutoff is not None")
 
     if isinstance(ligand_residue_name, str):
         anchor_residue_names = [ligand_residue_name]
     else:
         anchor_residue_names = list(ligand_residue_name)
     if not anchor_residue_names:
-        raise ValueError(
-            "ligand_residue_name is required when cutoff is not None"
-        )
+        raise ValueError("ligand_residue_name is required when cutoff is not None")
 
     cutoff_nm = float(cutoff.value_in_unit(unit.nanometer))
     if hasattr(positions, "value_in_unit"):
@@ -260,9 +281,7 @@ def select_titratable_residues(
         )
         # Reduced-form sanity check: diagonal must be positive. A degenerate
         # box (zero-length vector) would make minimum-image undefined.
-        if not (box_vectors_nm[0, 0] > 0
-                and box_vectors_nm[1, 1] > 0
-                and box_vectors_nm[2, 2] > 0):
+        if not (box_vectors_nm[0, 0] > 0 and box_vectors_nm[1, 1] > 0 and box_vectors_nm[2, 2] > 0):
             raise ValueError(
                 "Periodic box vectors are degenerate; cannot compute "
                 f"minimum-image distances. Got {box_vectors_nm!r}"
@@ -275,9 +294,7 @@ def select_titratable_residues(
         for atom in residue.atoms()
     ]
     if not ligand_atom_indices:
-        raise RuntimeError(
-            f"No residues named {anchor_residue_names!r} found in topology"
-        )
+        raise RuntimeError(f"No residues named {anchor_residue_names!r} found in topology")
     ligand_positions_nm = all_positions_nm[ligand_atom_indices]
 
     selected: list[int] = []
@@ -297,9 +314,70 @@ def select_titratable_residues(
     return sorted(selected)
 
 
+# Monatomic ions added by ``Modeller.addSolvent``; single-atom residues of one
+# of these elements are treated as solvent alongside water.
+_ION_ELEMENTS = (
+    element.cesium,
+    element.potassium,
+    element.lithium,
+    element.sodium,
+    element.rubidium,
+    element.chlorine,
+    element.bromine,
+    element.fluorine,
+    element.iodine,
+)
+
+
+def _is_solvent_residue(residue: Residue) -> bool:
+    """Identify water or a single-atom monatomic ion (added by solvation)."""
+    return residue.name == "HOH" or (
+        len(residue) == 1 and next(residue.atoms()).element in _ION_ELEMENTS
+    )
+
+
+def residue_label(residue: Residue) -> str:
+    """Return a human-readable identifier using the residue's *original* structure numbering.
+
+    Returns ``"<resname> <resid> <chain>"`` (e.g. ``"GLU 404 A"``), matching the
+    numbering PROPKA and the input PDB report; the chain suffix is dropped when
+    the residue has no chain id. Unlike the 0-based ``residue.index`` (which is a
+    topology-internal offset), ``residue.id`` is carried through solvation,
+    equilibration, and ``Modeller.addHydrogens`` unchanged, so this label is
+    stable across every stage of a constant-pH run and is the identifier that
+    should be shown to users.
+    """
+    chain = (residue.chain.id or "").strip()
+    return f"{residue.name} {residue.id}{f' {chain}' if chain else ''}"
+
+
+def residue_label_slug(residue: Residue) -> str:
+    """Return a filesystem-safe form of :func:`residue_label` (spaces to underscores)."""
+    return residue_label(residue).replace(" ", "_")
+
+
+def write_solute_pdb(topology: Topology, positions: "unit.Quantity", path: Path | str) -> None:
+    """Write ``topology``/``positions`` to ``path`` with solvent stripped.
+
+    Constant-pH residue selection loads this PDB into RDKit to evaluate the
+    RDSL query. A fully solvated box has more than 9999 residues, and OpenMM's
+    PDB writer switches residue numbers past 9999 to hexadecimal, which RDKit's
+    parser rejects outright (``MolFromPDBFile`` returns ``None`` after warning
+    "Problem with residue number ..."). Water and ions are never titration
+    candidates and are not referenced by the selection query, so dropping them
+    keeps the retained protein/ligand residue numbers small (and thus parseable)
+    while preserving the residue keys used to map RDSL hits back onto the
+    OpenMM topology.
+    """
+    modeller = Modeller(topology, positions)
+    modeller.delete([r for r in modeller.topology.residues() if _is_solvent_residue(r)])
+    with Path(path).open("w") as pdb_file:
+        PDBFile.writeFile(modeller.topology, modeller.positions, pdb_file, keepIds=True)
+
+
 def select_titratable_residues_by_rdsl(
-    topology,
-    pdb_path,
+    topology: Topology,
+    pdb_path: Path | str,
     references: "dict[str, TitratableResidueReference]",
     query: str,
 ) -> list[int]:
@@ -309,16 +387,12 @@ def select_titratable_residues_by_rdsl(
     selection is the subset whose atoms match ``query`` on the PDB structure
     (loaded into RDKit with residue IDs preserved).
     """
-    cocomplex = Chem.MolFromPDBFile(
-        str(Path(pdb_path)), sanitize=False, removeHs=False
-    )
+    cocomplex = Chem.MolFromPDBFile(str(Path(pdb_path)), sanitize=False, removeHs=False)
     if cocomplex is None:
         raise RuntimeError(f"Failed to load PDB for RDSL selection: {pdb_path}")
 
     candidate_indices = {
-        residue.index
-        for residue in topology.residues()
-        if residue.name in references
+        residue.index for residue in topology.residues() if residue.name in references
     }
     if not candidate_indices:
         return []
@@ -327,8 +401,7 @@ def select_titratable_residues_by_rdsl(
     selected_residue_keys = {
         key
         for atom_idx in selected_atom_ids
-        if (key := pdb_residue_key_from_rdkit(cocomplex.GetAtomWithIdx(int(atom_idx))))
-        is not None
+        if (key := pdb_residue_key_from_rdkit(cocomplex.GetAtomWithIdx(int(atom_idx)))) is not None
     }
     selected_residue_indices = map_pdb_residue_keys_to_openmm_indices(
         topology, selected_residue_keys
@@ -336,10 +409,8 @@ def select_titratable_residues_by_rdsl(
     return sorted(candidate_indices & selected_residue_indices)
 
 
-
-
-def _disulfide_bonded_residue_indices(topology) -> set[int]:
-    """Indices of CYS residues whose SG is bonded to another residue's SG.
+def _disulfide_bonded_residue_indices(topology: Topology) -> set[int]:
+    """Return indices of CYS residues whose SG is bonded to another residue's SG.
 
     Disulfide cysteines are oxidized (CYX): the sulfur carries no titratable
     proton, and the extra S-S external bond means the free-thiol CYS template
@@ -360,7 +431,7 @@ def _disulfide_bonded_residue_indices(topology) -> set[int]:
 
 
 def select_titratable_residue_indices(
-    topology,
+    topology: Topology,
     pdb_path: Path | str,
     references: "dict[str, TitratableResidueReference]",
     query: str | None = None,
@@ -382,18 +453,34 @@ def select_titratable_residue_indices(
     """
     if query is None:
         titratable = {
-            residue.index
-            for residue in topology.residues()
-            if residue.name in references
+            residue.index for residue in topology.residues() if residue.name in references
         }
     else:
-        titratable = set(
-            select_titratable_residues_by_rdsl(topology, pdb_path, references, query)
-        )
+        titratable = set(select_titratable_residues_by_rdsl(topology, pdb_path, references, query))
 
     titratable -= _disulfide_bonded_residue_indices(topology)
 
     return sorted(titratable)
+
+
+def _union_hydrogen_layout(variants: "list[VariantSpec]") -> "list[tuple[str, str]]":
+    """Union (by hydrogen name) of a residue's hydrogen-layout variants.
+
+    Each variant is a ``[(hydrogen_name, parent_name), ...]`` list; the
+    hydrogen names are consistent across variants (all derived from one
+    super-template), so a set-based dedup on the name yields every titratable
+    hydrogen that appears in *any* variant - the maximally-protonated layout.
+    Insertion order is preserved for reproducibility. Only meaningful for
+    hydrogen-layout (custom/ligand) variants, not string named variants.
+    """
+    seen: set[str] = set()
+    union: list[tuple[str, str]] = []
+    for variant in variants:
+        for h_name, parent_name in variant:
+            if h_name not in seen:
+                seen.add(h_name)
+                union.append((h_name, parent_name))
+    return union
 
 
 class ConstantPH(object):
@@ -445,6 +532,29 @@ class ConstantPH(object):
     weights : list, optional
         The weight factor to use for each pH in the simulated tempering
         algorithm. ``None`` triggers Wang-Landau auto-tuning.
+    initial_variant_indices : dict[int, int], optional
+        Map of topology residue index -> starting variant index. Residues
+        listed here begin in that protonation variant (its parameters are baked
+        into the Systems) instead of the fully-protonated default; residues not
+        listed keep the default. Used to seed near equilibrium - e.g.
+        PROPKA-predicted protonation for protein residues and the dominant
+        protomer for a ligand. ``None`` keeps the fully-protonated start.
+    allowed_variant_indices : dict[int, Iterable[int]], optional
+        Map of topology residue index -> the variant indices (into the
+        residue's ``reference.variants``) the MC is allowed to occupy. Residues
+        listed here can never enter or start in an excluded variant; residues
+        absent from the map may occupy any built variant. Used to forbid a
+        charge-changing state while keeping a charge-neutral tautomer flip -
+        e.g. restricting a histidine PROPKA predicts is neutral to ``[HID, HIE]``
+        so it still flips tautomer but never visits the charged HIP. ``None``
+        allows every variant of every residue.
+    simulated_tempering : bool, optional
+        When ``True`` (default) and more than one pH is supplied, each MC step
+        also proposes a simulated-tempering move across the pH ladder (requiring
+        tuned ``weights``). Pass ``False`` to pin the replica at its starting
+        pH index and drive protonation MC at that single pH only - used by
+        pH-REMD runs that place one fixed-pH replica per ladder rung, where the
+        simulated-tempering weights are unnecessary.
     platform : openmm.Platform, optional
     properties : dict, optional
         Platform-specific properties to pass to the Context's constructor.
@@ -452,19 +562,23 @@ class ConstantPH(object):
 
     def __init__(
         self,
-        topology,
-        positions,
-        pH,
+        topology: Topology,
+        positions: unit.Quantity,
+        ph: float | Sequence[float],
         config: "ConstantpHSettings",
         references: "dict[str, TitratableResidueReference]",
         titratable_residue_indices: Iterable[int],
         *,
         ligand_variant_molecules: "list[Molecule] | None" = None,
         ring_flip_angles: Sequence[float] | None = DEFAULT_RING_FLIP_ANGLES,
-        weights=None,
-        platform=None,
-        properties=None,
-    ):
+        weights: list[float] | None = None,
+        initial_variant_indices: "dict[int, int] | None" = None,
+        allowed_variant_indices: "dict[int, Iterable[int]] | None" = None,
+        simulated_tempering: bool = True,
+        log_transitions: bool = True,
+        platform: Platform | None = None,
+        properties: dict | None = None,
+    ) -> None:
         explicitForceField = config.get_explicit_forcefield(ligand_variant_molecules)
         implicitForceField = config.get_implicit_forcefield(ligand_variant_molecules)
         explicitArgs = config.explicit_params
@@ -473,10 +587,15 @@ class ConstantPH(object):
         relaxationIntegrator = config.relaxation_integrator
         self.config = config
         self.references = references
-        if not isinstance(pH, Sequence):
-            pH = [pH]
-        self.setPH(pH, weights)
+        if not isinstance(ph, Sequence):
+            ph = [ph]
+        self.set_ph(ph, weights)
         self.currentPHIndex = 0
+        self.simulated_tempering = simulated_tempering
+        # Emit an INFO line on each accepted protonation change / ring flip.
+        # Disabled during reference-energy fitting, which runs many MC steps over
+        # an internal pH scan and would otherwise flood the log.
+        self._log_transitions = log_transitions
         self._explicitArgs = explicitArgs
         self._implicitArgs = implicitArgs
         self.relaxationSteps = config.relaxation_steps
@@ -487,20 +606,31 @@ class ConstantPH(object):
         titratable_residue_indices = sorted(set(titratable_residue_indices))
         self.titrations: dict[int, ResidueTitration] = {}
         residueVariants: dict[int, list] = {}
-        for resIndex in titratable_residue_indices:
-            if resIndex not in residues_by_index:
+        for res_index in titratable_residue_indices:
+            if res_index not in residues_by_index:
                 raise ValueError(
-                    f"titratable residue index {resIndex} is not present in the topology"
+                    f"titratable residue index {res_index} is not present in the topology"
                 )
-            residue = residues_by_index[resIndex]
+            residue = residues_by_index[res_index]
             if residue.name not in references:
                 raise ValueError(
-                    f"residue {residue.name}.{resIndex} has no reference entry; "
+                    f"residue {residue_label(residue)} has no reference entry; "
                     f"available reference residue names: {sorted(references)}"
                 )
             reference = references[residue.name]
-            self.titrations[resIndex] = ResidueTitration(reference=reference)
-            residueVariants[resIndex] = list(reference.variants)
+            titration = ResidueTitration(reference=reference)
+            if allowed_variant_indices is not None and res_index in allowed_variant_indices:
+                allowed = {int(i) for i in allowed_variant_indices[res_index]}
+                n_variants = len(reference.variants)
+                if not allowed or any(not (0 <= i < n_variants) for i in allowed):
+                    raise ValueError(
+                        f"allowed_variant_indices for residue {residue_label(residue)} "
+                        f"must be a non-empty subset of range({n_variants}); got "
+                        f"{sorted(allowed_variant_indices[res_index])}"
+                    )
+                titration.allowed_state_indices = allowed
+            self.titrations[res_index] = titration
+            residueVariants[res_index] = list(reference.variants)
 
         implicitToExplicitResidueMap = []
         explicitToImplicitResidueMap = {}
@@ -508,13 +638,11 @@ class ConstantPH(object):
 
         # Build the implicit solvent topology by removing water and ions.
 
-        ionElements = (element.cesium, element.potassium, element.lithium, element.sodium, element.rubidium,
-                       element.chlorine, element.bromine, element.fluorine, element.iodine)
         for residue in topology.residues():
-            if residue.name == 'HOH' or (len(residue) == 1 and next(residue.atoms()).element in ionElements):
+            if _is_solvent_residue(residue):
                 solventResidues.append(residue)
             else:
-                implicitToExplicitResidueMap.append(residue.index-len(solventResidues))
+                implicitToExplicitResidueMap.append(residue.index - len(solventResidues))
         for i, j in enumerate(implicitToExplicitResidueMap):
             explicitToImplicitResidueMap[j] = i
         modeller = Modeller(topology, positions)
@@ -522,7 +650,8 @@ class ConstantPH(object):
         implicitTopology = modeller.topology
         implicitPositions = modeller.positions
 
-        # Loop over variants to construct a ResidueState for every variant of every titratable residue.
+        # Loop over variants to construct a ResidueState for every variant of
+        # every titratable residue.
 
         # ``Modeller.addHydrogens`` expects ``variants[i]`` to either be
         # ``None`` (use the default residue template) or one of the
@@ -537,14 +666,12 @@ class ConstantPH(object):
         # default template. Multi-variant residues whose main state
         # shares the PDB residue name (CYS/CYX, LYS/LYN) must keep the
         # explicit variant label so every protonation state is built.
-        explicit_residue_names = {
-            r.index: r.name for r in topology.residues()
-        }
-        implicit_residue_names = {
-            r.index: r.name for r in implicitTopology.residues()
-        }
+        explicit_residue_names = {r.index: r.name for r in topology.residues()}
+        implicit_residue_names = {r.index: r.name for r in implicitTopology.residues()}
 
-        def _to_modeller_variant(variant, residue_name, *, single_variant: bool):
+        def _to_modeller_variant(
+            variant: "VariantSpec | None", residue_name: str, *, single_variant: bool
+        ) -> "VariantSpec | None":
             # Only ring-flip-only residues (ASN/GLN) use their residue name
             # as the sole variant label. Passing that string to addHydrogens
             # trips OpenMM's "Illegal variant" check, so fall back to None.
@@ -556,25 +683,29 @@ class ConstantPH(object):
 
         variantIndex = 0
         finished = False
-        explicitVariants = [None]*topology.getNumResidues()
-        implicitVariants = [None]*implicitTopology.getNumResidues()
+        explicitVariants = [None] * topology.getNumResidues()
+        implicitVariants = [None] * implicitTopology.getNumResidues()
         while not finished:
             finished = True
 
             # Build the explicit solvent states.
 
             active_residue_indices: set[int] = set()
-            for resIndex, variants in residueVariants.items():
+            for res_index, variants in residueVariants.items():
                 if variantIndex < len(variants):
                     finished = False
-                    active_residue_indices.add(resIndex)
-                    explicitVariants[resIndex] = _to_modeller_variant(
+                    active_residue_indices.add(res_index)
+                    explicitVariants[res_index] = _to_modeller_variant(
                         variants[variantIndex],
-                        explicit_residue_names[resIndex],
+                        explicit_residue_names[res_index],
                         single_variant=len(variants) == 1,
                     )
-            explicitStates = self._findResidueStates(
-                topology, positions, explicitForceField, explicitVariants, explicitArgs,
+            explicit_states = self._find_residue_states(
+                topology,
+                positions,
+                explicitForceField,
+                explicitVariants,
+                explicitArgs,
                 record_residue_indices=active_residue_indices,
             )
 
@@ -591,137 +722,294 @@ class ConstantPH(object):
                             implicit_residue_names[implicitIndex],
                             single_variant=len(variants) == 1,
                         )
-            implicitStates = self._findResidueStates(
-                implicitTopology, implicitPositions, implicitForceField, implicitVariants, implicitArgs,
+            implicit_states = self._find_residue_states(
+                implicitTopology,
+                implicitPositions,
+                implicitForceField,
+                implicitVariants,
+                implicitArgs,
                 record_residue_indices=active_implicit_indices,
             )
-            assert len(explicitStates) == len(implicitStates)
+            assert len(explicit_states) == len(implicit_states)
 
             # Add them to the ResidueTitration.
 
-            for explicitState, implicitState in zip(explicitStates, implicitStates, strict=False):
-                titration = self.titrations[explicitState.residueIndex]
+            for explicitState, implicitState in zip(explicit_states, implicit_states, strict=False):
+                titration = self.titrations[explicitState.residue_index]
                 if variantIndex < len(titration.variants):
-                    titration.explicitStates.append(explicitState)
-                    titration.implicitStates.append(implicitState)
+                    titration.explicit_states.append(explicitState)
+                    titration.implicit_states.append(implicitState)
             variantIndex += 1
 
-        # Create final versions of the topologies, including the fully protonated versions of all residues.
+        # Create final versions of the topologies, including the fully protonated
+        # versions of all residues.
 
         for titration in self.titrations.values():
-            titration.protonatedIndex = int(np.argmax([len(state.atomIndices) for state in titration.explicitStates]))
-        variants = [None]*topology.getNumResidues()
-        for resIndex in residueVariants:
-            titration = self.titrations[resIndex]
-            variants[resIndex] = _to_modeller_variant(
-                titration.variants[titration.protonatedIndex],
-                explicit_residue_names[resIndex],
+            titration.protonated_index = int(
+                np.argmax([len(state.atom_indices) for state in titration.explicit_states])
+            )
+
+        # Master-topology hydrogen layout per titratable residue. String
+        # variants (standard amino acids) always include a fully-protonated
+        # named variant (HIP/ASH/GLH/LYS) that is a true superset, so keep the
+        # max-atom variant unchanged. Hydrogen-layout (custom/ligand) variants
+        # may be non-nested siblings - each protonating a different site - so no
+        # single variant is a superset; use the UNION of every variant's
+        # titratable hydrogens as the master topology, the only layout from
+        # which each variant can be recovered by zeroing the protons it lacks.
+        master_layout: dict[int, "VariantSpec"] = {}
+        list_form_residues: set[int] = set()
+        for res_index, titration in self.titrations.items():
+            protonated_variant = titration.variants[titration.protonated_index]
+            if isinstance(protonated_variant, list):
+                list_form_residues.add(res_index)
+                master_layout[res_index] = _union_hydrogen_layout(titration.variants)
+            else:
+                master_layout[res_index] = protonated_variant
+
+        explicit_master_variants: list = [None] * topology.getNumResidues()
+        for res_index in residueVariants:
+            titration = self.titrations[res_index]
+            explicit_master_variants[res_index] = _to_modeller_variant(
+                master_layout[res_index],
+                explicit_residue_names[res_index],
                 single_variant=len(titration.variants) == 1,
             )
-        modeller = Modeller(topology, positions)
-        modeller.addHydrogens(forcefield=explicitForceField, variants=variants)
-        self.explicitTopology = modeller.topology
-        explicitPositions = modeller.positions
-        variants = [None]*implicitTopology.getNumResidues()
+        implicit_master_variants: list = [None] * implicitTopology.getNumResidues()
         for implicitIndex, explicitIndex in enumerate(implicitToExplicitResidueMap):
             if explicitIndex in residueVariants:
                 titration = self.titrations[explicitIndex]
-                variants[implicitIndex] = _to_modeller_variant(
-                    titration.variants[titration.protonatedIndex],
+                implicit_master_variants[implicitIndex] = _to_modeller_variant(
+                    master_layout[explicitIndex],
                     implicit_residue_names[implicitIndex],
                     single_variant=len(titration.variants) == 1,
                 )
+
+        # For list-form (ligand/cofactor) residues the master topology carries
+        # the union of all protons, which is no sampled variant, so build a
+        # synthetic "union base" ResidueState (parameters for every union atom)
+        # to serve as the deep-copy source + zeroing template when rebuilding
+        # each real variant below. Built here - before the addHydrogens calls
+        # reassign ``implicitPositions`` - from the same pre-addHydrogens inputs
+        # and master-variant layout, so the auxiliary topology matches the
+        # master topology atom-for-atom.
+        explicit_union_base: dict[int, ResidueState] = {}
+        implicit_union_base: dict[int, ResidueState] = {}
+        if list_form_residues:
+            explicit_union_base = {
+                state.residue_index: state
+                for state in self._find_residue_states(
+                    topology,
+                    positions,
+                    explicitForceField,
+                    explicit_master_variants,
+                    explicitArgs,
+                    record_residue_indices=list_form_residues,
+                )
+            }
+            implicit_list_form = {explicitToImplicitResidueMap[r] for r in list_form_residues}
+            implicit_base_by_implicit = {
+                state.residue_index: state
+                for state in self._find_residue_states(
+                    implicitTopology,
+                    implicitPositions,
+                    implicitForceField,
+                    implicit_master_variants,
+                    implicitArgs,
+                    record_residue_indices=implicit_list_form,
+                )
+            }
+            implicit_union_base = {
+                r: implicit_base_by_implicit[explicitToImplicitResidueMap[r]]
+                for r in list_form_residues
+            }
+
+        modeller = Modeller(topology, positions)
+        modeller.addHydrogens(forcefield=explicitForceField, variants=explicit_master_variants)
+        self.explicitTopology = modeller.topology
+        explicit_positions = modeller.positions
         modeller = Modeller(implicitTopology, implicitPositions)
-        modeller.addHydrogens(forcefield=implicitForceField, variants=variants)
+        modeller.addHydrogens(forcefield=implicitForceField, variants=implicit_master_variants)
         self.implicitTopology = modeller.topology
         implicitPositions = modeller.positions
         explicitResidues = list(self.explicitTopology.residues())
         implicitResidues = list(self.implicitTopology.residues())
 
-        # Create systems for them.  Also create a third system that is identical to the explicit one,
-        # but freezes non-solvent atoms.
+        # Create systems for them.  Also create a third system that is identical
+        # to the explicit one, but freezes non-solvent atoms.
 
         explicitSystem = explicitForceField.createSystem(self.explicitTopology, **explicitArgs)
         implicitSystem = implicitForceField.createSystem(self.implicitTopology, **implicitArgs)
         relaxationSystem = deepcopy(explicitSystem)
         for residue in self.explicitTopology.residues():
-            if residue.name != 'HOH' and (len(residue) > 1 or next(residue.atoms()).element not in ionElements):
+            if residue.name != "HOH" and (
+                len(residue) > 1 or next(residue.atoms()).element not in _ION_ELEMENTS
+            ):
                 for atom in residue.atoms():
                     relaxationSystem.setParticleMass(atom.index, 0.0)
 
         # For each ResidueTitration, identify the fully protonated state.  Replace the other states
         # with ones that include all protons, setting the parameters of the missing ones to 0.
 
-        for resIndex, titration in self.titrations.items():
-            protonated = titration.protonatedIndex
-            titration.currentIndex = protonated
-            explicitProtonatedParams = titration.explicitStates[protonated].particleParameters
-            implicitProtonatedParams = titration.implicitStates[protonated].particleParameters
-            explicitProtonatedExceptionParams = titration.explicitStates[protonated].exceptionParameters
-            implicitProtonatedExceptionParams = titration.implicitStates[protonated].exceptionParameters
-            explicitAtomIndices = {atom.name: atom.index for atom in explicitResidues[resIndex].atoms()}
-            implicitAtomIndices = {atom.name: atom.index for atom in implicitResidues[explicitToImplicitResidueMap[resIndex]].atoms()}
-            for i in range(len(titration.explicitStates)):
-                if i != protonated:
-                    oldExplicit = titration.explicitStates[i]
-                    oldImplicit = titration.implicitStates[i]
-                    newExplicit = deepcopy(titration.explicitStates[protonated])
-                    newImplicit = deepcopy(titration.implicitStates[protonated])
-                    newExplicit.numHydrogens = oldExplicit.numHydrogens
-                    newImplicit.numHydrogens = oldImplicit.numHydrogens
-                    for forceIndex in newExplicit.particleParameters:
-                        params = oldExplicit.particleParameters[forceIndex]
-                        for atomName in newExplicit.particleParameters[forceIndex]:
-                            if atomName in params:
-                                newExplicit.particleParameters[forceIndex][atomName] = params[atomName]
-                            else:
-                                newExplicit.particleParameters[forceIndex][atomName] = self._get_zero_parameters(explicitProtonatedParams[forceIndex][atomName], explicitSystem.getForce(forceIndex))
-                                titration.explicitHydrogenIndices.append(explicitAtomIndices[atomName])
-                    for forceIndex in newExplicit.exceptionParameters:
-                        params = oldExplicit.exceptionParameters[forceIndex]
-                        for key in newExplicit.exceptionParameters[forceIndex]:
-                            if key in params:
-                                newExplicit.exceptionParameters[forceIndex][key] = params[key]
-                            else:
-                                newExplicit.exceptionParameters[forceIndex][key] = [0.0, *list(explicitProtonatedExceptionParams[forceIndex][key][1:])]
-                    for forceIndex in newImplicit.particleParameters:
-                        params = oldImplicit.particleParameters[forceIndex]
-                        for atomName in newImplicit.particleParameters[forceIndex]:
-                            if atomName in params:
-                                newImplicit.particleParameters[forceIndex][atomName] = params[atomName]
-                            else:
-                                newImplicit.particleParameters[forceIndex][atomName] = self._get_zero_parameters(implicitProtonatedParams[forceIndex][atomName], implicitSystem.getForce(forceIndex))
-                    for forceIndex in newImplicit.exceptionParameters:
-                        params = oldImplicit.exceptionParameters[forceIndex]
-                        for key in newImplicit.exceptionParameters[forceIndex]:
-                            if key in params:
-                                newImplicit.exceptionParameters[forceIndex][key] = params[key]
-                            else:
-                                newImplicit.exceptionParameters[forceIndex][key] = [0.0, *list(implicitProtonatedExceptionParams[forceIndex][key][1:])]
-                    titration.explicitStates[i] = newExplicit
-                    titration.implicitStates[i] = newImplicit
-            for i in range(len(titration.explicitStates)):
-                titration.explicitStates[i].atomIndices = explicitAtomIndices
-                titration.implicitStates[i].atomIndices = implicitAtomIndices
+        for res_index, titration in self.titrations.items():
+            protonated = titration.protonated_index
+            titration.current_index = protonated
+            # Zeroing template / deep-copy source. For list-form (ligand)
+            # residues the master topology is the union of all variants, so the
+            # base is the synthetic union state and EVERY real variant is
+            # rebuilt from it (including the max-atom variant, which must now
+            # zero the sibling protons it lacks). For string-form residues the
+            # base is the real max-atom (protonated) state and it is left as-is.
+            is_list_form = res_index in list_form_residues
+            if is_list_form:
+                base_explicit = explicit_union_base[res_index]
+                base_implicit = implicit_union_base[res_index]
+            else:
+                base_explicit = titration.explicit_states[protonated]
+                base_implicit = titration.implicit_states[protonated]
+            explicitProtonatedParams = base_explicit.particle_parameters
+            implicitProtonatedParams = base_implicit.particle_parameters
+            explicitProtonatedExceptionParams = base_explicit.exception_parameters
+            implicitProtonatedExceptionParams = base_implicit.exception_parameters
+            explicitAtomIndices = {
+                atom.name: atom.index for atom in explicitResidues[res_index].atoms()
+            }
+            implicitAtomIndices = {
+                atom.name: atom.index
+                for atom in implicitResidues[explicitToImplicitResidueMap[res_index]].atoms()
+            }
+            for i in range(len(titration.explicit_states)):
+                if not is_list_form and i == protonated:
+                    continue
+                oldExplicit = titration.explicit_states[i]
+                oldImplicit = titration.implicit_states[i]
+                newExplicit = deepcopy(base_explicit)
+                newImplicit = deepcopy(base_implicit)
+                newExplicit.num_hydrogens = oldExplicit.num_hydrogens
+                newImplicit.num_hydrogens = oldImplicit.num_hydrogens
+                for forceIndex in newExplicit.particle_parameters:
+                    params = oldExplicit.particle_parameters[forceIndex]
+                    for atomName in newExplicit.particle_parameters[forceIndex]:
+                        if atomName in params:
+                            newExplicit.particle_parameters[forceIndex][atomName] = params[atomName]
+                        else:
+                            newExplicit.particle_parameters[forceIndex][atomName] = (
+                                self._get_zero_parameters(
+                                    explicitProtonatedParams[forceIndex][atomName],
+                                    explicitSystem.getForce(forceIndex),
+                                )
+                            )
+                            titration.explicit_hydrogen_indices.append(
+                                explicitAtomIndices[atomName]
+                            )
+                for forceIndex in newExplicit.exception_parameters:
+                    params = oldExplicit.exception_parameters[forceIndex]
+                    for key in newExplicit.exception_parameters[forceIndex]:
+                        if key in params:
+                            newExplicit.exception_parameters[forceIndex][key] = params[key]
+                        else:
+                            newExplicit.exception_parameters[forceIndex][key] = [
+                                0.0,
+                                *list(explicitProtonatedExceptionParams[forceIndex][key][1:]),
+                            ]
+                for forceIndex in newImplicit.particle_parameters:
+                    params = oldImplicit.particle_parameters[forceIndex]
+                    for atomName in newImplicit.particle_parameters[forceIndex]:
+                        if atomName in params:
+                            newImplicit.particle_parameters[forceIndex][atomName] = params[atomName]
+                        else:
+                            newImplicit.particle_parameters[forceIndex][atomName] = (
+                                self._get_zero_parameters(
+                                    implicitProtonatedParams[forceIndex][atomName],
+                                    implicitSystem.getForce(forceIndex),
+                                )
+                            )
+                for forceIndex in newImplicit.exception_parameters:
+                    params = oldImplicit.exception_parameters[forceIndex]
+                    for key in newImplicit.exception_parameters[forceIndex]:
+                        if key in params:
+                            newImplicit.exception_parameters[forceIndex][key] = params[key]
+                        else:
+                            newImplicit.exception_parameters[forceIndex][key] = [
+                                0.0,
+                                *list(implicitProtonatedExceptionParams[forceIndex][key][1:]),
+                            ]
+                titration.explicit_states[i] = newExplicit
+                titration.implicit_states[i] = newImplicit
+            for i in range(len(titration.explicit_states)):
+                titration.explicit_states[i].atom_indices = explicitAtomIndices
+                titration.implicit_states[i].atom_indices = implicitAtomIndices
+
+        # Choose the starting protonation variant. The default (``protonated_index``,
+        # set above) starts every residue fully protonated and relies on MC to
+        # titrate down, which burns sampling and, in a short/poorly-mixed run,
+        # leaves acids stuck protonated far from their pH-7 equilibrium. When the
+        # caller supplies ``initial_variant_indices`` (topology residue index ->
+        # variant index; e.g. PROPKA-predicted protonation for protein residues
+        # and the dominant protomer for a ligand), start each listed residue
+        # there instead, so runs begin near equilibrium.
+        if initial_variant_indices:
+            for res_index, variant_index in initial_variant_indices.items():
+                titration = self.titrations.get(res_index)
+                if titration is None:
+                    continue
+                if 0 <= variant_index < len(titration.implicit_states):
+                    titration.current_index = variant_index
+
+        # Keep every residue's starting variant inside its allowed set. The
+        # fully-protonated default (``protonated_index``) and any seed applied
+        # above can land on a masked-out variant (e.g. HIP on a histidine
+        # restricted to its neutral HID/HIE tautomers); that must never be the
+        # active state, so fall back to the lowest allowed variant index.
+        for titration in self.titrations.values():
+            allowed = titration.allowed_state_indices
+            if allowed is not None and titration.current_index not in allowed:
+                titration.current_index = min(allowed)
+
+        # Record the indices of nonbonded exceptions and the 1-4 Coulomb scale
+        # factors, read straight off the Systems / topologies / force field.
+
+        self.explicitExceptionIndex = self._find_exception_indices(
+            explicitSystem, self.explicitTopology
+        )
+        self.implicitExceptionIndex = self._find_exception_indices(
+            implicitSystem, self.implicitTopology
+        )
+        self.explicitInterResidue14 = self._find_inter_residue_14(
+            explicitSystem, self.explicitTopology
+        )
+        self.implicitInterResidue14 = self._find_inter_residue_14(
+            implicitSystem, self.implicitTopology
+        )
+        self.explicit14Scale = self._find_14_scale(explicitForceField)
+        self.implicit14Scale = self._find_14_scale(implicitForceField)
 
         # Create contexts or simulations for all the systems.
 
-        self.simulation = Simulation(self.explicitTopology, explicitSystem, deepcopy(integrator), platform, properties)
+        self.simulation = Simulation(
+            self.explicitTopology, explicitSystem, deepcopy(integrator), platform, properties
+        )
         platform = self.simulation.context.getPlatform()
         if properties is None:
             self.implicitContext = Context(implicitSystem, deepcopy(integrator), platform)
-            self.relaxationContext = Context(relaxationSystem, deepcopy(relaxationIntegrator), platform)
+            self.relaxationContext = Context(
+                relaxationSystem, deepcopy(relaxationIntegrator), platform
+            )
         else:
-            self.implicitContext = Context(implicitSystem, deepcopy(integrator), platform, properties)
-            self.relaxationContext = Context(relaxationSystem, deepcopy(relaxationIntegrator), platform, properties)
-        self.simulation.context.setPositions(explicitPositions)
-        self.relaxationContext.setPositions(explicitPositions)
+            self.implicitContext = Context(
+                implicitSystem, deepcopy(integrator), platform, properties
+            )
+            self.relaxationContext = Context(
+                relaxationSystem, deepcopy(relaxationIntegrator), platform, properties
+            )
+        self.simulation.context.setPositions(explicit_positions)
+        self.relaxationContext.setPositions(explicit_positions)
         self.implicitContext.setPositions(implicitPositions)
 
         # Record the mapping from implicit system atoms to explicit system atoms.  We need this
         # for copying positions.
 
-        implicitAtomIndex = [None]*implicitSystem.getNumParticles()
+        implicitAtomIndex = [None] * implicitSystem.getNumParticles()
         for implicitIndex, explicitIndex in enumerate(implicitToExplicitResidueMap):
             explicitRes = explicitResidues[explicitIndex]
             implicitRes = implicitResidues[implicitIndex]
@@ -730,17 +1018,15 @@ class ConstantPH(object):
                 implicitAtomIndex[atom.index] = explicitAtoms[atom.name]
         self.implicitAtomIndex = np.array(implicitAtomIndex)
 
-        # Record the indices of nonbonded exceptions in each of the contexts.
-
-        self.explicitExceptionIndex = self._findExceptionIndices(explicitSystem, self.explicitTopology)
-        self.implicitExceptionIndex = self._findExceptionIndices(implicitSystem, self.implicitTopology)
-        self.explicitInterResidue14 = self._findInterResidue14(explicitSystem, self.explicitTopology)
-        self.implicitInterResidue14 = self._findInterResidue14(implicitSystem, self.implicitTopology)
-
-        # Record the scale factors for 1-4 Coulomb interactions.
-
-        self.explicit14Scale = self._find14Scale(explicitForceField)
-        self.implicit14Scale = self._find14Scale(implicitForceField)
+        # The Systems were parametrised from each residue's maximal (fully
+        # protonated / union) topology, so the contexts are created with the
+        # maximal set of non-excluded exceptions. Apply each residue's actual
+        # current variant now - only ever *removing* protons from that maximal
+        # set, which OpenMM's ``updateParametersInContext`` permits (unlike
+        # starting sub-maximal and later re-protonating, which would grow the
+        # exception set and raise). This sets both the union-topology ligand and
+        # any seeded (e.g. deprotonated) residue to its true starting state.
+        self.apply_current_states()
 
         # Discover ring-flip MC moves on titratable residues whose
         # ``TitratableResidueReference.ring_flip_bonds`` is non-empty
@@ -767,14 +1053,14 @@ class ConstantPH(object):
                 records: list[_RingFlipRecord] = []
                 for anchor_name, pivot_name in bonds:
                     missing = [
-                        n for n in (anchor_name, pivot_name)
-                        if n not in explicit_atoms_by_name
-                        or n not in implicit_atoms_by_name
+                        n
+                        for n in (anchor_name, pivot_name)
+                        if n not in explicit_atoms_by_name or n not in implicit_atoms_by_name
                     ]
                     if missing:
                         raise ValueError(
                             f"ring-flip bond ({anchor_name!r}, {pivot_name!r}) "
-                            f"on residue {explicit_residue.name}.{res_index} "
+                            f"on residue {residue_label(explicit_residue)} "
                             f"references atoms not present in topology: {missing}"
                         )
                     explicit_group = find_terminal_group(
@@ -789,45 +1075,60 @@ class ConstantPH(object):
                         implicit_atoms_by_name[pivot_name],
                         angles=list(angles_list),
                     )
-                    records.append(_RingFlipRecord(
-                        angles=list(angles_list),
-                        explicit=explicit_group,
-                        implicit=implicit_group,
-                    ))
+                    records.append(
+                        _RingFlipRecord(
+                            angles=list(angles_list),
+                            explicit=explicit_group,
+                            implicit=implicit_group,
+                        )
+                    )
                 if records:
                     self.ringFlips[res_index] = records
 
         self.ringFlipAttempts = 0
         self.ringFlipAccepted = 0
 
+        # Human-readable labels (e.g. "GLU 404 A") for the driven residues, used
+        # when logging accepted protonation changes and ring flips.
+        label_indices = set(self.titrations) | set(self.ringFlips)
+        self._residue_labels: dict[int, str] = {
+            residue.index: residue_label(residue)
+            for residue in self.explicitTopology.residues()
+            if residue.index in label_indices
+        }
+
         self.temperature = self.simulation.integrator.getTemperature()
 
-    def setPH(self, pH, weights=None):
+    def set_ph(self, ph: Sequence, weights: list[float] | None = None) -> None:
+        """Set the pH to run the simulation at.
+
+        See the description of the `pH` and `weights` arguments to the
+        constructor for more details.
         """
-        Set the pH to run the simulation at.  See the description of the `pH` and `weights` arguments to the constructor
-        for more details.
-        """
-        self.pH = pH
+        self.ph = ph
         if weights is None:
-            self._weights = [0.0]*len(pH)
+            self._weights = [0.0] * len(ph)
             self._updateWeights = True
             self._weightUpdateFactor = 1.0
-            self._histogram = [0]*len(pH)
+            self._histogram = [0] * len(ph)
             self._hasMadeTransition = False
         else:
             self._weights = weights
             self._updateWeights = False
 
-
     @property
-    def weights(self):
-        """Get the current values of the weights used in the simulated tempering algorithm.  This has one value for each pH."""
-        return [x-self._weights[0] for x in self._weights]
+    def weights(self) -> list[float]:
+        """Get the current values of the weights used in the simulated tempering algorithm.
 
-    def attemptMCStep(self):
+        This has one value for each pH.
         """
-        Attempt to change the protonation states of all titratable residues.  If simulated tempering is being used, this
-        will also attempt to change to a new pH.
+        return [x - self._weights[0] for x in self._weights]
+
+    def attempt_mc_step(self) -> bool:
+        """Attempt to change the protonation states of all titratable residues.
+
+        If simulated tempering is being used, this will also attempt to change
+        to a new pH.
 
         When ``ring_flip_angles`` was passed (and any titratable residue's
         :attr:`TitratableResidueReference.ring_flip_bonds` is non-empty), two
@@ -859,20 +1160,23 @@ class ConstantPH(object):
         # contexts (plus runs a short solvent relaxation) so the subsequent
         # protonation MC sees a consistent geometry.
 
-        self._attemptRingFlip()
+        self._attempt_ring_flip()
 
         # Copy the (possibly post-flip) positions to the implicit context.
 
         state = self.simulation.context.getState(positions=True, parameters=True)
-        explicitPositions = state.getPositions(asNumpy=True).value_in_unit(nanometers)
-        implicitPositions = explicitPositions[self.implicitAtomIndex]
+        explicit_positions = state.getPositions(asNumpy=True).value_in_unit(nanometers)
+        implicitPositions = explicit_positions[self.implicitAtomIndex]
         self.implicitContext.setPositions(implicitPositions)
-        periodicDistance = compiled.periodicDistance(state.getPeriodicBoxVectors().value_in_unit(nanometers))
+        periodic_distance = compiled.periodicDistance(
+            state.getPeriodicBoxVectors().value_in_unit(nanometers)
+        )
 
-        # Perform simulated tempering.
+        # Perform simulated tempering. Skipped when disabled (e.g. fixed-pH
+        # pH-REMD replicas), leaving the replica pinned at its current pH index.
 
-        if len(self.pH) > 1:
-            self._attemptPHChange()
+        if self.simulated_tempering and len(self.ph) > 1:
+            self._attempt_ph_change()
 
         # Process the residues in random order.
 
@@ -884,8 +1188,8 @@ class ConstantPH(object):
         # Each entry is ``(residue_index, record_idx, angle_deg)`` so the
         # explicit-side replay can re-locate the same bond record.
         accepted_coupled_flips: list[tuple[int, int, float]] = []
-        for resIndex in np.random.permutation(list(self.titrations)):
-            titrations = [self.titrations[resIndex]]
+        for res_index in np.random.permutation(list(self.titrations)):
+            titrations = [self.titrations[res_index]]
 
             # Single-variant titrations (e.g. ASN, GLN registered purely
             # for the MolProbity-style amide ring flip) carry no
@@ -895,20 +1199,20 @@ class ConstantPH(object):
             # solvent-relaxation block on a guaranteed accept.
             # ``_attemptRingFlip`` already attempted the flip move
             # earlier in this method, so just skip the residue here.
-            if len(titrations[0].implicitStates) <= 1:
+            if len(titrations[0].implicit_states) <= 1:
                 continue
 
             # Select a new state for it.
 
-            stateIndex = [self._selectNewState(titrations[0])]
+            state_index = [self._select_new_state(titrations[0])]
             if np.random.random() < 0.25:
                 # Consider a multisite titration in which two residues change.
 
-                neighbors = self._findNeighbors(resIndex, explicitPositions, periodicDistance)
+                neighbors = self._find_neighbors(res_index, explicit_positions, periodic_distance)
                 if len(neighbors) > 0:
                     i = np.random.choice(neighbors)
                     titrations.append(self.titrations[i])
-                    stateIndex.append(self._selectNewState(titrations[-1]))
+                    state_index.append(self._select_new_state(titrations[-1]))
 
             # Track per-residue MC stats: each residue touched by this
             # proposal (primary, plus any multisite neighbour) gets +1 attempt.
@@ -932,26 +1236,22 @@ class ConstantPH(object):
             # detailed balance because the forward/reverse proposal densities
             # would then differ. Single-site moves have no such dependency.
             coupled_flip: tuple[int, int, float, np.ndarray] | None = None
-            records_for_res = self.ringFlips.get(resIndex)
-            if (
-                len(titrations) == 1
-                and records_for_res
-                and np.random.random() < 0.5
-            ):
+            records_for_res = self.ringFlips.get(res_index)
+            if len(titrations) == 1 and records_for_res and np.random.random() < 0.5:
                 # Multiple rotatable bonds on the same residue are picked
                 # uniformly so a ligand with N flip bonds gets N x the
                 # per-step probability of any one of them being tried.
                 record_idx = int(np.random.randint(len(records_for_res)))
                 record = records_for_res[record_idx]
-                angle_deg = (
-                    float(np.random.choice(record.angles))
-                    * float(np.random.choice([-1.0, 1.0]))
+                angle_deg = float(np.random.choice(record.angles)) * float(
+                    np.random.choice([-1.0, 1.0])
                 )
                 pre_flip_implicit_pos = (
                     self.implicitContext.getState(positions=True)
-                    .getPositions(asNumpy=True).value_in_unit(nanometers)
+                    .getPositions(asNumpy=True)
+                    .value_in_unit(nanometers)
                 )
-                post_flip_implicit_pos = self._rotateAroundBond(
+                post_flip_implicit_pos = self._rotate_around_bond(
                     pre_flip_implicit_pos,
                     anchor_index=record.implicit.bond[0],
                     pivot_index=record.implicit.bond[1],
@@ -960,24 +1260,49 @@ class ConstantPH(object):
                 )
                 self.implicitContext.setPositions(post_flip_implicit_pos)
                 self.ringFlipAttempts += 1
-                self.titrations[resIndex].n_coupled_flip_attempts += 1
-                coupled_flip = (resIndex, record_idx, angle_deg, pre_flip_implicit_pos)
+                self.titrations[res_index].n_coupled_flip_attempts += 1
+                coupled_flip = (res_index, record_idx, angle_deg, pre_flip_implicit_pos)
 
-            for i, t in zip(stateIndex, titrations, strict=False):
-                self._applyStateToContext(t.implicitStates[i], self.implicitContext, self.implicitExceptionIndex, self.implicitInterResidue14, self.implicit14Scale)
+            for i, t in zip(state_index, titrations, strict=False):
+                self._apply_state_to_context(
+                    t.implicit_states[i],
+                    self.implicitContext,
+                    self.implicitExceptionIndex,
+                    self.implicitInterResidue14,
+                    self.implicit14Scale,
+                )
             newEnergy = self.implicitContext.getState(energy=True).getPotentialEnergy()
 
             # Decide whether to accept the new state.
 
-            kT = (MOLAR_GAS_CONSTANT_R*self.temperature)
-            deltaRefEnergy = unitsum([t.referenceEnergies[i] - t.referenceEnergies[t.currentIndex] for i, t in zip(stateIndex, titrations, strict=False)])
-            deltaN = unitsum([t.implicitStates[i].numHydrogens - t.implicitStates[t.currentIndex].numHydrogens for i, t in zip(stateIndex, titrations, strict=False)])
-            w = (newEnergy-currentEnergy-deltaRefEnergy)/kT + deltaN*np.log(10.0)*self.pH[self.currentPHIndex]
+            kT = MOLAR_GAS_CONSTANT_R * self.temperature
+            deltaRefEnergy = unitsum(
+                [
+                    t.reference_energies[i] - t.reference_energies[t.current_index]
+                    for i, t in zip(state_index, titrations, strict=False)
+                ]
+            )
+            deltaN = unitsum(
+                [
+                    t.implicit_states[i].num_hydrogens
+                    - t.implicit_states[t.current_index].num_hydrogens
+                    for i, t in zip(state_index, titrations, strict=False)
+                ]
+            )
+            w = (newEnergy - currentEnergy - deltaRefEnergy) / kT + deltaN * np.log(10.0) * self.ph[
+                self.currentPHIndex
+            ]
             if w > 0.0 and np.exp(-w) < np.random.random():
                 # Restore the previous state.
 
                 for t in titrations:
-                    self._applyStateToContext(t.implicitStates[t.currentIndex], self.implicitContext, self.implicitExceptionIndex, self.implicitInterResidue14, self.implicit14Scale)
+                    self._apply_state_to_context(
+                        t.implicit_states[t.current_index],
+                        self.implicitContext,
+                        self.implicitExceptionIndex,
+                        self.implicitInterResidue14,
+                        self.implicit14Scale,
+                    )
                 # Also revert the coupled ring-flip positions if any.
                 if coupled_flip is not None:
                     _, _, _, pre_flip_implicit_pos = coupled_flip
@@ -988,21 +1313,47 @@ class ConstantPH(object):
 
             anyChange = True
 
-            # Apply the new state.
-
-            for i, t in zip(stateIndex, titrations, strict=False):
-                t.currentIndex = i
+            # Apply the new state. Collect the per-residue transitions so a
+            # multisite (coupled) proposal that changes two residues at once is
+            # logged as a single coupled event, not two unrelated lines.
+            changes: list[str] = []
+            for i, t in zip(state_index, titrations, strict=False):
+                old_index = t.current_index
+                t.current_index = i
                 t.n_state_accepted += 1
-                self._applyStateToContext(t.explicitStates[i], self.simulation.context, self.explicitExceptionIndex, self.explicitInterResidue14, self.explicit14Scale)
-                self._applyStateToContext(t.explicitStates[i], self.relaxationContext, self.explicitExceptionIndex, self.explicitInterResidue14, self.explicit14Scale)
+                if i != old_index:
+                    new_res_index = t.explicit_states[i].residue_index
+                    changes.append(f"{self._residue_labels.get(new_res_index, new_res_index)} ")
+                self._apply_state_to_context(
+                    t.explicit_states[i],
+                    self.simulation.context,
+                    self.explicitExceptionIndex,
+                    self.explicitInterResidue14,
+                    self.explicit14Scale,
+                )
+                self._apply_state_to_context(
+                    t.explicit_states[i],
+                    self.relaxationContext,
+                    self.explicitExceptionIndex,
+                    self.explicitInterResidue14,
+                    self.explicit14Scale,
+                )
+
+            if changes and self._log_transitions:
+                kind = "Coupled protonation change" if len(changes) > 1 else "Protonation change"
+                logger.info(f"{kind} (pH {self.ph[self.currentPHIndex]:.2f}): {', '.join(changes)}")
 
             if coupled_flip is not None:
                 flip_res_index, flip_record_idx, flip_angle_deg, _ = coupled_flip
-                accepted_coupled_flips.append(
-                    (flip_res_index, flip_record_idx, flip_angle_deg)
-                )
+                accepted_coupled_flips.append((flip_res_index, flip_record_idx, flip_angle_deg))
                 self.ringFlipAccepted += 1
                 self.titrations[flip_res_index].n_coupled_flip_accepted += 1
+                if self._log_transitions:
+                    logger.info(
+                        f"Ring flip (coupled, pH {self.ph[self.currentPHIndex]:.2f}): "
+                        f"{self._residue_labels.get(flip_res_index, flip_res_index)} "
+                        f"rotated {flip_angle_deg:+.0f} deg"
+                    )
 
         # If anything changed, run some dynamics to let the water relax.
 
@@ -1011,12 +1362,12 @@ class ConstantPH(object):
             # before relaxation, so that the frozen-solute relaxation block
             # picks up the rotated side chains (the relaxation system has
             # zero-mass solute atoms, so they stay put and water adapts).
-            explicit_pos_for_relax = explicitPositions
+            explicit_pos_for_relax = explicit_positions
             if accepted_coupled_flips:
-                explicit_pos_for_relax = np.asarray(explicitPositions).copy()
+                explicit_pos_for_relax = np.asarray(explicit_positions).copy()
                 for flip_res_index, flip_record_idx, flip_angle_deg in accepted_coupled_flips:
                     record = self.ringFlips[flip_res_index][flip_record_idx]
-                    explicit_pos_for_relax = self._rotateAroundBond(
+                    explicit_pos_for_relax = self._rotate_around_bond(
                         explicit_pos_for_relax,
                         anchor_index=record.explicit.bond[0],
                         pivot_index=record.explicit.bond[1],
@@ -1028,19 +1379,21 @@ class ConstantPH(object):
             for param in self.relaxationContext.getParameters():
                 self.relaxationContext.setParameter(param, state.getParameters()[param])
             self.relaxationContext.getIntegrator().step(self.relaxationSteps)
-            relaxedPositions = self.relaxationContext.getState(positions=True).getPositions(asNumpy=True)
+            relaxedPositions = self.relaxationContext.getState(positions=True).getPositions(
+                asNumpy=True
+            )
             self.simulation.context.setPositions(relaxedPositions)
 
         return anyChange
 
     @property
-    def ringFlipAcceptanceRate(self):
+    def ring_flip_acceptance_rate(self) -> float:
         """Fraction of ring-flip MC moves accepted (0.0 if none attempted)."""
         if self.ringFlipAttempts == 0:
             return 0.0
         return self.ringFlipAccepted / self.ringFlipAttempts
 
-    def reset_stats(self):
+    def reset_stats(self) -> None:
         """Zero every per-residue MC counter.
 
         Useful when you want to discard equilibration statistics before
@@ -1053,9 +1406,7 @@ class ConstantPH(object):
         self.ringFlipAttempts = 0
         self.ringFlipAccepted = 0
 
-
-
-    def summary(self):
+    def summary(self) -> pd.DataFrame:
         """Return per-residue MC acceptance statistics as a ``pandas.DataFrame``.
 
         Rows are indexed by ``residue_index`` and include the residue name,
@@ -1080,32 +1431,36 @@ class ConstantPH(object):
         for res_index in residue_indices:
             titration = self.titrations[res_index]
             residue = residues[res_index]
-            if titration.currentIndex >= 0:
-                current_variant = titration.variant_names[titration.currentIndex]
+            if titration.current_index >= 0:
+                current_variant = titration.variant_names[titration.current_index]
             else:
                 current_variant = None
-            rows.append({
-                "residue_index": res_index,
-                "residue_name": residue.name,
-                "current_variant": current_variant,
-                "has_ring_flip": res_index in self.ringFlips,
-                "state_attempts": titration.n_state_attempts,
-                "state_accepted": titration.n_state_accepted,
-                "state_acceptance_rate": titration.state_acceptance_rate,
-                "standalone_flip_attempts": titration.n_standalone_flip_attempts,
-                "standalone_flip_accepted": titration.n_standalone_flip_accepted,
-                "standalone_flip_acceptance_rate": titration.standalone_flip_acceptance_rate,
-                "coupled_flip_attempts": titration.n_coupled_flip_attempts,
-                "coupled_flip_accepted": titration.n_coupled_flip_accepted,
-                "coupled_flip_acceptance_rate": titration.coupled_flip_acceptance_rate,
-            })
+            rows.append(
+                {
+                    "residue_index": res_index,
+                    "residue_name": residue.name,
+                    "residue_id": residue.id,
+                    "chain_id": (residue.chain.id or "").strip(),
+                    "current_variant": current_variant,
+                    "has_ring_flip": res_index in self.ringFlips,
+                    "state_attempts": titration.n_state_attempts,
+                    "state_accepted": titration.n_state_accepted,
+                    "state_acceptance_rate": titration.state_acceptance_rate,
+                    "standalone_flip_attempts": titration.n_standalone_flip_attempts,
+                    "standalone_flip_accepted": titration.n_standalone_flip_accepted,
+                    "standalone_flip_acceptance_rate": titration.standalone_flip_acceptance_rate,
+                    "coupled_flip_attempts": titration.n_coupled_flip_attempts,
+                    "coupled_flip_accepted": titration.n_coupled_flip_accepted,
+                    "coupled_flip_acceptance_rate": titration.coupled_flip_acceptance_rate,
+                }
+            )
         return pd.DataFrame(rows).set_index("residue_index")
 
-    def _attemptRingFlip(self):
-        """
-        One Metropolis MC attempt to rotate a randomly-chosen terminal group by
-        a randomly-chosen angle, evaluated against the implicit potential at
-        :attr:`self.temperature`.
+    def _attempt_ring_flip(self) -> bool:
+        """Attempt one Metropolis MC rotation of a randomly-chosen terminal group.
+
+        The rotation is by a randomly-chosen angle, evaluated against the
+        implicit potential at :attr:`self.temperature`.
 
         Returns
         -------
@@ -1123,18 +1478,13 @@ class ConstantPH(object):
         # ligand with N rotatable bonds gets N x the per-step probability
         # of being picked, matching the coupled-flip code path.
         flip_slots = [
-            (res_idx, rec)
-            for res_idx, records in self.ringFlips.items()
-            for rec in records
+            (res_idx, rec) for res_idx, records in self.ringFlips.items() for rec in records
         ]
         slot_idx = int(np.random.randint(len(flip_slots)))
         res_index, record = flip_slots[slot_idx]
 
         # 2) Randomly choose an angle (random magnitude * random sign).
-        angle_deg = (
-            float(np.random.choice(record.angles))
-            * float(np.random.choice([-1.0, 1.0]))
-        )
+        angle_deg = float(np.random.choice(record.angles)) * float(np.random.choice([-1.0, 1.0]))
 
         # Seed the implicit context from the current explicit positions so the
         # before/after implicit energies are evaluated on a consistent geometry.
@@ -1146,7 +1496,7 @@ class ConstantPH(object):
         energy_before = self.implicitContext.getState(getEnergy=True).getPotentialEnergy()
 
         # 3) Flip in the implicit solvent simulation.
-        implicit_pos_after = self._rotateAroundBond(
+        implicit_pos_after = self._rotate_around_bond(
             implicit_pos_before,
             anchor_index=record.implicit.bond[0],
             pivot_index=record.implicit.bond[1],
@@ -1173,7 +1523,7 @@ class ConstantPH(object):
 
         # 6) Accepted: apply same rotation to the explicit context, then run a
         # short relaxation block so the surrounding solvent can adapt.
-        explicit_pos_after = self._rotateAroundBond(
+        explicit_pos_after = self._rotate_around_bond(
             explicit_pos,
             anchor_index=record.explicit.bond[0],
             pivot_index=record.explicit.bond[1],
@@ -1187,9 +1537,9 @@ class ConstantPH(object):
         for param in self.relaxationContext.getParameters():
             self.relaxationContext.setParameter(param, sim_params[param])
         self.relaxationContext.getIntegrator().step(self.relaxationSteps)
-        relaxed_positions = self.relaxationContext.getState(
-            positions=True
-        ).getPositions(asNumpy=True)
+        relaxed_positions = self.relaxationContext.getState(positions=True).getPositions(
+            asNumpy=True
+        )
         self.simulation.context.setPositions(relaxed_positions)
         # Keep the implicit context in sync with the post-relaxation geometry
         # so the subsequent protonation MC starts from a consistent state.
@@ -1199,18 +1549,28 @@ class ConstantPH(object):
         self.ringFlipAccepted += 1
         if stats_titration is not None:
             stats_titration.n_standalone_flip_accepted += 1
+        if self._log_transitions:
+            logger.info(
+                f"Ring flip (pH {self.ph[self.currentPHIndex]:.2f}): "
+                f"{self._residue_labels.get(res_index, res_index)} "
+                f"rotated {angle_deg:+.0f} deg"
+            )
         return True
 
     @staticmethod
-    def _rotateAroundBond(positions, anchor_index, pivot_index,
-                          rotatable_indices, angle_deg):
-        """
-        Rigid Rodrigues rotation of ``rotatable_indices`` about the axis
-        pointing from ``pivot_index`` to ``anchor_index`` by ``angle_deg``.
+    def _rotate_around_bond(
+        positions: np.ndarray,
+        anchor_index: int,
+        pivot_index: int,
+        rotatable_indices: Iterable[int],
+        angle_deg: float,
+    ) -> np.ndarray:
+        """Rigidly rotate ``rotatable_indices`` (Rodrigues) about the pivot-anchor axis.
 
-        The pivot atom is the fixed point of the rotation; the axis points
-        outward toward the anchor (i.e. into the rest of the molecule). This
-        matches the convention used by
+        The rotation axis points from ``pivot_index`` to ``anchor_index`` and
+        the angle is ``angle_deg``. The pivot atom is the fixed point of the
+        rotation; the axis points outward toward the anchor (i.e. into the rest
+        of the molecule). This matches the convention used by
         :func:`opensqm.md.terminal_ring_mc.find_terminal_group`, which returns
         ``bond=(anchor, pivot)`` with ``pivot`` on the rotatable-group side.
 
@@ -1229,15 +1589,11 @@ class ConstantPH(object):
         rotated = positions.copy()
         for idx in rotatable_indices:
             v = positions[idx] - p_pivot
-            v_rot = (
-                v * cos_t
-                + np.cross(axis, v) * sin_t
-                + axis * np.dot(axis, v) * (1.0 - cos_t)
-            )
+            v_rot = v * cos_t + np.cross(axis, v) * sin_t + axis * np.dot(axis, v) * (1.0 - cos_t)
             rotated[idx] = p_pivot + v_rot
         return rotated
 
-    def setResidueState(self, residueIndex, stateIndex, relax=False):
+    def set_residue_state(self, residue_index: int, state_index: int, relax: bool = False) -> None:
         """
         Set a titratable residue to be in a particular state.
 
@@ -1248,65 +1604,129 @@ class ConstantPH(object):
         stateIndex: int
             The index of the state to put it into
         relax: bool
-            If True, the solvent is allowed to relax after changing the state by immobilizing the solute and performing
-            a short simulation.
+            If True, the solvent is allowed to relax after changing the state by
+            immobilizing the solute and performing a short simulation.
         """
-        titration = self.titrations[residueIndex]
-        self._applyStateToContext(titration.explicitStates[stateIndex], self.simulation.context, self.explicitExceptionIndex, self.explicitInterResidue14, self.explicit14Scale)
-        self._applyStateToContext(titration.explicitStates[stateIndex], self.relaxationContext, self.explicitExceptionIndex, self.explicitInterResidue14, self.explicit14Scale)
-        self._applyStateToContext(titration.implicitStates[stateIndex], self.implicitContext, self.implicitExceptionIndex, self.implicitInterResidue14, self.implicit14Scale)
-        titration.currentIndex = stateIndex
+        titration = self.titrations[residue_index]
+        self._apply_state_to_context(
+            titration.explicit_states[state_index],
+            self.simulation.context,
+            self.explicitExceptionIndex,
+            self.explicitInterResidue14,
+            self.explicit14Scale,
+        )
+        self._apply_state_to_context(
+            titration.explicit_states[state_index],
+            self.relaxationContext,
+            self.explicitExceptionIndex,
+            self.explicitInterResidue14,
+            self.explicit14Scale,
+        )
+        self._apply_state_to_context(
+            titration.implicit_states[state_index],
+            self.implicitContext,
+            self.implicitExceptionIndex,
+            self.implicitInterResidue14,
+            self.implicit14Scale,
+        )
+        titration.current_index = state_index
         if relax:
-            self.relaxationContext.setPositions(self.simulation.context.getState(positions=True).getPositions(asNumpy=True))
+            self.relaxationContext.setPositions(
+                self.simulation.context.getState(positions=True).getPositions(asNumpy=True)
+            )
             self.relaxationContext.getIntegrator().step(self.relaxationSteps)
-            self.simulation.context.setPositions(self.relaxationContext.getState(positions=True).getPositions(asNumpy=True))
+            self.simulation.context.setPositions(
+                self.relaxationContext.getState(positions=True).getPositions(asNumpy=True)
+            )
+
+    def apply_current_states(self) -> None:
+        """(Re)apply every titration's ``current_index`` variant to all contexts.
+
+        The contexts are created from Systems parametrised in each residue's
+        maximal (fully protonated / union) state; this writes each residue's
+        actual current variant onto the explicit, relaxation, and implicit
+        contexts. Call at construction to set the starting protonation, and
+        again after any ``Context.reinitialize`` (e.g. when a barostat is added)
+        that reverts per-particle parameters to the System's maximal values.
+        """
+        for titration in self.titrations.values():
+            index = titration.current_index
+            self._apply_state_to_context(
+                titration.explicit_states[index],
+                self.simulation.context,
+                self.explicitExceptionIndex,
+                self.explicitInterResidue14,
+                self.explicit14Scale,
+            )
+            self._apply_state_to_context(
+                titration.explicit_states[index],
+                self.relaxationContext,
+                self.explicitExceptionIndex,
+                self.explicitInterResidue14,
+                self.explicit14Scale,
+            )
+            self._apply_state_to_context(
+                titration.implicit_states[index],
+                self.implicitContext,
+                self.implicitExceptionIndex,
+                self.implicitInterResidue14,
+                self.implicit14Scale,
+            )
 
     @staticmethod
-    def _applyStateToContext(
-        state,
-        context,
-        exceptionIndex,
-        interResidue14,
-        coulomb14Scale,
-    ):
+    def _apply_state_to_context(
+        state: ResidueState,
+        context: Context,
+        exception_index: dict[tuple[int, str, str], int],
+        inter_residue_14: dict[int, list[int]],
+        coulomb_14_scale: float,
+    ) -> None:
         """Apply a ``ResidueState`` to a ``Context``.
 
         Overwrites per-particle and per-exception parameters in the
         requested forces with the state's values.
         """
-        for forceIndex, params in state.particleParameters.items():
+        for forceIndex, params in state.particle_parameters.items():
             force = context.getSystem().getForce(forceIndex)
             is_nb = isinstance(force, NonbondedForce)
             for atomName, atomParams in params.items():
-                atomIndex = state.atomIndices[atomName]
+                atomIndex = state.atom_indices[atomName]
                 try:
                     # Custom forces take the parameters as a single tuple.
                     force.setParticleParameters(atomIndex, atomParams)
-                except:
+                except Exception:
                     # Standard forces take them as separate arguments.
                     force.setParticleParameters(atomIndex, *atomParams)
             if is_nb:
-                for key, exceptionParams in state.exceptionParameters[forceIndex].items():
-                    exc_idx = exceptionIndex[key]
+                for key, exceptionParams in state.exception_parameters[forceIndex].items():
+                    exc_idx = exception_index[key]
                     p = force.getExceptionParameters(exc_idx)
                     force.setExceptionParameters(
-                        exc_idx, p[0], p[1], *exceptionParams,
+                        exc_idx,
+                        p[0],
+                        p[1],
+                        *exceptionParams,
                     )
-                for index in interResidue14[state.residueIndex]:
+                for index in inter_residue_14[state.residue_index]:
                     p = force.getExceptionParameters(index)
                     p1, p2 = p[0], p[1]
                     sigma, epsilon = p[3], p[4]
                     q1, _, _ = force.getParticleParameters(p1)
                     q2, _, _ = force.getParticleParameters(p2)
-                    new_chargeProd = coulomb14Scale * q1 * q2
+                    new_chargeProd = coulomb_14_scale * q1 * q2
                     force.setExceptionParameters(
-                        index, p1, p2, new_chargeProd, sigma, epsilon,
+                        index,
+                        p1,
+                        p2,
+                        new_chargeProd,
+                        sigma,
+                        epsilon,
                     )
             force.updateParametersInContext(context)
 
     @staticmethod
-    def _findInterResidue14(system, topology):
-        """For each residue, record the indices of all 1-4 exceptions that span that residue and another one."""
+    def _find_inter_residue_14(system: System, topology: Topology) -> dict[int, list[int]]:
+        """Record, per residue, the indices of 1-4 exceptions spanning it and another residue."""
         indices = defaultdict(list)
         atoms = list(topology.atoms())
         for force in system.getForces():
@@ -1315,13 +1735,16 @@ class ConstantPH(object):
                     p1, p2, chargeProd, _sigma, _epsilon = force.getExceptionParameters(i)
                     atom1 = atoms[p1]
                     atom2 = atoms[p2]
-                    if atom1.residue != atom2.residue and chargeProd.value_in_unit(elementary_charge**2) != 0.0:
+                    if (
+                        atom1.residue != atom2.residue
+                        and chargeProd.value_in_unit(elementary_charge**2) != 0.0
+                    ):
                         indices[atom1.residue.index].append(i)
                         indices[atom2.residue.index].append(i)
         return indices
 
     @staticmethod
-    def _find14Scale(forcefield):
+    def _find_14_scale(forcefield: ForceField) -> float:
         """Find the scale factor for 1-4 Coulomb interactions."""
         for generator in forcefield.getGenerators():
             if isinstance(generator, NonbondedGenerator):
@@ -1329,10 +1752,15 @@ class ConstantPH(object):
         return 1.0
 
     @staticmethod
-    def _findExceptionIndices(system, topology):
-        """Construct a dict whose keys are (residue index, atom 1 name, atom 2 name), and whose values are the indices
-        of the corresponding exceptions in the NonbondedForce.  This is needed for mapping exceptions between Topologies
-        with different sets of atoms.
+    def _find_exception_indices(
+        system: System, topology: Topology
+    ) -> dict[tuple[int, str, str], int]:
+        """Map residue-scoped exception keys to NonbondedForce exception indices.
+
+        Construct a dict whose keys are ``(residue index, atom 1 name, atom 2
+        name)`` and whose values are the indices of the corresponding exceptions
+        in the NonbondedForce. This is needed for mapping exceptions between
+        Topologies with different sets of atoms.
         """
         indices = {}
         atoms = list(topology.atoms())
@@ -1348,8 +1776,19 @@ class ConstantPH(object):
         return indices
 
     @staticmethod
-    def _findResidueStates(topology, positions, forcefield, variants, ffargs, record_residue_indices=None):
-        """Given a ForceField and a list of variants for the variable residues, construct ResidueState objects for them."""
+    def _find_residue_states(
+        topology: Topology,
+        positions: unit.Quantity,
+        forcefield: ForceField,
+        variants: list,
+        ffargs: dict,
+        record_residue_indices: set[int] | None = None,
+    ) -> list[ResidueState]:
+        """Construct ``ResidueState`` objects for the variable residues.
+
+        Given a ForceField and a list of variants for the variable residues,
+        build one ``ResidueState`` per recorded residue.
+        """
         modeller = Modeller(topology, positions)
         modeller.addHydrogens(forcefield=forcefield, variants=variants)
         system = forcefield.createSystem(modeller.topology, **ffargs)
@@ -1362,86 +1801,128 @@ class ConstantPH(object):
                     continue
             elif variant is None:
                 continue
-            atomIndices = {atom.name: atom.index for atom in residue.atoms()}
-            particleParameters = {}
-            exceptionParameters = {}
+            atom_indices = {atom.name: atom.index for atom in residue.atoms()}
+            particle_parameters = {}
+            exception_parameters = {}
             for i, force in enumerate(system.getForces()):
                 try:
-                    particleParameters[i] = {atom.name: force.getParticleParameters(atom.index) for atom in residue.atoms()}
-                except:
+                    particle_parameters[i] = {
+                        atom.name: force.getParticleParameters(atom.index)
+                        for atom in residue.atoms()
+                    }
+                except Exception:
                     pass
                 if isinstance(force, NonbondedForce):
-                    exceptionParameters[i] = {}
+                    exception_parameters[i] = {}
                     for j in range(force.getNumExceptions()):
                         p1, p2, chargeProd, sigma, epsilon = force.getExceptionParameters(j)
                         atom1 = atoms[p1]
                         atom2 = atoms[p2]
                         if atom1.residue == residue and atom2.residue == residue:
-                            exceptionParameters[i][(residue.index, atom1.name, atom2.name)] = (chargeProd, sigma, epsilon)
-            numHydrogens = sum(1 for atom in residue.atoms() if atom.element == element.hydrogen)
-            states.append(ResidueState(residue.index, atomIndices, particleParameters, exceptionParameters, numHydrogens))
+                            exception_parameters[i][(residue.index, atom1.name, atom2.name)] = (
+                                chargeProd,
+                                sigma,
+                                epsilon,
+                            )
+            num_hydrogens = sum(1 for atom in residue.atoms() if atom.element == element.hydrogen)
+            states.append(
+                ResidueState(
+                    residue.index,
+                    atom_indices,
+                    particle_parameters,
+                    exception_parameters,
+                    num_hydrogens,
+                )
+            )
         return states
 
     @staticmethod
-    def _get_zero_parameters(original_parameters, force):
-        """Get the per-particle parameter values that should be used to set an atom's charge to 0."""
+    def _get_zero_parameters(original_parameters: Iterable, force: Any) -> tuple:
+        """Get the per-particle parameter values that set an atom's charge to 0."""
         p = list(original_parameters)
         if isinstance(force, NonbondedForce) or isinstance(force, GBSAOBCForce):
             p[0] = 0.0
         else:
             for i in range(force.getNumPerParticleParameters()):
-                if force.getPerParticleParameterName(i) == 'charge':
+                if force.getPerParticleParameterName(i) == "charge":
                     p[i] = 0.0
         return tuple(p)
 
     @staticmethod
-    def _selectNewState(titration):
+    def _select_new_state(titration: ResidueTitration) -> int:
         """Randomly choose a new state for a ResidueTitration.
+
+        Proposals are drawn uniformly from the residue's allowed variants
+        (all built variants when ``allowed_state_indices`` is ``None``) other
+        than the current one. Because the allowed set is fixed - it does not
+        depend on the current state - the forward and reverse proposal
+        densities are equal, so detailed balance holds even when a
+        charge-changing variant is masked out (e.g. histidine's HIP, leaving
+        the charge-neutral HID<->HIE flip).
 
         ``numStates == 1`` is permitted for ring-flip-only residues
         (e.g. ASN, GLN) that are registered for terminal-group MC but
-        carry no protonation transitions; the only valid "new" state
-        is the current one. The protonation MC loop in
-        :meth:`attemptMCStep` skips these residues outright, so the
-        no-op return is purely defensive.
+        carry no protonation transitions; a singleton allowed set behaves the
+        same way. In both cases the only valid "new" state is the current one.
+        The protonation MC loop in :meth:`attempt_mc_step` skips these residues
+        outright, so the no-op return is purely defensive.
         """
-        numStates = len(titration.implicitStates)
-        if numStates == 1:
-            return titration.currentIndex
-        if numStates == 2:
-            return 1-titration.currentIndex
-        stateIndex = titration.currentIndex
-        while stateIndex == titration.currentIndex:
-            stateIndex = np.random.randint(numStates)
-        return stateIndex
+        if titration.allowed_state_indices is None:
+            numStates = len(titration.implicit_states)
+            if numStates == 1:
+                return titration.current_index
+            if numStates == 2:
+                return 1 - titration.current_index
+            state_index = titration.current_index
+            while state_index == titration.current_index:
+                state_index = np.random.randint(numStates)
+            return state_index
 
-    def _findNeighbors(self, resIndex, explicitPositions, periodicDistance):
-        """Find other titratable residues that are very close to a specified residue.  This is used for
-        multisite titrations.
+        others = [
+            i for i in sorted(titration.allowed_state_indices) if i != titration.current_index
+        ]
+        if not others:
+            return titration.current_index
+        return int(others[np.random.randint(len(others))])
+
+    def _find_neighbors(
+        self,
+        res_index: int,
+        explicit_positions: np.ndarray,
+        periodic_distance: Callable,
+    ) -> list[int]:
+        """Find other titratable residues that are very close to a specified residue.
+
+        This is used for multisite titrations.
         """
         neighbors = []
-        titration1 = self.titrations[resIndex]
+        titration1 = self.titrations[res_index]
         for resIndex2 in self.titrations:
-            if resIndex2 > resIndex:
+            if resIndex2 > res_index:
                 titration2 = self.titrations[resIndex2]
                 isNeighbor = False
-                for i in titration1.explicitHydrogenIndices:
-                    for j in titration2.explicitHydrogenIndices:
-                        if periodicDistance(explicitPositions[i], explicitPositions[j]) < 0.2:
+                for i in titration1.explicit_hydrogen_indices:
+                    for j in titration2.explicit_hydrogen_indices:
+                        if periodic_distance(explicit_positions[i], explicit_positions[j]) < 0.2:
                             isNeighbor = True
                 if isNeighbor:
                     neighbors.append(resIndex2)
         return neighbors
 
-    def _attemptPHChange(self):
+    def _attempt_ph_change(self) -> None:
         """Attempt to change to a different pH."""
         # Compute the probability for each pH.  This is done in log space to avoid overflow.
 
-        hydrogens = sum(t.explicitStates[t.currentIndex].numHydrogens for t in self.titrations.values())
-        logProbability = [(self._weights[i]-hydrogens*np.log(10.0)*self.pH[i]) for i in range(len(self._weights))]
+        hydrogens = sum(
+            t.explicit_states[t.current_index].num_hydrogens for t in self.titrations.values()
+        )
+        logProbability = [
+            (self._weights[i] - hydrogens * np.log(10.0) * self.ph[i])
+            for i in range(len(self._weights))
+        ]
         maxLogProb = max(logProbability)
-        offset = maxLogProb + np.log(sum(np.exp(x-maxLogProb) for x in logProbability))
-        probability = [np.exp(x-offset) for x in logProbability]
+        offset = maxLogProb + np.log(sum(np.exp(x - maxLogProb) for x in logProbability))
+        probability = [np.exp(x - offset) for x in logProbability]
         r = np.random.random_sample()
         for j in range(len(probability)):
             if r < probability[j]:
@@ -1454,18 +1935,24 @@ class ConstantPH(object):
                     self._weights[j] -= self._weightUpdateFactor
                     self._histogram[j] += 1
                     minCounts = min(self._histogram)
-                    if minCounts > 20 and minCounts >= 0.2*sum(self._histogram)/len(self._histogram):
+                    if minCounts > 20 and minCounts >= 0.2 * sum(self._histogram) / len(
+                        self._histogram
+                    ):
                         # Reduce the weight update factor and reset the histogram.
 
                         self._weightUpdateFactor *= 0.5
-                        self._histogram = [0]*len(self.pH)
-                        self._weights = [x-self._weights[0] for x in self._weights]
-                    elif not self._hasMadeTransition and probability[self.currentPHIndex] > 0.99 and self._weightUpdateFactor < 1024.0:
-                        # Rapidly increase the weight update factor at the start of the simulation to find
-                        # a reasonable starting value.
+                        self._histogram = [0] * len(self.ph)
+                        self._weights = [x - self._weights[0] for x in self._weights]
+                    elif (
+                        not self._hasMadeTransition
+                        and probability[self.currentPHIndex] > 0.99
+                        and self._weightUpdateFactor < 1024.0
+                    ):
+                        # Rapidly increase the weight update factor at the start of
+                        # the simulation to find a reasonable starting value.
 
                         self._weightUpdateFactor *= 2.0
-                        self._histogram = [0]*len(self.pH)
-                        self._weights = [x-self._weights[0] for x in self._weights]
+                        self._histogram = [0] * len(self.ph)
+                        self._weights = [x - self._weights[0] for x in self._weights]
                 return
             r -= probability[j]

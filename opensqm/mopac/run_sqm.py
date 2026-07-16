@@ -8,7 +8,7 @@ import pandas as pd
 import yaml
 from loguru import logger
 
-from opensqm.run_sqm_ray import Complex, OptimisationSettings, SQMConfig, run_sqm
+from opensqm.mopac.run_sqm_ray import Complex, OptimisationSettings, SQMConfig, run_sqm
 
 logger.remove()
 logger.add(sys.stderr, level="INFO")
@@ -33,7 +33,7 @@ def main(
     ligand: str,
     output: str,
     settings_path: str,
-):
+) -> None:
     """Run entrypoint for Single-Complex SQM calculation."""
     if output is None:
         output_path = Path("data/outputs")
@@ -46,7 +46,7 @@ def main(
     ligand_path = Path(ligand)
 
     if settings_path is not None:
-        with open(settings_path) as f:
+        with Path(settings_path).open() as f:
             settings_dict = yaml.safe_load(f)
         settings = OptimisationSettings(**settings_dict)
     else:

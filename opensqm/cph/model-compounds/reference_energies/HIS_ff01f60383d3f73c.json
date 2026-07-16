@@ -1,0 +1,42 @@
+{
+  "residue_name": "HIS",
+  "main_variant": "HIP",
+  "variant_names": [
+    "HIP",
+    "HID",
+    "HIE"
+  ],
+  "variants": [
+    "HIP",
+    "HID",
+    "HIE"
+  ],
+  "charges": [
+    1,
+    0,
+    0
+  ],
+  "reference_energies_kj_per_mole": [
+    0.0,
+    -101.17319124377714,
+    -91.12031744524472
+  ],
+  "transitions": [
+    {
+      "parent": 0,
+      "child": 1,
+      "pka": 7.1
+    },
+    {
+      "parent": 0,
+      "child": 2,
+      "pka": 6.5
+    }
+  ],
+  "ring_flip_bonds": [
+    [
+      "CB",
+      "CG"
+    ]
+  ]
+}

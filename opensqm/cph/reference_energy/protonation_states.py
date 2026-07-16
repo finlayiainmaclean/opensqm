@@ -12,12 +12,13 @@ The remaining helpers are private support routines used to canonicalise
 heavy-atom skeletons, locate the proton-loss differences between a
 template and a target protomer, and re-shape templates accordingly.
 """
+
 # pyrefly: ignore [missing-import]
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
 
-def _assign_ligand_atom_names(rdkit_mol, residue_name="LIG"):
+def _assign_ligand_atom_names(rdkit_mol: Chem.Mol, residue_name: str = "LIG") -> None:
     """Assign unique PDB-style atom names and residue info to an rdkit Mol in place.
 
     Heavy atoms get names like 'N1', 'C2', ...; hydrogens get 'H1', 'H2', ...
@@ -52,8 +53,7 @@ def _assign_ligand_atom_names(rdkit_mol, residue_name="LIG"):
 
 
 def _heavy_skeleton(mol: Chem.Mol) -> Chem.Mol:
-    """Return ``mol``'s heavy-atom skeleton with all formal charges and explicit
-    H counts zeroed.
+    """Return ``mol``'s heavy-atom skeleton with formal charges and H counts zeroed.
 
     Used as a canonical structure for substructure matching when we want to
     compare two protonation states of the same chemistry without the
@@ -75,15 +75,14 @@ def _heavy_features(mol: Chem.Mol) -> tuple[list[int], list[int]]:
     for atom in mol.GetAtoms():
         if atom.GetAtomicNum() == 1:
             continue
-        h_counts.append(
-            sum(1 for n in atom.GetNeighbors() if n.GetAtomicNum() == 1)
-        )
+        h_counts.append(sum(1 for n in atom.GetNeighbors() if n.GetAtomicNum() == 1))
         charges.append(atom.GetFormalCharge())
     return h_counts, charges
 
 
 def _find_proton_loss_diff(
-    template: Chem.Mol, target: Chem.Mol,
+    template: Chem.Mol,
+    target: Chem.Mol,
 ) -> list[int]:
     """Return template heavy-atom indices to deprotonate to reach ``target``.
 
@@ -103,12 +102,12 @@ def _find_proton_loss_diff(
     template_skel = _heavy_skeleton(template)
     target_skel = _heavy_skeleton(target)
     matches = template_skel.GetSubstructMatches(
-        target_skel, useChirality=False, uniquify=False,
+        target_skel,
+        useChirality=False,
+        uniquify=False,
     )
     if not matches:
-        raise ValueError(
-            "Template and target do not share a heavy-atom skeleton"
-        )
+        raise ValueError("Template and target do not share a heavy-atom skeleton")
 
     template_hs, template_qs = _heavy_features(template)
     target_hs, target_qs = _heavy_features(target)
@@ -116,17 +115,9 @@ def _find_proton_loss_diff(
     for match in matches:
         # match[t] is the template heavy-atom index corresponding to
         # target heavy atom t.
-        h_diffs = [
-            template_hs[match[t]] - target_hs[t] for t in range(len(match))
-        ]
-        q_diffs = [
-            template_qs[match[t]] - target_qs[t] for t in range(len(match))
-        ]
-        if (
-            all(d >= 0 for d in h_diffs)
-            and all(d >= 0 for d in q_diffs)
-            and h_diffs == q_diffs
-        ):
+        h_diffs = [template_hs[match[t]] - target_hs[t] for t in range(len(match))]
+        q_diffs = [template_qs[match[t]] - target_qs[t] for t in range(len(match))]
+        if all(d >= 0 for d in h_diffs) and all(d >= 0 for d in q_diffs) and h_diffs == q_diffs:
             sites: list[int] = []
             for t_idx, n_drop in enumerate(h_diffs):
                 sites.extend([match[t_idx]] * n_drop)
@@ -139,7 +130,8 @@ def _find_proton_loss_diff(
 
 
 def _derive_state_from_template(
-    template: Chem.Mol, target: Chem.Mol,
+    template: Chem.Mol,
+    target: Chem.Mol,
 ) -> Chem.Mol:
     """Return a copy of ``template`` deprotonated to match ``target``.
 
@@ -163,16 +155,13 @@ def _derive_state_from_template(
         if atom.GetAtomicNum() == 1:
             continue
         remaining_hs[atom.GetIdx()] = [
-            nbr.GetIdx() for nbr in atom.GetNeighbors()
-            if nbr.GetAtomicNum() == 1
+            nbr.GetIdx() for nbr in atom.GetNeighbors() if nbr.GetAtomicNum() == 1
         ]
 
     h_indices_to_remove: list[int] = []
     for site in sites:
         if not remaining_hs[site]:
-            raise ValueError(
-                f"Template atom {site} has no remaining hydrogens to remove"
-            )
+            raise ValueError(f"Template atom {site} has no remaining hydrogens to remove")
         h_indices_to_remove.append(remaining_hs[site].pop())
 
     for h_idx in sorted(h_indices_to_remove, reverse=True):
@@ -248,9 +237,7 @@ def _embed_template(
     # template = Chem.AddHs(template, addCoords=True)
 
     if AllChem.EmbedMolecule(template, randomSeed=seed) == -1:
-        raise RuntimeError(
-            "Failed to embed a 3D conformer for the merged super-template"
-        )
+        raise RuntimeError("Failed to embed a 3D conformer for the merged super-template")
     AllChem.UFFOptimizeMolecule(template)
 
 
@@ -369,7 +356,8 @@ def build_protonation_states(
     *,
     geometry_mol: Chem.Mol | None = None,
     seed: int = 42,
-) -> list[Chem.Mol]:
+    return_template: bool = False,
+) -> "list[Chem.Mol] | tuple[list[Chem.Mol], Chem.Mol]":
     """Build aligned RDKit Mols for a list of protonation states.
 
     Internally synthesises a maximally-protonated template via
@@ -390,13 +378,18 @@ def build_protonation_states(
     geometry_mol:
         Optional mol whose conformer defines the binding pose. Defaults to
         the most-protonated entry in ``states`` that carries a conformer.
+    return_template:
+        When ``True`` also return the maximally-protonated super-template
+        the states were derived from. It carries the *union* of every
+        state's titratable hydrogens (all sites protonated simultaneously),
+        which constant-pH needs as the master-topology container for
+        ligands whose in-window protomers are non-nested siblings. It
+        shares heavy-atom names/order with the returned states.
     """
     if not states:
         raise ValueError("states must not be empty")
     if any(isinstance(state, str) for state in states):
-        raise TypeError(
-            "build_protonation_states requires RDKit mols with conformers, not SMILES"
-        )
+        raise TypeError("build_protonation_states requires RDKit mols with conformers, not SMILES")
 
     states_with_hs = [_ensure_explicit_hs(s) for s in states]
     geometry_reference = _resolve_geometry_reference(states_with_hs, geometry_mol)
@@ -411,10 +404,10 @@ def build_protonation_states(
         geometry_mol=geometry_reference,
         seed=seed,
     )
-    return [
-        _derive_state_from_template(template, state)
-        for state in states_with_hs
-    ]
+    derived = [_derive_state_from_template(template, state) for state in states_with_hs]
+    if return_template:
+        return derived, template
+    return derived
 
 
 __all__ = ["build_protonation_states", "build_protonation_template"]

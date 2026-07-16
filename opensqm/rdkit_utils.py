@@ -38,11 +38,10 @@ def set_residue_info(
 
 def get_coordinates(mol: Chem.Mol, /, *, conf_id: int = 0) -> np.ndarray:
     """Get coordinates from conformer."""
-    coords = mol.GetConformer(conf_id).GetPositions()
-    return coords
+    return mol.GetConformer(conf_id).GetPositions()
 
 
-def set_random_coordinates(mol: Chem.Mol, /):
+def set_random_coordinates(mol: Chem.Mol, /) -> None:
     """Set random coordinates."""
     ps = AllChem.ETKDGv3()  # type: ignore
     ps.useRandomCoords = True
@@ -90,14 +89,12 @@ def submol(mol: Chem.Mol, /, *, atom_ids: Sequence[int]) -> Chem.Mol:
     for idx in sorted(to_delete_set, reverse=True):
         mol.RemoveAtom(idx)
 
-    mol = mol.GetMol()
+    return mol.GetMol()
 
     # Chem.SanitizeMol(mol)
 
-    return mol
 
-
-def refine_caps(mol: Chem.Mol, ace_res_ids: list, nme_res_ids: list):
+def refine_caps(mol: Chem.Mol, ace_res_ids: list, nme_res_ids: list) -> tuple[Chem.Mol, list[int]]:
     """Refine ACE/NME cap residues: remove non-backbone atoms and tag cap terminals."""
     rw_mol = Chem.RWMol(mol)
     atoms_to_remove = []
@@ -199,9 +196,9 @@ def fix_rdkit_added_h_pdb_labels(mol: Chem.Mol) -> None:
         hs_sorted = sorted(hs, key=lambda a: a.GetIdx())
 
         h_names: list[str] | None = None
-        if resname == "ACE" and aname == "CA" and len(hs_sorted) == 3:  # noqa: PLR2004
+        if resname == "ACE" and aname == "CA" and len(hs_sorted) == 3:
             h_names = ["HH31", "HH32", "HH33"]
-        elif resname == "NME" and aname == "CA" and len(hs_sorted) == 3:  # noqa: PLR2004
+        elif resname == "NME" and aname == "CA" and len(hs_sorted) == 3:
             h_names = ["HH31", "HH32", "HH33"]
         elif resname == "NME" and aname == "N" and len(hs_sorted) == 1:
             h_names = ["H"]
@@ -278,9 +275,7 @@ def crop_and_cap_protein(
     # AddHs will now see a methyl group and add 3 hydrogens to the CA
     capped_protein = Chem.AddHs(capped_protein, addCoords=True, onlyOnAtoms=cap_ids)
     fix_rdkit_added_h_pdb_labels(capped_protein)
-    capped_protein = mol_reordered_contiguous_pdb_residues(capped_protein)
-
-    return capped_protein
+    return mol_reordered_contiguous_pdb_residues(capped_protein)
 
 
 if __name__ == "__main__":

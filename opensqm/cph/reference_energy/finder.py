@@ -17,6 +17,7 @@ offset. There are two entry points:
   ligand path inlines an equivalent block so it can re-use a single
   solvated topology across all transitions.
 """
+
 # pyrefly: ignore [missing-import]
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from loguru import logger
 from openmm.app import PDBFile
 from openmm.unit import (
     MOLAR_GAS_CONSTANT_R,
+    Quantity,
     is_quantity,
     kelvin,
     kilojoules_per_mole,
@@ -62,47 +64,52 @@ def _fractions_converged(
 
 
 class ReferenceEnergyFinder(object):
-    def __init__(self, model, pKa, temperature):
+    """Refine per-state reference energies of a 2-state model compound to a target pKa."""
+
+    def __init__(self, model: ConstantPH, pka: float, temperature: Quantity | float) -> None:
         """
         Construct a ReferenceEnergyFinder.
 
         Parameters
         ----------
         model: ConstantPH
-            The model for which to determine reference energies.  It must contain a single titratable residue with
-            exactly two states.  It does not matter what pH or reference energies were specified when it was created,
-            because they will both be overwritten.
+            The model for which to determine reference energies.  It must
+            contain a single titratable residue with exactly two states.  It
+            does not matter what pH or reference energies were specified when it
+            was created, because they will both be overwritten.
         pKa: float
-            The experimental pKa of the titratable residue.  Reference energies will be chosen to match it.
+            The experimental pKa of the titratable residue.  Reference energies
+            will be chosen to match it.
         temperature: openmm.unit.Quantity
             The temperature at which the simulation will be run.
         """
         if len(model.titrations) != 1:
             raise ValueError("The model compound must contain a single titratable residue")
         self.model = model
-        self.pKa = pKa
+        self.pka = pka
         if not is_quantity(temperature):
-            temperature = temperature*kelvin
+            temperature = temperature * kelvin
         self.temperature = temperature
-        self.residueIndex = next(iter(model.titrations.keys()))
-        self.titration = model.titrations[self.residueIndex]
-        if len(self.titration.explicitStates) != 2:
+        self.residue_index = next(iter(model.titrations.keys()))
+        self.titration = model.titrations[self.residue_index]
+        if len(self.titration.explicit_states) != 2:
             raise ValueError("Only residues with two states are currently supported")
 
-    def findReferenceEnergies(
+    def find_reference_energies(
         self,
         substeps: int = 20,
         *,
         max_iterations: int = 20_000,
         check_interval: int = 200,
         fraction_tolerance: float = 0.01,
-        min_samples_per_ph: int = 50,
-        stable_checks: int = 3,
+        min_samples_per_ph: int = 500,
+        stable_checks: int = 5,
         progress_desc: str | None = None,
-    ):
+    ) -> None:
         """
-        Compute the reference energies for the states of the model compound.  On exit, they will be stored in
-        the ConstantPH object.
+        Compute the reference energies for the states of the model compound.
+
+        On exit, they will be stored in the ConstantPH object.
 
         Parameters
         ----------
@@ -122,26 +129,29 @@ class ReferenceEnergyFinder(object):
         # Find an initial estimate of the reference energies just by computing the potential
         # energies of the states.
 
-        self.model.setResidueState(self.residueIndex, 0)
+        self.model.set_residue_state(self.residue_index, 0)
         energy0 = self.model.implicitContext.getState(energy=True).getPotentialEnergy()
-        self.model.setResidueState(self.residueIndex, 1)
+        self.model.set_residue_state(self.residue_index, 1)
         energy1 = self.model.implicitContext.getState(energy=True).getPotentialEnergy()
-        deltaN = self.titration.implicitStates[1].numHydrogens - self.titration.implicitStates[0].numHydrogens
-        scale = MOLAR_GAS_CONSTANT_R*self.temperature*deltaN*np.log(10.0)
-        self.titration.referenceEnergies[0] = 0.0*kilojoules_per_mole
-        self.titration.referenceEnergies[1] = energy1-energy0
+        deltaN = (
+            self.titration.implicit_states[1].num_hydrogens
+            - self.titration.implicit_states[0].num_hydrogens
+        )
+        scale = MOLAR_GAS_CONSTANT_R * self.temperature * deltaN * np.log(10.0)
+        self.titration.reference_energies[0] = 0.0 * kilojoules_per_mole
+        self.titration.reference_energies[1] = energy1 - energy0
         self.model.simulation.minimizeEnergy()
         self.model.simulation.context.setVelocitiesToTemperature(self.temperature)
 
-        # If our initial estimate is exact, the fractions should be equal at pH 0.  Since it probably
-        # isn't, simulate it at various pHs to refine the estimate.
+        # If our initial estimate is exact, the fractions should be equal at pH 0.  Since it
+        # probably isn't, simulate it at various pHs to refine the estimate.
 
         while True:
-            self.model.setPH([-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0])
+            self.model.set_ph([-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0])
             for _ in range(1000):
                 self.model.simulation.step(substeps)
-                self.model.attemptMCStep()
-            fractions = [[] for _ in range(len(self.model.pH))]
+                self.model.attempt_mc_step()
+            fractions = [[] for _ in range(len(self.model.ph))]
             previous_means: dict[int, float] | None = None
             consecutive_stable_checks = 0
             pbar = (
@@ -152,10 +162,10 @@ class ReferenceEnergyFinder(object):
             try:
                 for mc_step in range(1, max_iterations + 1):
                     self.model.simulation.step(substeps)
-                    self.model.attemptMCStep()
+                    self.model.attempt_mc_step()
                     fractions[self.model.currentPHIndex].append(
                         1.0
-                        if self.titration.protonatedIndex == self.titration.currentIndex
+                        if self.titration.protonated_index == self.titration.current_index
                         else 0.0
                     )
                     if pbar is not None:
@@ -165,12 +175,13 @@ class ReferenceEnergyFinder(object):
                         continue
 
                     current_means = _mean_fractions_by_ph(
-                        fractions, min_samples_per_ph,
+                        fractions,
+                        min_samples_per_ph,
                     )
                     if previous_means is not None and _fractions_converged(
                         previous_means,
                         current_means,
-                        len(self.model.pH),
+                        len(self.model.ph),
                         fraction_tolerance,
                     ):
                         consecutive_stable_checks += 1
@@ -190,19 +201,19 @@ class ReferenceEnergyFinder(object):
             y = []
             for i in range(len(fractions)):
                 if len(fractions[i]) > 0:
-                    x.append(self.model.pH[i])
+                    x.append(self.model.ph[i])
                     y.append(np.average(fractions[i]))
 
-            def f(ph, pka):
-                return 1/(1+10**(ph-pka))
+            def f(ph: np.ndarray, pka: float) -> np.ndarray:
+                return 1 / (1 + 10 ** (ph - pka))
 
             # pyrefly: ignore [bad-unpacking]
             popt, _pcov = curve_fit(f, x, y, [0.0], full_output=False)
             root = popt[0]
             if root > -2 and root < 2:
-                self.titration.referenceEnergies[1] += scale*(self.pKa-root)
+                self.titration.reference_energies[1] += scale * (self.pka - root)
                 break
-            self.titration.referenceEnergies[1] -= scale*root
+            self.titration.reference_energies[1] -= scale * root
 
 
 def _make_pair_reference(
@@ -250,8 +261,7 @@ def _compute_pairwise_reference_energy(
     """
     if any(isinstance(p, str) for p in pair):
         # For protein variants the variant name *is* the string entry.
-        pair_names = [p if isinstance(p, str) else f"<custom_{i}>"
-                      for i, p in enumerate(pair)]
+        pair_names = [p if isinstance(p, str) else f"<custom_{i}>" for i, p in enumerate(pair)]
     else:
         pair_names = [f"{residue_name}_{i}" for i in range(len(pair))]
     cache_name = "-".join(pair_names)
@@ -275,19 +285,20 @@ def _compute_pairwise_reference_energy(
     cph = ConstantPH(
         topology=pdb.topology,
         positions=pdb.positions,
-        pH=7.0,
+        ph=7.0,
         config=config,
         references=references,
         titratable_residue_indices=[1],
         ring_flip_angles=None,
+        log_transitions=False,  # fitting scans many pHs; don't flood the log
     )
     logger.info(f"Computing reference energy for {cache_name} with pKa={pka}")
-    finder = ReferenceEnergyFinder(cph, pKa=pka, temperature=config.temperature)
-    finder.findReferenceEnergies(
+    finder = ReferenceEnergyFinder(cph, pka=pka, temperature=config.temperature)
+    finder.find_reference_energies(
         substeps=substeps,
         max_iterations=iterations,
     )
-    ref_energies = cph.titrations[1].referenceEnergies
+    ref_energies = cph.titrations[1].reference_energies
     logger.info(f"Computed reference energies for {cache_name}: {ref_energies}")
     # ``referenceEnergies`` is in the order of the input ``pair``. ``pair[0]``
     # is the parent slot supplied by the caller, so ``ref_energies[1]`` is

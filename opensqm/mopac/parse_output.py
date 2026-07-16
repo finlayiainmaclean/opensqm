@@ -1,4 +1,5 @@
-# ruff: noqa: D100, PLR2004
+"""Parsers for MOPAC output: energies, COSMO area, formal charges, bonds, coordinates."""
+
 import re
 
 import numpy as np
@@ -42,8 +43,7 @@ def _extract_cosmo_area(output_str: str) -> float:
     match = re.search(r"COSMO AREA\s*=\s*([\d.]+)\s*SQUARE ANGSTROMS", output_str)
 
     if match:
-        cosmo_area = float(match.group(1))
-        return cosmo_area
+        return float(match.group(1))
     else:
         raise ValueError("COSMO AREA not found in output file")
 
@@ -59,8 +59,7 @@ def _extract_formal_charges_from_mopac_str(output_str: str) -> pd.DataFrame:
             {"ion": int(ion), "atom_ix": int(atom_no), "type": atype, "charge": int(charge)}
         )
 
-    df = pd.DataFrame(rows)
-    return df
+    return pd.DataFrame(rows)
 
 
 def _parse_bonds(text: str) -> set[tuple[int, int]]:

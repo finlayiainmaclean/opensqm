@@ -1,4 +1,5 @@
-# ruff: noqa: D100, D103, E501
+"""Position-restraint forces for equilibration and minimisation."""
+
 import copy
 from collections.abc import Generator, Sequence
 from typing import Literal
@@ -28,7 +29,13 @@ def add_distal_restraints(
     flat_bottom_sigma: float = 0.0,
     exclusion_distance: float = 1.0,
     exclude_by_residue: bool = False,
-) -> System:
+) -> tuple[System, int]:
+    """Add distance-dependent position restraints to a copy of the system.
+
+    Restrained atoms are selected by ``restraints`` and their force constants
+    scale linearly with each atom's distance to the ligand. Return the new
+    restrained system and the index of the added restraint force.
+    """
     # Add restraints to system for equilibration in place with distance-dependent force constants.
     # ``flat_bottom_sigma`` (Angstrom): if > 0 use a flat-bottom restraint, no force until the atom
     # is displaced more than sigma from its reference position (paper backbone sigma = 3.0 A).
@@ -61,9 +68,7 @@ def add_distal_restraints(
 
     # Create force with per-particle force constant
     if flat_bottom_sigma > 0.0:
-        force = CustomExternalForce(
-            "k*(max(0, periodicdistance(x, y, z, x0, y0, z0) - sigma))^2"
-        )
+        force = CustomExternalForce("k*(max(0, periodicdistance(x, y, z, x0, y0, z0) - sigma))^2")
         force.addGlobalParameter("sigma", flat_bottom_sigma / 10.0)  # Angstrom -> nm
     else:
         force = CustomExternalForce("k*periodicdistance(x, y, z, x0, y0, z0)^2")
@@ -123,14 +128,21 @@ def add_restraints(
     system: System,
     positions: Quantity,
     atoms: Generator[Atom, None, None],
-    restraint_force: OpenMMQuantity[unit.kilocalories_per_mole / unit.angstroms**2] = 4.0 * unit.kilocalories_per_mole / unit.angstroms**2,
+    restraint_force: OpenMMQuantity[unit.kilocalories_per_mole / unit.angstroms**2] = 4.0
+    * unit.kilocalories_per_mole
+    / unit.angstroms**2,
     restraints: Sequence[Literal["ligand", "backbone", "heavy_atom", "protein", "solvent"]] = (
         "ligand",
         "backbone",
     ),
     periodic: bool = True,
-) -> System:
-    # Add restrains to system for equilibration in place. The restraints are added to the backbone atoms of the protein, and heavy atoms of the ligand.
+) -> tuple[System, int]:
+    """Add position restraints to a copy of the system for equilibration.
+
+    Restraints are applied to protein backbone atoms and ligand heavy atoms
+    (and optionally solvent/ions), selected by ``restraints``. Return the new
+    restrained system and the index of the added restraint force.
+    """
     if periodic:
         expr = "k*periodicdistance(x, y, z, x0, y0, z0)^2"
     else:

@@ -10,6 +10,9 @@ turns those name-based tuples into index-based
 :class:`opensqm.cph.reference_energy.models.Transition` objects once the
 variant list is locked in.
 """
+
+from collections.abc import Callable
+
 # pyrefly: ignore [missing-import]
 from openff.toolkit.topology import Molecule  # type: ignore
 from rdkit import Chem
@@ -20,7 +23,7 @@ from .types import NamedTransition
 
 def build_transitions_tree(
     variant_molecules: list[Molecule],
-    pka_fn,
+    pka_fn: Callable[[Chem.Mol, Chem.Mol], float],
 ) -> list[NamedTransition]:
     """Build a 1-proton-step spanning graph of microscopic transitions.
 
@@ -109,9 +112,7 @@ def build_transitions_tree(
         # No earlier variant at charge+1: this is a same-charge tautomer
         # of the root (or another earlier variant). Attach it as a parent
         # of the first variant at charge-1 instead.
-        same_charge_earlier = any(
-            charges[i] == charges[var_idx] for i in range(var_idx)
-        )
+        same_charge_earlier = any(charges[i] == charges[var_idx] for i in range(var_idx))
         if same_charge_earlier:
             target_child_charge = charges[var_idx] - 1
             child_idx = next(
@@ -160,16 +161,13 @@ def _resolve_named_transitions(
     for i, n in enumerate(names):
         if n in name_to_idx:
             raise ValueError(
-                f"variant names must be unique to resolve transitions; "
-                f"got duplicate {n!r}"
+                f"variant names must be unique to resolve transitions; got duplicate {n!r}"
             )
         name_to_idx[n] = i
     out: list[Transition] = []
     for entry in transitions:
         if len(entry) != 3:
-            raise ValueError(
-                f"each transition must be a (parent, child, pka) tuple; got {entry!r}"
-            )
+            raise ValueError(f"each transition must be a (parent, child, pka) tuple; got {entry!r}")
         parent_name, child_name, pka = entry
         if parent_name not in name_to_idx:
             raise ValueError(

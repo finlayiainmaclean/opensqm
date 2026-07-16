@@ -10,8 +10,7 @@ import pandas as pd
 from loguru import logger
 from openmm import unit
 
-from opensqm.modbinddg.mmgbsa import compute_bound_mmgbsa
-from opensqm.modbinddg.reweight import (
+from opensqm.modbind.reweight import (
     bootstrap_delta_g,
     compute_delta_g,
     radial_pmf,
@@ -19,8 +18,8 @@ from opensqm.modbinddg.reweight import (
 )
 
 if TYPE_CHECKING:
-    from opensqm.modbinddg.config import ModBindDGSettings
-    from opensqm.modbinddg.simulate import ModBindDGData
+    from opensqm.modbind.config import ModBindDGSettings
+    from opensqm.modbind.simulate import ModBindDGData
 
 RESULTS_COLUMNS = [
     "delta_g",
@@ -74,9 +73,7 @@ def _write_pmf(
         last_finite = int(np.max(np.where(finite))) if finite.any() else -1
         keep = min(centers.size, last_finite + 2)
         centers, pmf = centers[:keep], pmf[:keep]
-    pd.DataFrame({"radius": centers, "pmf": pmf}).to_csv(
-        output_path / "pmf.csv", index=False
-    )
+    pd.DataFrame({"radius": centers, "pmf": pmf}).to_csv(output_path / "pmf.csv", index=False)
 
 
 def analyze_modbinddg(
@@ -111,22 +108,11 @@ def analyze_modbinddg(
     )
 
     bound_dt_ns = config.bound_frame_interval.value_in_unit(unit.nanosecond)
-    bound_sim_time_ns = float(
-        sum(max(len(traj) - 1, 0) for traj in bound_coords) * bound_dt_ns
-    )
+    bound_sim_time_ns = float(sum(max(len(traj) - 1, 0) for traj in bound_coords) * bound_dt_ns)
     unbound_sim_time_ns = float(escape_times.sum() * step_size_ps / 1000.0)
     total_sim_time_ns = bound_sim_time_ns + unbound_sim_time_ns
 
     _write_pmf(bound_coords, config, rt, output_path)
-
-    logger.info("Computing bound-state MMGBSA (COM < bound radius)")
-    mmgbsa = compute_bound_mmgbsa(
-        bound_coords,
-        trajectory_dir=trajectory_dir,
-        ligand_path=ligand_path,
-        config=config,
-        output_path=output_path,
-    )
 
     results = {
         "delta_g": point["delta_g"],
@@ -149,11 +135,10 @@ def analyze_modbinddg(
         "bound_population_max": point["bound_population_max"],
         "unbound_mode": config.unbound_mode,
         "unbound_g": point["unbound_g"],
-        "temperature_K": data.temperature_K,
+        "temperature_K": data.temperature_k,
         "bound_sim_time_ns": bound_sim_time_ns,
         "unbound_sim_time_ns": unbound_sim_time_ns,
         "total_sim_time_ns": total_sim_time_ns,
-        **mmgbsa,
     }
 
     pd.DataFrame([results], columns=RESULTS_COLUMNS).to_csv(

@@ -1,5 +1,4 @@
 """Tests for MOPAC output coordinate parsing."""
-# ruff: noqa: PLR2004
 
 import pytest
 

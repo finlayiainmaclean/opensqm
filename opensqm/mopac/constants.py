@@ -1,4 +1,5 @@
-# ruff: noqa: D100
+"""Shared MOPAC constants: optimisation modes and van der Waals radii."""
+
 from typing import Final, Literal
 
 OptMode = Literal["ligand", "pocket", "hydrogens"]

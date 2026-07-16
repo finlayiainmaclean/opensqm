@@ -121,7 +121,7 @@ def find_terminal_group(
     adj[bond_atom_a].remove(bond_atom_b)
     adj[bond_atom_b].remove(bond_atom_a)
 
-    def get_component(start_node):
+    def get_component(start_node: int) -> set[int]:
         visited = {start_node}
         queue = [start_node]
         while queue:

@@ -13,20 +13,11 @@ from typing import Literal
 
 import xxhash
 from openmm import unit
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 from pydantic_units import OpenMMQuantity
-
-from opensqm.md.equilibrate import EquilibrationSettings
 
 UnboundMode = Literal["explicit", "einstein"]
 BoxShape = Literal["cube", "dodecahedron", "octahedron"]
-
-
-def _default_equilibration_config() -> EquilibrationSettings:
-    return EquilibrationSettings(
-        npt_time=200 * unit.picoseconds,
-        warmup_time=50 * unit.picoseconds,
-    )
 
 
 class ModBindDGSettings(BaseModel):
@@ -35,7 +26,6 @@ class ModBindDGSettings(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     # --- System preparation ---
-    bespoke_ligand_forcefield: bool = False
     bound_box_shape: BoxShape = "cube"
     bound_padding: OpenMMQuantity[unit.nanometer] = 1.2 * unit.nanometer
     unbound_box_shape: BoxShape = "cube"
@@ -53,7 +43,7 @@ class ModBindDGSettings(BaseModel):
     # Target temperature that populations are reweighted back to (Eq. 4).
     reference_temperature: OpenMMQuantity[unit.kelvin] = 300.0 * unit.kelvin
     integrator_step_size: OpenMMQuantity[unit.picosecond] = 0.002 * unit.picoseconds
-    friction: OpenMMQuantity[unit.picosecond**-1] = 1.0 / unit.picosecond # type: ignore 
+    friction: OpenMMQuantity[unit.picosecond**-1] = 1.0 / unit.picosecond  # type: ignore
 
     n_replicas: int = 8
     # Optional per-replica bound temperatures (K). When omitted, every replica
@@ -66,10 +56,10 @@ class ModBindDGSettings(BaseModel):
     bound_frame_interval: OpenMMQuantity[unit.picosecond] = 10.0 * unit.picoseconds
     unbound_frame_interval: OpenMMQuantity[unit.picosecond] = 1.0 * unit.picoseconds
     # Upper bound on the length of any single escape trajectory.
-    max_escape_time: OpenMMQuantity[unit.nanosecond] = 10.0 * unit.nanosecond
+    max_escape_time: OpenMMQuantity[unit.nanosecond] = 5.0 * unit.nanosecond
     # Target number of escape segments for the single long unbound simulation.
     unbound_target_escapes: int = 32
-    unbound_max_time: OpenMMQuantity[unit.nanosecond] = 10.0 * unit.nanosecond
+    unbound_max_time: OpenMMQuantity[unit.nanosecond] = 5.0 * unit.nanosecond
 
     # --- State definitions / reweighting (Angstrom) ---
     bound_state_radius: float = 2.0
@@ -88,7 +78,6 @@ class ModBindDGSettings(BaseModel):
     # --- Statistics / output ---
     n_bootstrap: int = 1000
     random_seed: int = 1234
-    n_closest_waters: int = 5
 
     @property
     def reweight_exponent(self) -> float:
@@ -97,8 +86,8 @@ class ModBindDGSettings(BaseModel):
         t_ref = self.reference_temperature.value_in_unit(unit.kelvin)
         return t_sim / t_ref
 
-    def bound_temperatures_K(self) -> tuple[float, ...]:
-        """Simulation temperature (K) for each bound escape replica."""
+    def bound_temperatures_k(self) -> tuple[float, ...]:
+        """Return the simulation temperature (K) for each bound escape replica."""
         if self.replica_temperatures is not None:
             if len(self.replica_temperatures) != self.n_replicas:
                 raise ValueError(
@@ -112,7 +101,7 @@ class ModBindDGSettings(BaseModel):
     def bound_reweight_exponents(self) -> tuple[float, ...]:
         """Per-replica ``T_sim / T_ref`` exponents for bound-state reweighting."""
         t_ref = self.reference_temperature.value_in_unit(unit.kelvin)
-        return tuple(t / t_ref for t in self.bound_temperatures_K())
+        return tuple(t / t_ref for t in self.bound_temperatures_k())
 
     @property
     def unbound_volume(self) -> float:
@@ -124,7 +113,6 @@ class ModBindDGSettings(BaseModel):
     def hash(self) -> str:
         """Reproducible short hash of the settings that define a run."""
         conf_dict = {
-            "bespoke_ligand_forcefield": self.bespoke_ligand_forcefield,
             "bound_box_shape": self.bound_box_shape,
             "bound_padding": str(self.bound_padding),
             "unbound_box_shape": self.unbound_box_shape,

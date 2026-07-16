@@ -153,7 +153,7 @@ def _create_nonbonded_force(force: _T, solute_idxs: set[int]) -> _T:
     raise NotImplementedError
 
 
-def apply_rest(system: System, solute_idxs: set[int]):
+def apply_rest(system: System, solute_idxs: set[int]) -> None:
     """Apply REST forces to the system."""
     forces_by_type = collections.defaultdict(dict)
 

@@ -1,4 +1,5 @@
-# ruff: noqa: D100, D103, PLW2901, E501
+"""LEWIS bond perception and CVB (constrained valence bond) string construction."""
+
 import tempfile
 from pathlib import Path
 
@@ -16,7 +17,10 @@ from opensqm.mopac.runner import _run_mopac_input_file, check_mopac_was_success
 
 
 def _build_lewis_geo_dat_keywords(mol: Chem.Mol, tmpdir: Path, *, metal: bool) -> str:
-    """Write `mol.mop` (+ optional `setpi.txt`) and return the LEWIS keyword line (GEO_DAT, optional SETPI)."""
+    """Write `mol.mop` (+ optional `setpi.txt`); return the LEWIS keyword line.
+
+    The keyword line contains GEO_DAT and, optionally, SETPI.
+    """
     mol_mop_path = tmpdir / "mol.mop"
     setpi_path = tmpdir / "setpi.txt"
     charge = Chem.GetFormalCharge(mol)
@@ -30,7 +34,10 @@ def _build_lewis_geo_dat_keywords(mol: Chem.Mol, tmpdir: Path, *, metal: bool) -
 
 
 def _prepare_mopac_lewis_bonds_job(mol: Chem.Mol, tmpdir: Path) -> tuple[Path, Path]:
-    """Write LEWIS + GEO_DAT (+ optional SETPI) job files; return (control path, expected .out path)."""
+    """Write LEWIS + GEO_DAT (+ optional SETPI) job files.
+
+    Return ``(control path, expected .out path)``.
+    """
     mopac_path = tmpdir / "run.mopac"
     out_path = tmpdir / "run    ac.out"
     mopac_path.write_text(_build_lewis_geo_dat_keywords(mol, tmpdir, metal=False))
@@ -38,10 +45,11 @@ def _prepare_mopac_lewis_bonds_job(mol: Chem.Mol, tmpdir: Path) -> tuple[Path, P
 
 
 def get_mopac_bonds(mol: Chem.Mol) -> set[tuple[int, int]]:
+    """Run a LEWIS job and return the MOPAC-perceived bonds as 1-indexed (i, j) pairs."""
     mol = fix_nitro_groups(mol)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir = Path(tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir_str:
+        tmpdir = Path(tmpdir_str)
         mopac_path, out_path = _prepare_mopac_lewis_bonds_job(mol, tmpdir)
         _run_mopac_input_file(mopac_path, cwd=tmpdir)
         output_str = out_path.read_text()
@@ -50,6 +58,7 @@ def get_mopac_bonds(mol: Chem.Mol) -> set[tuple[int, int]]:
 
 
 def get_atom_label(mol: Chem.Mol, atom_idx: int) -> str:
+    """Return a ``RESNAME-RESNUM-ATOMNAME`` label from an atom's PDB residue info."""
     atom = mol.GetAtomWithIdx(atom_idx)
     pdb_info = atom.GetPDBResidueInfo()
     if pdb_info is None:
@@ -62,6 +71,7 @@ def get_atom_label(mol: Chem.Mol, atom_idx: int) -> str:
 
 
 def get_cvb_str(mol: Chem.Mol) -> str:
+    """Build the CVB keyword reconciling MOPAC-perceived bonds with the RDKit graph."""
     mol = fix_nitro_groups(mol)
 
     mopac_bonds = get_mopac_bonds(mol)
@@ -91,11 +101,12 @@ def get_cvb_str(mol: Chem.Mol) -> str:
     bonds_str = missing_bonds_str + extra_bonds_str
 
     valid_bonds_str = []
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir = Path(tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir_str:
+        tmpdir = Path(tmpdir_str)
         mopac_path = tmpdir / "run.mopac"
         out_path = tmpdir / "run    ac.out"
-        # Writes mol.mop / setpi.txt; string includes SETPI="…/setpi.txt" when π-bonds are annotated.
+        # Writes mol.mop / setpi.txt; string includes SETPI="…/setpi.txt"
+        # when π-bonds are annotated.
         base_mopac_str = _build_lewis_geo_dat_keywords(mol, tmpdir, metal=True)
 
         for bond_str in bonds_str:

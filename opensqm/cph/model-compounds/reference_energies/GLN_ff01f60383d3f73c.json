@@ -1,0 +1,23 @@
+{
+  "residue_name": "GLN",
+  "main_variant": "GLN",
+  "variant_names": [
+    "GLN"
+  ],
+  "variants": [
+    "GLN"
+  ],
+  "charges": [
+    0
+  ],
+  "reference_energies_kj_per_mole": [
+    0.0
+  ],
+  "transitions": [],
+  "ring_flip_bonds": [
+    [
+      "CG",
+      "CD"
+    ]
+  ]
+}

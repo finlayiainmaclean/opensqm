@@ -2,17 +2,21 @@ r"""pH replica-exchange wrapper around :class:`~opensqm.cph.constantph.ConstantP
 
 Each replica carries the full pH ladder and may walk it via simulated
 tempering (as in a single-replica :class:`ConstantPH` run).  Adjacent
-replicas periodically attempt to exchange their full thermodynamic states
-(coordinates, velocities, protonation pattern, and active pH index).
+replicas periodically attempt to exchange their *configurations*
+(coordinates, velocities, and protonation pattern); each replica keeps its
+own pH, so replica ``k`` always samples ladder rung ``k`` and adjacent-pair
+exchanges always compare adjacent pH values.  (Swapping the pH label instead
+of - or in addition to - the configuration would leave the pooled ensemble
+unchanged, i.e. a pure relabelling.)
 
-The acceptance probability for exchanging replicas *i* and *j* depends
-only on the difference in titratable protons and the pH values, as in
-explicit-solvent CpHMD (Mongan *et al.*, eq. 3):
+The acceptance probability for exchanging the configurations of replicas
+*i* and *j* depends only on the difference in titratable protons and the pH
+values, as in explicit-solvent CpHMD (Mongan *et al.*, eq. 3):
 
 .. math::
 
     P_\\mathrm{acc} = \\min\\!\\left(1,\\;
-        10^{(N_i - N_j)(\\mathrm{pH}_j - \\mathrm{pH}_i)}\\right)
+        10^{(N_i - N_j)(\\mathrm{pH}_i - \\mathrm{pH}_j)}\\right)
 
 Because the underlying potential at fixed protonation does not depend on
 the replica pH label, no explicit-solvent energy difference enters the
@@ -34,6 +38,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
     from openff.toolkit.topology import Molecule  # type: ignore
+    from openmm import Platform, State, unit
+    from openmm.app import Topology
 
     from opensqm.cph.reference_energy.models import TitratableResidueReference
     from opensqm.cph.simulation_config import ConstantpHSettings
@@ -41,23 +47,28 @@ if TYPE_CHECKING:
 
 def num_titratable_protons(cph: ConstantPH) -> int:
     """Count titratable protons present across all driven residues."""
-    return sum(
-        t.explicitStates[t.currentIndex].numHydrogens
-        for t in cph.titrations.values()
-    )
+    return sum(t.explicit_states[t.current_index].num_hydrogens for t in cph.titrations.values())
 
 
 def replica_exchange_log_probability(cph_i: ConstantPH, cph_j: ConstantPH) -> float:
-    """Log acceptance probability for a pH-REMD swap between two replicas."""
+    """Log Metropolis acceptance for exchanging two replicas' configurations.
+
+    Exchanging the configurations swaps which pH each proton count experiences.
+    The pH-coupled part of the effective energy (``U + N ln10 pH``) changes by
+    ``ln10 (N_i - N_j)(pH_j - pH_i)``, so the log-acceptance is its negative,
+    ``ln10 (N_i - N_j)(pH_i - pH_j)``. It is >= 0 (always accept) when the swap
+    moves the more-protonated configuration toward lower pH, and < 0 when it
+    would push it toward higher pH.
+    """
     n_i = num_titratable_protons(cph_i)
     n_j = num_titratable_protons(cph_j)
-    ph_i = cph_i.pH[cph_i.currentPHIndex]
-    ph_j = cph_j.pH[cph_j.currentPHIndex]
-    return (n_i - n_j) * np.log(10.0) * (ph_j - ph_i)
+    ph_i = cph_i.ph[cph_i.currentPHIndex]
+    ph_j = cph_j.ph[cph_j.currentPHIndex]
+    return (n_i - n_j) * np.log(10.0) * (ph_i - ph_j)
 
 
 def _protonation_snapshot(cph: ConstantPH) -> dict[int, int]:
-    return {res_index: t.currentIndex for res_index, t in cph.titrations.items()}
+    return {res_index: t.current_index for res_index, t in cph.titrations.items()}
 
 
 def _apply_protonation_snapshot(
@@ -65,7 +76,7 @@ def _apply_protonation_snapshot(
     snapshot: dict[int, int],
 ) -> None:
     for res_index, state_index in snapshot.items():
-        cph.setResidueState(res_index, state_index, relax=False)
+        cph.set_residue_state(res_index, state_index, relax=False)
 
 
 def _sync_auxiliary_contexts(cph: ConstantPH) -> None:
@@ -80,14 +91,15 @@ def _sync_auxiliary_contexts(cph: ConstantPH) -> None:
         cph.relaxationContext.setParameter(param, sim_params[param])
 
 
-def _apply_md_state(cph: ConstantPH, md_state) -> None:
+def _apply_md_state(cph: ConstantPH, md_state: State) -> None:
     """Restore positions, velocities, and box vectors on a replica context."""
     cph.simulation.context.setPositions(md_state.getPositions())
     cph.simulation.context.setVelocities(md_state.getVelocities())
     cph.simulation.context.setPeriodicBoxVectors(*md_state.getPeriodicBoxVectors())
 
 
-def _capture_md_state(cph: ConstantPH):
+def _capture_md_state(cph: ConstantPH) -> State:
+    """Capture a replica's positions, velocities, and periodic box as an OpenMM State."""
     return cph.simulation.context.getState(
         getPositions=True,
         getVelocities=True,
@@ -118,15 +130,26 @@ class ConstantPHRemd:
         Simulated-tempering weights for the pH ladder.  ``None`` triggers
         Wang-Landau auto-tuning independently on each replica until
         :meth:`set_weights` is called.
+    simulated_tempering
+        When ``False``, each replica is pinned at its starting pH index and
+        never proposes a simulated-tempering pH move; combined with one replica
+        per ladder rung this gives a fixed-pH pH-REMD run for which the
+        simulated-tempering weights are unnecessary. ``True`` (default) keeps
+        per-replica simulated tempering across the full ladder.
+    allowed_variant_indices
+        Optional map of topology residue index -> allowed variant indices,
+        shared by every replica and forwarded to each :class:`ConstantPH`. Used
+        to forbid a charge-changing variant while keeping a charge-neutral
+        tautomer flip (e.g. a neutral histidine restricted to HID/HIE).
     ligand_variant_molecules, ring_flip_angles, platform, properties
         Forwarded to each :class:`ConstantPH` replica.
     """
 
     def __init__(
         self,
-        topology,
-        positions,
-        pH: Sequence[float],
+        topology: Topology,
+        positions: unit.Quantity,
+        ph: Sequence[float],
         config: "ConstantpHSettings",
         references: "dict[str, TitratableResidueReference]",
         titratable_residue_indices: Iterable[int],
@@ -134,15 +157,25 @@ class ConstantPHRemd:
         n_replicas: int = 1,
         initial_ph_indices: Sequence[int] | None = None,
         ligand_variant_molecules: "list[Molecule] | None" = None,
-        ring_flip_angles=None,
+        ring_flip_angles: Sequence[float] | None = None,
         weights: list[float] | None = None,
-        platform=None,
-        properties=None,
-    ):
+        initial_variant_indices: "dict[int, int] | list[dict[int, int]] | None" = None,
+        allowed_variant_indices: "dict[int, Iterable[int]] | None" = None,
+        simulated_tempering: bool = True,
+        platform: Platform | None = None,
+        properties: dict | None = None,
+    ) -> None:
         if n_replicas < 1:
             raise ValueError("n_replicas must be at least 1")
+        # Per-replica starting variants: a single dict is shared by all replicas;
+        # a list assigns one dict per replica (diversified initial conditions).
+        if isinstance(initial_variant_indices, list) and len(initial_variant_indices) != n_replicas:
+            raise ValueError(
+                f"initial_variant_indices list has length {len(initial_variant_indices)} "
+                f"but n_replicas is {n_replicas}"
+            )
 
-        self.pH = [float(x) for x in pH]
+        self.ph = [float(x) for x in ph]
         self.n_replicas = n_replicas
         self.replicas: list[ConstantPH] = []
 
@@ -151,8 +184,7 @@ class ConstantPHRemd:
                 initial_ph_indices = [0]
             else:
                 initial_ph_indices = [
-                    round(i * (len(self.pH) - 1) / (n_replicas - 1))
-                    for i in range(n_replicas)
+                    round(i * (len(self.ph) - 1) / (n_replicas - 1)) for i in range(n_replicas)
                 ]
         if len(initial_ph_indices) != n_replicas:
             raise ValueError(
@@ -160,23 +192,30 @@ class ConstantPHRemd:
                 f"but n_replicas is {n_replicas}"
             )
         for index in initial_ph_indices:
-            if index < 0 or index >= len(self.pH):
+            if index < 0 or index >= len(self.ph):
                 raise ValueError(
-                    f"initial pH index {index} is outside ladder "
-                    f"range [0, {len(self.pH) - 1}]"
+                    f"initial pH index {index} is outside ladder range [0, {len(self.ph) - 1}]"
                 )
 
-        for ph_index in initial_ph_indices:
+        for replica_index, ph_index in enumerate(initial_ph_indices):
+            replica_variant_indices = (
+                initial_variant_indices[replica_index]
+                if isinstance(initial_variant_indices, list)
+                else initial_variant_indices
+            )
             replica = ConstantPH(
                 topology=topology,
                 positions=positions,
-                pH=self.pH,
+                ph=self.ph,
                 config=config,
                 references=references,
                 titratable_residue_indices=titratable_residue_indices,
                 ligand_variant_molecules=ligand_variant_molecules,
                 ring_flip_angles=ring_flip_angles,
                 weights=weights,
+                initial_variant_indices=replica_variant_indices,
+                allowed_variant_indices=allowed_variant_indices,
+                simulated_tempering=simulated_tempering,
                 platform=platform,
                 properties=properties,
             )
@@ -188,6 +227,7 @@ class ConstantPHRemd:
 
     @property
     def exchange_acceptance_rate(self) -> float:
+        """Fraction of attempted replica exchanges that were accepted."""
         if self.n_exchange_attempts == 0:
             return 0.0
         return self.n_exchange_accepted / self.n_exchange_attempts
@@ -196,7 +236,7 @@ class ConstantPHRemd:
         """Apply fixed simulated-tempering weights to every replica."""
         weight_list = list(weights)
         for replica in self.replicas:
-            replica.setPH(self.pH, weight_list)
+            replica.set_ph(self.ph, weight_list)
 
     @property
     def weights(self) -> list[float]:
@@ -208,15 +248,18 @@ class ConstantPHRemd:
         for replica in self.replicas:
             replica.simulation.step(steps)
 
-    def attemptMCStep(self) -> list[bool]:
+    def attempt_mc_step(self) -> list[bool]:
         """Run one CpH MC step on each replica (includes simulated tempering)."""
-        return [replica.attemptMCStep() for replica in self.replicas]
+        return [replica.attempt_mc_step() for replica in self.replicas]
 
-    def attemptReplicaExchange(self, i: int = 0, j: int = 1) -> bool:
+    def attempt_replica_exchange(self, i: int = 0, j: int = 1) -> bool:
         """Attempt a pH-REMD exchange between replicas ``i`` and ``j``.
 
-        Swaps coordinates, velocities, protonation states, and active pH
-        indices when the Metropolis criterion is satisfied.
+        On acceptance, swaps the two replicas' configurations (coordinates,
+        velocities, box, and protonation pattern) while leaving each replica's pH
+        fixed - equivalent to swapping the pH labels, so the same Metropolis
+        criterion applies (Swails & Roitberg, JCTC 2014,
+        ``P = min{1, 10^((N_i - N_j)(pH_i - pH_j))}``).
         """
         if i < 0 or j < 0 or i >= self.n_replicas or j >= self.n_replicas:
             raise IndexError(f"replica indices ({i}, {j}) out of range")
@@ -235,19 +278,25 @@ class ConstantPHRemd:
         self.n_exchange_accepted += 1
         return True
 
-    def attemptAdjacentExchanges(self) -> list[bool]:
+    def attempt_adjacent_exchanges(self) -> list[bool]:
         """Attempt exchanges between every adjacent replica pair."""
         results: list[bool] = []
         for pair in range(self.n_replicas - 1):
-            results.append(self.attemptReplicaExchange(pair, pair + 1))
+            results.append(self.attempt_replica_exchange(pair, pair + 1))
         return results
 
     @staticmethod
     def _swap_replica_states(rep_a: ConstantPH, rep_b: ConstantPH) -> None:
+        """Exchange the two replicas' configurations, leaving each replica's pH fixed.
+
+        Coordinates, velocities, box vectors, and the protonation pattern move
+        between the two replicas; ``currentPHIndex`` is deliberately *not*
+        swapped, so replica ``a`` keeps sampling its pH while receiving ``b``'s
+        configuration (and vice versa). Swapping the pH label as well would
+        cancel the configuration swap, leaving the pooled ensemble unchanged.
+        """
         protonation_a = _protonation_snapshot(rep_a)
         protonation_b = _protonation_snapshot(rep_b)
-        ph_index_a = rep_a.currentPHIndex
-        ph_index_b = rep_b.currentPHIndex
 
         md_state_a = _capture_md_state(rep_a)
         md_state_b = _capture_md_state(rep_b)
@@ -257,9 +306,6 @@ class ConstantPHRemd:
 
         _apply_md_state(rep_a, md_state_b)
         _apply_md_state(rep_b, md_state_a)
-
-        rep_a.currentPHIndex = ph_index_b
-        rep_b.currentPHIndex = ph_index_a
 
         _sync_auxiliary_contexts(rep_a)
         _sync_auxiliary_contexts(rep_b)
@@ -272,7 +318,8 @@ class ConstantPHRemd:
         self.n_exchange_accepted = 0
 
     def current_ph_values(self) -> list[float]:
-        return [replica.pH[replica.currentPHIndex] for replica in self.replicas]
+        """Return the currently active pH value for each replica."""
+        return [replica.ph[replica.currentPHIndex] for replica in self.replicas]
 
     def replica_state_vectors(self) -> list[tuple[float, ...]]:
         """Return ``(pH, *protonation_indices)`` tuples for each replica."""
@@ -281,11 +328,8 @@ class ConstantPHRemd:
         for replica in self.replicas:
             vectors.append(
                 (
-                    replica.pH[replica.currentPHIndex],
-                    *(
-                        replica.titrations[index].currentIndex
-                        for index in titratable_indices
-                    ),
+                    replica.ph[replica.currentPHIndex],
+                    *(replica.titrations[index].current_index for index in titratable_indices),
                 )
             )
         return vectors
@@ -299,14 +343,16 @@ class ConstantPHRemd:
         for i, replica in enumerate(self.replicas):
             chk_path = directory / f"replica_{i}.chk"
             chk_path.write_bytes(replica.simulation.context.createCheckpoint())
-            replica_states.append({
-                "current_ph_index": replica.currentPHIndex,
-                "protonation": {
-                    str(res_index): state_index
-                    for res_index, state_index in _protonation_snapshot(replica).items()
-                },
-                "current_step": replica.simulation.currentStep,
-            })
+            replica_states.append(
+                {
+                    "current_ph_index": replica.currentPHIndex,
+                    "protonation": {
+                        str(res_index): state_index
+                        for res_index, state_index in _protonation_snapshot(replica).items()
+                    },
+                    "current_step": replica.simulation.currentStep,
+                }
+            )
 
         remd_payload = {
             "replicas": replica_states,

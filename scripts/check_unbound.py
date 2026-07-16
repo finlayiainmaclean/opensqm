@@ -19,10 +19,10 @@ from openmm import unit
 from rdkit import Chem
 
 from opensqm.md.equilibrate import EquilibrationSettings
-from opensqm.modbinddg.config import ModBindDGSettings
-from opensqm.modbinddg.escape import run_unbound_escape
-from opensqm.modbinddg.reweight import einstein_smoluchowski_unbound, rt_kcal
-from opensqm.modbinddg.states import build_unbound_state
+from opensqm.modbind.config import ModBindDGSettings
+from opensqm.modbind.escape import run_unbound_escape
+from opensqm.modbind.reweight import einstein_smoluchowski_unbound, rt_kcal
+from opensqm.modbind.states import build_unbound_state
 
 # SI Eq. SI-4 reference parameters.
 N_REPLICAS = 32
@@ -35,9 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sim-time-ns", type=float, default=5.0, help="Unbound simulation length (ns)."
     )
-    parser.add_argument(
-        "--temperature", type=float, default=300.0, help="Unbound temperature (K)."
-    )
+    parser.add_argument("--temperature", type=float, default=300.0, help="Unbound temperature (K).")
     parser.add_argument(
         "--boundary", type=float, default=5.0, help="Absorbing boundary radius (A)."
     )
@@ -66,7 +64,6 @@ def main() -> None:
         integrator_step_size=0.002 * unit.picosecond,
         absorbing_boundary_radius=args.boundary,
         equilibration_config=equilibration,
-        bespoke_ligand_forcefield=False,
     )
 
     t0 = time.time()
@@ -84,12 +81,8 @@ def main() -> None:
     n_esc = len(segments)
     t_mean_ns = float(times_steps.mean()) * step_ps / 1000.0 if n_esc else float("nan")
 
-    g_explicit = (
-        -rt * math.log(N_REPLICAS * t_mean_ns / DT_BOUND_NS) if n_esc else float("nan")
-    )
-    _, g_einstein = einstein_smoluchowski_unbound(
-        ModBindDGSettings(n_replicas=N_REPLICAS), rt=rt
-    )
+    g_explicit = -rt * math.log(N_REPLICAS * t_mean_ns / DT_BOUND_NS) if n_esc else float("nan")
+    _, g_einstein = einstein_smoluchowski_unbound(ModBindDGSettings(n_replicas=N_REPLICAS), rt=rt)
 
     print("==== RESULT ====", flush=True)
     print(f"escapes observed         : {n_esc}")

@@ -1,6 +1,5 @@
 """Tests for per-state DCD append on resume."""
 
-
 from openmm import unit
 from openmm.app import Modeller, PDBFile
 from openmm.app.dcdfile import DCDFile
@@ -13,7 +12,7 @@ def test_dcd_append_requires_read_write_mode(tmp_path) -> None:
     positions = modeller.positions
 
     dcd_path = tmp_path / "traj.0.dcd"
-    with open(dcd_path, "wb") as handle:
+    with dcd_path.open("wb") as handle:
         dcd = DCDFile(
             handle,
             topology,
@@ -24,7 +23,7 @@ def test_dcd_append_requires_read_write_mode(tmp_path) -> None:
         )
         dcd.writeModel(positions)
 
-    with open(dcd_path, "r+b") as handle:
+    with dcd_path.open("r+b") as handle:
         dcd = DCDFile(
             handle,
             topology,

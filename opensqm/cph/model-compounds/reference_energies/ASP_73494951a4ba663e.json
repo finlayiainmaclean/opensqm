@@ -1,0 +1,28 @@
+{
+  "residue_name": "ASP",
+  "main_variant": "ASH",
+  "variant_names": [
+    "ASH",
+    "ASP"
+  ],
+  "variants": [
+    "ASH",
+    "ASP"
+  ],
+  "charges": [
+    0,
+    -1
+  ],
+  "reference_energies_kj_per_mole": [
+    0.0,
+    -110.93231857817875
+  ],
+  "transitions": [
+    {
+      "parent": 0,
+      "child": 1,
+      "pka": 3.7
+    }
+  ],
+  "ring_flip_bonds": []
+}

@@ -15,8 +15,9 @@ from loguru import logger
 from openmm import unit
 from rdkit import RDLogger
 
+from opensqm.cph.run_cph import ConstantpHRunSettings, PHResult, run_cph
+from opensqm.fix import run_pdbfixer
 from opensqm.md.equilibrate import EquilibrationSettings
-from opensqm.md.run_mmgbsa import MMGBSASettings, run_mmgbsa
 from opensqm.modbind.analyze import analyze_modbinddg
 from opensqm.modbind.config import ModBindDGSettings
 from opensqm.modbind.simulate import collect_trajectories
@@ -55,10 +56,10 @@ def run_modbind(
 ) -> dict:
     """Run a full ModBinddG calculation for one protein-ligand pair.
 
-    An MMGBSA protomer funnel is the equilibration step: it selects the ligand
-    protonation state in the pocket, equilibrates the solvated complex, runs a
-    short production MD, and returns the lowest-energy frame. That frame is the
-    starting conformation for the escape simulations.
+    Constant-pH MD at pH 7 is used as an equilibration step to determine the
+    dominant protonation state and provide an equilibrated protein structure.
+    The lowest-energy snapshot from that 1 ns run is then used as the starting
+    conformation for the escape simulations.
 
     ``protein``, ``ligand`` and ``output`` may each be a local path or an
     ``s3://`` URI. All work runs in a temp dir; only ``results.csv`` is published
@@ -79,30 +80,32 @@ def run_modbind(
         local_ligand.write_bytes(ligand_src.read_bytes())
 
         checkpoint_dir = tmp_dir / "checkpoints"
+        fixed_protein = tmp_dir / "protein_prepared.pdb"
         trajectory_dir = tmp_dir / "trajectories"
 
-        # --- MMGBSA protomer-funnel equilibration ---
-        # Find the bound protomer, equilibrate the solvated complex, run a short
-        # production MD, and take the lowest-energy frame as the escape start.
-        logger.info(
-            f"Running MMGBSA protomer-funnel equilibration "
-            f"({config.mmgbsa_equilibration_ns} ns production)"
-        )
-        mmgbsa_result = run_mmgbsa(
-            str(local_protein),
-            str(local_ligand),
-            output=str(tmp_dir / "mmgbsa_equilibration"),
-            config=MMGBSASettings(
-                production_time=config.mmgbsa_equilibration_ns * unit.nanosecond,
+        run_pdbfixer(local_protein, fixed_protein)
+
+        config.cph_equilibration_ns = 0.5
+
+        # --- constant-pH equilibration at pH 7 ---
+        logger.info(f"Running {config.cph_equilibration_ns} ns CpH equilibration at pH 7")
+        cph_result = run_cph(
+            fixed_protein,
+            output=str(tmp_dir / "cph_equilibration"),
+            ligand=local_ligand,
+            config=ConstantpHRunSettings(
+                ph=7.0,
+                production_time=config.cph_equilibration_ns * unit.nanosecond,
+                use_ph_remd=False,
                 n_replicas=1,
-                protomer_ph=7.0,
                 protonation_penalty=3.0 * unit.kilocalories_per_mole,
+                residue_query="(protein within 5 of resn LIG) or (resn LIG)",
             ),
+            resume=False,
         )
-        snapshot = mmgbsa_result.snapshot
-        logger.info(
-            f"MMGBSA equilibration score: {mmgbsa_result.scores['interaction_energy']:.2f} kcal/mol"
-        )
+        cph_result: PHResult = cph_result["ph_results"][0]  # ph 7
+        snapshot = cph_result.lowest_energy_snapshot
+        logger.info(f"Lowest-energy snapshot at pH 7: {cph_result.population}")
 
         unbound_state = None
         if config.unbound_mode == "explicit":
@@ -112,7 +115,7 @@ def run_modbind(
                 equilibration_config=EquilibrationSettings(),
             )
 
-        logger.info("Using MMGBSA lowest-energy snapshot as protein starting structure")
+        logger.info("Using CpH lowest-energy snapshot as protein starting structure")
         bound_state = build_bound_state_from_state(snapshot)
 
         logger.info("Collecting escape trajectories (unbound first, then bound replicas)")
@@ -141,9 +144,6 @@ def run_modbind(
             ligand_path=local_ligand,
             trajectory_dir=trajectory_dir,
         )
-
-        for col in ["mmgbsa_score"]:
-            results[col] = mmgbsa_result.scores[col]
 
         # Publish only the results CSV to the destination (local dir or S3 prefix).
         out_dir = AnyPath(output)

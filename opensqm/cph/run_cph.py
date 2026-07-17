@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import click
 import mdtraj as md
 import numpy as np
 import pandas as pd
@@ -97,7 +98,7 @@ class ConstantpHRunSettings(BaseModel):
     reporter_interval: OpenMMQuantity[unit.picosecond] = 1 * unit.picosecond
     # CPH settings
     cph_config: ConstantpHSettings = Field(default_factory=ConstantpHSettings)
-    titratable_residue_query: str | None = None
+    residue_query: str | None = None
     # Intersect the query selection with the residues PROPKA predicts are near
     # their pKa at some pH in the ladder, so only residues that are both
     # requested and actually titrating are driven. A residue whose charged state
@@ -1150,7 +1151,7 @@ def run_cph(
             ligand=ligand,
             cofactor=cofactor,
             titratable_residue_indices=None,
-            titratable_residue_query=config.titratable_residue_query,
+            titratable_residue_query=config.residue_query,
             phs=phs,
             n_replicas=n_replicas,
             integrator_step_size_ps=integrator_step_size_ps,
@@ -1253,7 +1254,7 @@ def run_cph(
             omm_top,
             system_pdb,
             residue_reference_dict,
-            config.titratable_residue_query,
+            config.residue_query,
         )
 
         if config.restrict_titratable_to_near_ph:
@@ -1354,7 +1355,7 @@ def run_cph(
                 residue_label(residues_by_index[i]) for i in titratable_residue_indices
             ],
             allowed_variant_indices=allowed_variant_indices,
-            titratable_residue_query=config.titratable_residue_query,
+            titratable_residue_query=config.residue_query,
             phs=phs,
             n_replicas=n_replicas,
             integrator_step_size_ps=integrator_step_size_ps,
@@ -1634,23 +1635,68 @@ def run_cph(
     }
 
 
-if __name__ == "__main__":
-    protein_pdb_path = "/Users/finlaymaclean/Desktop/mtx.pdb"
-    ligand_path = "/Users/finlaymaclean/Desktop/mtx.sdf"
-    # ligand_path = None
-    weights = None
-
+@click.command()
+@click.option("--protein", required=True, help="Protein PDB file.")
+@click.option("--output", required=True, help="Output directory for the CpH run.")
+@click.option("--ligand", default=None, help="Ligand MOL/SDF file.")
+@click.option("--cofactor", default=None, help="Cofactor MOL/SDF file.")
+@click.option(
+    "--residue-query",
+    default=None,
+    help='RDSL query selecting titratable residues (e.g. "resn ASP and resi 27").',
+)
+@click.option(
+    "--ph",
+    "ph",
+    type=float,
+    multiple=True,
+    help="pH value; repeat to define a ladder (e.g. --ph 1 --ph 7 --ph 14). Defaults to 1/7/14.",
+)
+@click.option("--n-replicas", default=3, show_default=True, help="Number of REMD replicas.")
+@click.option("--production-time", default=10.0, show_default=True, help="Production MD time (ns).")
+@click.option(
+    "--resume/--no-resume",
+    default=True,
+    show_default=True,
+    help="Resume setup/production from checkpoints under output.",
+)
+@click.option(
+    "--skip-md/--no-skip-md",
+    default=False,
+    show_default=True,
+    help="Skip production MD and re-analyse existing checkpoints/trajectories.",
+)
+def main(
+    protein: str,
+    output: str,
+    ligand: str | None,
+    cofactor: str | None,
+    residue_query: str | None,
+    ph: tuple[float, ...],
+    n_replicas: int,
+    production_time: float,
+    resume: bool,
+    skip_md: bool,
+) -> None:
+    """Run a constant-pH REMD calculation from the command line."""
+    settings_kwargs: dict[str, Any] = {
+        "residue_query": residue_query,
+        "n_replicas": n_replicas,
+        "production_time": production_time * unit.nanosecond,
+    }
+    if ph:
+        settings_kwargs["ph"] = ph[0] if len(ph) == 1 else list(ph)
+    config = ConstantpHRunSettings(**settings_kwargs)
     run_cph(
-        protein_pdb_path,
-        output="~/Desktop/cph_holo",
-        ligand=ligand_path,
-        resume=True,
-        skip_md=False,
-        config=ConstantpHRunSettings(
-            titratable_residue_query="(resn ASP and resi 27) or (resn LIG)",
-            ph=7.0,
-            n_replicas=1,
-            weights=weights,
-            production_time=500 * unit.picosecond,
-        ),
+        protein,
+        output=output,
+        ligand=ligand,
+        cofactor=cofactor,
+        config=config,
+        resume=resume,
+        skip_md=skip_md,
     )
+
+
+if __name__ == "__main__":
+    main()

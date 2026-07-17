@@ -149,7 +149,8 @@ def get_interaction_energy(
     Returns
     -------
     tuple
-        Energies, RMSD, topology path, trajectory path.
+        Energies, per-frame ligand RMSD (nm) to the first frame in the protein's
+        reference frame, topology path, trajectory path.
     """
     complex = PDBFile(str(pdb_path))
 
@@ -190,7 +191,13 @@ def get_interaction_energy(
     water_atom_idxs = np.array([[a.index for a in r.atoms] for r in water_res])
 
     ligand_idxs = ref.topology.select(f"resname {ligand_resname}")
-    rmsd = md.rmsd(traj_md, traj_md[0], atom_indices=ligand_idxs)
+    # Ligand RMSD to the first frame in the protein's reference frame. ``traj_md``
+    # is already imaged and superposed on the protein CAs, so measure the ligand
+    # displacement directly rather than re-fitting on the ligand (which would strip
+    # out the very pose drift we want): this captures how far the ligand moves
+    # within the pocket, not just its internal conformational change.
+    lig_disp = traj_md.xyz[:, ligand_idxs, :] - traj_md.xyz[0, ligand_idxs, :]
+    rmsd = np.sqrt((lig_disp**2).sum(axis=2).mean(axis=1))
 
     # Map each OpenMM modeller atom (protein → retained waters → ligand) to a static
     # mdtraj index in the full trajectory. Waters use -1 and are filled per-frame from

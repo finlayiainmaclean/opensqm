@@ -34,6 +34,9 @@ class ModBindDGSettings(BaseModel):
 
     # --- Equilibration ---
     cph_equilibration_ns: float = 1.0
+    # Production MD length (ns) for the MMGBSA protomer-funnel equilibration used
+    # by ``run_modbind`` to pick the protomer and the lowest-energy escape start.
+    mmgbsa_equilibration_ns: float = 0.1
 
     # --- Sampling ---
     # High temperature for the bound (unbinding) simulation; the unbound

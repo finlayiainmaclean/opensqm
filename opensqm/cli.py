@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import click
 
+from opensqm.cph.run_cph import main as cph_command
 from opensqm.md.run_mmgbsa import main as mmgbsa_command
 from opensqm.modbind.run_modbind import main as modbinddg_command
 
@@ -23,6 +24,7 @@ def cli() -> None:
 
 cli.add_command(modbinddg_command, name="modbind")
 cli.add_command(mmgbsa_command, name="mmgbsa")
+cli.add_command(cph_command, name="cph")
 
 
 if __name__ == "__main__":

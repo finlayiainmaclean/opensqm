@@ -197,7 +197,15 @@ def production(
             # Get current simulation time
             current_time_ps = (i + 1) * ps_per_update
 
-            pbar.set_postfix({"Time": f"{current_time_ps:.0f}ps", "ns/day": f"{ns_per_day:.2f}"})
+            current_time_ps = current_time_ps.value_in_unit(unit.picoseconds)
+            ns_per_day = ns_per_day.value_in_unit(unit.nanoseconds)
+
+            pbar.set_postfix(
+                {
+                    "Time": f"{current_time_ps:.0f}ps",
+                    "ns/day": f"{ns_per_day:.2f}",
+                }
+            )
             pbar.update(1)
 
     # Close reporters to prevent file handle leaks and double-free segfaults

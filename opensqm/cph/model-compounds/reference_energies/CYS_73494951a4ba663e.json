@@ -1,0 +1,28 @@
+{
+  "residue_name": "CYS",
+  "main_variant": "CYS",
+  "variant_names": [
+    "CYS",
+    "CYX"
+  ],
+  "variants": [
+    "CYS",
+    "CYX"
+  ],
+  "charges": [
+    0,
+    -1
+  ],
+  "reference_energies_kj_per_mole": [
+    0.0,
+    -324.80091645241976
+  ],
+  "transitions": [
+    {
+      "parent": 0,
+      "child": 1,
+      "pka": 8.33
+    }
+  ],
+  "ring_flip_bonds": []
+}

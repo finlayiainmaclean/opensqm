@@ -73,7 +73,6 @@ def strip_solvent(modeller: Modeller) -> Modeller:
         return modeller
     cleaned = Modeller(modeller.topology, modeller.positions)
     cleaned.delete(to_delete)
-    logger.info(f"Removed {len(to_delete)} solvent/ion atoms for implicit solvent")
     return cleaned
 
 

@@ -28,6 +28,10 @@ RESULTS_COLUMNS = [
     "ci_high",
     "delta_g_comp",
     "volume_correction",
+    "delta_g_well",
+    "c_min",
+    "c_boundary",
+    "c_min_radius",
     "bound_population",
     "unbound_population",
     "n_bound_trajectories",
@@ -40,8 +44,6 @@ RESULTS_COLUMNS = [
     "bound_max_replica_fraction",
     "bound_population_min",
     "bound_population_max",
-    "unbound_mode",
-    "unbound_g",
     "temperature_K",
     "mmgbsa_mean",
     "mmgbsa_std",
@@ -64,7 +66,7 @@ def _write_pmf(
     centers, pmf = radial_pmf(
         bound_coords,
         bin_size=config.bin_size,
-        exponent=config.bound_reweight_exponents(),
+        exponent=config.reweight_exponent,
         max_radius=config.pmf_max_radius,
         rt=rt,
     )
@@ -121,6 +123,10 @@ def analyze_modbinddg(
         "ci_high": ci_high,
         "delta_g_comp": point["delta_g_comp"],
         "volume_correction": point["volume_correction"],
+        "delta_g_well": point["delta_g_well"],
+        "c_min": point["c_min"],
+        "c_boundary": point["c_boundary"],
+        "c_min_radius": point["c_min_radius"],
         "bound_population": point["bound_population"],
         "unbound_population": point["unbound_population"],
         "n_bound_trajectories": len(bound_coords),
@@ -133,8 +139,6 @@ def analyze_modbinddg(
         "bound_max_replica_fraction": point["bound_max_replica_fraction"],
         "bound_population_min": point["bound_population_min"],
         "bound_population_max": point["bound_population_max"],
-        "unbound_mode": config.unbound_mode,
-        "unbound_g": point["unbound_g"],
         "temperature_K": data.temperature_k,
         "bound_sim_time_ns": bound_sim_time_ns,
         "unbound_sim_time_ns": unbound_sim_time_ns,
@@ -148,10 +152,11 @@ def analyze_modbinddg(
         f"dG = {results['delta_g']:.2f} "
         f"[{results['ci_low']:.2f}, {results['ci_high']:.2f}] kcal/mol"
     )
-
     logger.info(
-        f"Bound MMGBSA = {results['mmgbsa_mean']:.2f} "
-        f"+/- {results['mmgbsa_std']:.2f} kcal/mol "
-        f"{results['mmgbsa_n_frames']} bound frames)"
+        f"ΔG_well = {results['delta_g_well']:.2f} kcal/mol "
+        f"(c_min={results['c_min']} @ {results['c_min_radius']:.1f} A, "
+        f"c_boundary={results['c_boundary']}); "
+        f"P_bound={results['bound_population']:.3g}, P_unbound={results['unbound_population']:.3g}"
     )
+
     return results

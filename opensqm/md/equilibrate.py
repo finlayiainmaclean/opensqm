@@ -17,6 +17,7 @@ from pydantic_units import OpenMMQuantity
 from pymbar import timeseries
 from tqdm import tqdm
 
+from opensqm.md.platforms import make_simulation
 from opensqm.md.prepare import create_integrator, create_system
 from opensqm.md.restraints import add_restraints
 
@@ -151,7 +152,7 @@ def equilibrate(
     )
 
     # Create simulation
-    simulation = app.Simulation(topology, system, integrator)
+    simulation = make_simulation(topology, system, integrator)
     if box_vectors is not None:
         simulation.context.setPeriodicBoxVectors(*box_vectors)
     simulation.context.setPositions(positions)
@@ -203,7 +204,7 @@ def equilibrate(
         system.addForce(MonteCarloBarostat(1 * unit.atmosphere, 300 * unit.kelvin))
 
     # Create new simulation
-    simulation = app.Simulation(topology, system, integrator)
+    simulation = make_simulation(topology, system, integrator)
 
     if warmup_box is not None:
         simulation.context.setPeriodicBoxVectors(*warmup_box)

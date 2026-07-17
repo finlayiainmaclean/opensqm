@@ -32,6 +32,8 @@ from openmm import LangevinMiddleIntegrator, unit
 from openmm.app import DCDReporter, Simulation
 from tqdm import tqdm
 
+from opensqm.md.platforms import make_simulation
+
 if TYPE_CHECKING:
     from openmm.app import Topology
 
@@ -118,7 +120,7 @@ def _build_simulation(
     integrator = LangevinMiddleIntegrator(temperature, friction, step_size)
     if seed:
         integrator.setRandomNumberSeed(int(seed))
-    simulation = Simulation(state.topology, state.system, integrator)
+    simulation = make_simulation(state.topology, state.system, integrator)
     box_vectors = state.topology.getPeriodicBoxVectors()
     if box_vectors is not None:
         simulation.context.setPeriodicBoxVectors(*box_vectors)
@@ -150,7 +152,7 @@ def run_bound_escape(
 
     simulation = _build_simulation(
         state,
-        temperature=temperature or config.temperature,
+        temperature=temperature or config.bound_temperature,
         step_size=config.integrator_step_size,
         friction=config.friction,
         seed=seed,
@@ -232,6 +234,12 @@ def run_unbound_escape(
     max_total_frames = max(1, round(config.unbound_max_time / config.unbound_frame_interval))
     max_segment_frames = max(1, round(config.max_escape_time / config.unbound_frame_interval))
 
+    # The unbound (ligand-in-solvent) state is run at its own temperature -- 300 K
+    # by default, per the paper -- which is generally NOT the bound temperature.
+    # It is reweighted with exponent T_u/T_ref (= 1 at 300 K); see reweight.py.
+    logger.info(
+        f"Running unbound escape at {config.unbound_temperature.value_in_unit(unit.kelvin):.0f} K"
+    )
     simulation = _build_simulation(
         state,
         temperature=config.unbound_temperature,

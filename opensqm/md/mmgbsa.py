@@ -7,7 +7,7 @@ from typing import Any
 import mdtraj as md
 import numpy as np
 from openff.toolkit.topology import Molecule  # type: ignore
-from openmm import Context, LangevinMiddleIntegrator, unit
+from openmm import LangevinMiddleIntegrator, unit
 from openmm.app import (
     CutoffNonPeriodic,
     ForceField,
@@ -21,6 +21,7 @@ from rdkit import Chem
 from scipy.spatial.distance import cdist
 from tqdm import tqdm
 
+from opensqm.md.platforms import make_context
 from opensqm.md.prepare import get_ligand_forcefield
 
 
@@ -290,9 +291,9 @@ def get_interaction_energy(
         300 * unit.kelvin, 1 / unit.picosecond, 0.002 * unit.picoseconds
     )
 
-    context_complex = Context(system_complex, integrator_complex)
-    context_protein = Context(system_protein, integrator_protein)
-    context_ligand = Context(system_ligand, integrator_ligand)
+    context_complex = make_context(system_complex, integrator_complex)
+    context_protein = make_context(system_protein, integrator_protein)
+    context_ligand = make_context(system_ligand, integrator_ligand)
 
     energies = []
     for frame_xyz in tqdm(closest_xyz):

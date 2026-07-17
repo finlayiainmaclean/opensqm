@@ -16,6 +16,7 @@ from openmm import unit
 from rdkit import RDLogger
 
 from opensqm.md.equilibrate import EquilibrationSettings
+from opensqm.md.platforms import set_platform
 from opensqm.md.run_mmgbsa import MMGBSASettings, run_mmgbsa
 from opensqm.modbind.analyze import analyze_modbinddg
 from opensqm.modbind.config import ModBindDGSettings
@@ -25,26 +26,6 @@ from opensqm.modbind.states import build_bound_state_from_state, build_unbound_s
 RDLogger.DisableLog("rdApp.warning")
 
 MANIFEST_FILENAME = "modbinddg_manifest.json"
-
-
-def _normalize_replica_temperatures(
-    temperatures: tuple[float, ...], n_replicas: int, *, adaptive: bool
-) -> tuple[float, ...]:
-    if not temperatures:
-        raise click.BadParameter("At least one --temperature value is required.")
-    if adaptive:
-        if len(temperatures) != 1:
-            raise click.BadParameter(
-                "Adaptive escape tuning uses a single --temperature for replica 0."
-            )
-        return temperatures
-    if len(temperatures) == 1:
-        return temperatures * n_replicas
-    if len(temperatures) != n_replicas:
-        raise click.BadParameter(
-            f"Expected 1 or {n_replicas} --temperature values, got {len(temperatures)}."
-        )
-    return temperatures
 
 
 def run_modbind(
@@ -104,13 +85,11 @@ def run_modbind(
             f"MMGBSA equilibration score: {mmgbsa_result.scores['interaction_energy']:.2f} kcal/mol"
         )
 
-        unbound_state = None
-        if config.unbound_mode == "explicit":
-            logger.info("Building and equilibrating unbound state")
-            unbound_state = build_unbound_state(
-                snapshot.ligand,
-                equilibration_config=EquilibrationSettings(),
-            )
+        logger.info("Building and equilibrating unbound state")
+        unbound_state = build_unbound_state(
+            snapshot.ligand,
+            equilibration_config=EquilibrationSettings(),
+        )
 
         logger.info("Using MMGBSA lowest-energy snapshot as protein starting structure")
         bound_state = build_bound_state_from_state(snapshot)
@@ -124,14 +103,6 @@ def run_modbind(
             trajectory_dir=trajectory_dir,
             resume=False,
         )
-
-        if data.bound_temperatures_k:
-            config = config.copy(
-                update={
-                    "temperature": data.bound_temperatures_k[0] * unit.kelvin,
-                    "replica_temperatures": tuple(data.bound_temperatures_k),
-                }
-            )
 
         logger.info("Analyzing")
         results = analyze_modbinddg(
@@ -161,58 +132,36 @@ def run_modbind(
 @click.option("--output", required=True, help="Output directory (local path or s3:// prefix).")
 @click.option(
     "--temperature",
-    type=str,
-    default="900",
+    type=float,
+    default=900.0,
     show_default=True,
-    help=(
-        "Bound-state temperature (K) for each replica. Pass one value to use "
-        "the same temperature for all replicas, or one value per replica."
-    ),
+    help="Bound-state (unbinding) simulation temperature (K). The unbound "
+    "ligand-in-solvent state is always run at 300 K (the reweighting reference).",
 )
 @click.option("--n-replicas", default=8, show_default=True, help="Number of bound escape replicas.")
 @click.option(
-    "--ideal-escape-time",
-    type=float,
-    default=0.0,
-    show_default=True,
-    help=(
-        "Target bound escape time (ns) for adaptive replica temperatures. "
-        "Replica 0 uses --temperature; later replicas are tuned from the "
-        "running ΔG°_well estimate. Pass 0 to disable and use a fixed "
-        "temperature for every replica."
-    ),
-)
-@click.option(
-    "--unbound-mode",
-    type=click.Choice(["explicit", "einstein"]),
-    default="einstein",
-    show_default=True,
-    help="Compute the unbound state from explicit MD or the Einstein-Smoluchowski estimate.",
+    "--platform",
+    "platform",
+    type=click.Choice(["cuda", "mps"], case_sensitive=False),
+    default=None,
+    help="Force the OpenMM compute platform: 'cuda' (NVIDIA GPU) or 'mps' "
+    "(Apple Silicon Metal/OpenCL). Fails if unavailable. "
+    "Default: OpenMM auto-selects the fastest platform.",
 )
 def main(
     protein: str,
     ligand: str,
     output: str,
-    temperature: str,
-    ideal_escape_time: float,
+    temperature: float,
     n_replicas: int,
-    unbound_mode: str,
+    platform: str | None,
 ) -> None:
     """Run ModBinddG from the command line."""
-    adaptive = ideal_escape_time > 0
-    temperature = [float(t) for t in temperature.split(",")]
-    ideal_escape_time_ns = ideal_escape_time if adaptive else None
-    replica_temperatures = _normalize_replica_temperatures(
-        temperature, n_replicas, adaptive=adaptive
-    )
+    set_platform(platform)
     config = ModBindDGSettings(
-        temperature=replica_temperatures[0] * unit.kelvin,
-        replica_temperatures=replica_temperatures
-        if not adaptive and len(set(replica_temperatures)) > 1
-        else None,
-        ideal_escape_time_ns=ideal_escape_time_ns,
+        bound_temperature=temperature * unit.kelvin,
+        unbound_temperature=temperature * unit.kelvin,
         n_replicas=n_replicas,
-        unbound_mode=unbound_mode,  # type: ignore[arg-type]
         bound_box_shape="dodecahedron",  # type: ignore[arg-type]
     )
     results = run_modbind(protein, ligand, output, config=config)

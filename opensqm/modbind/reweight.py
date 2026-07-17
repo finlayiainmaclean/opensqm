@@ -11,6 +11,21 @@ high-temperature populations back to the reference temperature, and each frame
 is assigned an equal share of its bin's reweighted population. Bin counts are
 pooled across replicas, but the reweighting exponent is applied per replica so
 replicas simulated at different temperatures are normalised independently.
+
+The pooled bin count is divided by the number of escapes *before* reweighting,
+i.e. the quantity that is reweighted is the per-escape mean occupancy, not the
+extensive pooled count. The bound and unbound states are reweighted with their
+OWN exponents (``T_state / T_ref``), because the paper runs them at different
+temperatures: a hot bound (unbinding) simulation and a 300 K unbound
+(ligand-in-solvent) simulation whose exponent is therefore 1 (no reweighting).
+Per-escape normalisation makes each state's population invariant to its escape
+count for any exponent, so the Eq. 14 ratio is unaffected when the two states
+are run for a *different* number of escapes (e.g. 8 bound vs 32 unbound) -- which
+the paper permits: "it is also acceptable to normalize the populations of each
+state if different numbers of escape simulations are performed for either
+state." It gives the replica-count invariance the method assumes (Sinko et al.,
+assumption 4); reweighting the raw extensive count instead would make ``dG``
+drift by ``-RT (exponent - 1) ln(N)`` whenever the escape counts are unequal.
 """
 
 from __future__ import annotations
@@ -47,49 +62,6 @@ def estimate_delta_g_well(result: dict, *, rt: float) -> float:
     if unbound_population <= 0 or not math.isfinite(result["delta_g"]):
         return math.nan
     return float(result["delta_g"] + rt * math.log(unbound_population))
-
-
-def predict_escape_temperature_calibrated(
-    *,
-    temperature_k: float,
-    escape_time_ns: float,
-    binding_dg_kcal: float,
-    target_escape_time_ns: float | None,
-    reference_temperature_k: float = 300.0,
-    min_temperature_k: float = 300.0,
-    max_temperature_k: float = 2000.0,
-) -> float:
-    """Predict the simulation temperature for a target escape time.
-
-    Inverts ``ln(τ₂/τ₁) = (|ΔG°|/RT_room) (T₁/T₂ - 1)``, which matches the
-    empirical observation that ligands with |ΔG°|≈5.5 kcal/mol escape in
-    roughly 1-4 ns at 650 K. ``binding_dg_kcal`` must be negative (favourable
-    binding); weaker (less negative) estimates give lower temperatures for the
-    same target escape time.
-    """
-    if (
-        not math.isfinite(binding_dg_kcal)
-        or escape_time_ns <= 0
-        or target_escape_time_ns is None
-        or target_escape_time_ns <= 0
-        or temperature_k <= 0
-        or binding_dg_kcal >= 0
-    ):
-        return math.nan
-
-    rt_room = rt_kcal(reference_temperature_k)
-    if rt_room <= 0:
-        return math.nan
-
-    well_depth = -binding_dg_kcal
-    scale = well_depth / rt_room
-    log_ratio = math.log(target_escape_time_ns / escape_time_ns)
-    denom = 1.0 + log_ratio / scale
-    if denom <= 0:
-        return math.nan
-
-    predicted = temperature_k / denom
-    return float(np.clip(predicted, min_temperature_k, max_temperature_k))
 
 
 @dataclass
@@ -178,9 +150,9 @@ def reweight_state(
     """Reweight pooled trajectories and sum populations within ``radius``.
 
     ``coords_list`` is a list of ``(n_frames, 3)`` COM-displacement arrays
-    (Angstrom). All frames are pooled into a single cubic histogram; bin counts
-    are raised to a per-replica ``exponent`` and shared equally among the frames
-    in each bin.
+    (Angstrom). All frames are pooled into a single cubic histogram; the
+    per-escape mean bin count (pooled count / number of escapes) is raised to a
+    per-replica ``exponent`` and shared equally among the frames in each bin.
     """
     if not coords_list:
         return StatePopulation(total=0.0, per_replica=np.empty(0))
@@ -196,7 +168,8 @@ def reweight_state(
         for key in keys:
             counts[key] = counts.get(key, 0) + 1
 
-    per_replica = np.zeros(len(coords_list), dtype=np.float64)
+    n_replicas = len(coords_list)
+    per_replica = np.zeros(n_replicas, dtype=np.float64)
     for replica_i, (coords, keys, exp) in enumerate(
         zip(coords_list, keys_per_replica, exponents, strict=False)
     ):
@@ -205,7 +178,12 @@ def reweight_state(
         for r, key in zip(radii, keys, strict=False):
             if r <= radius:
                 count = counts[key]
-                population += float(count) ** exp / count
+                # Reweight the per-escape *mean* occupancy (pooled count divided
+                # by the number of escapes), not the extensive pooled count, so
+                # the population is intensive and dG is invariant to the replica
+                # count. ``/ count`` shares the bin population over its frames.
+                mean_count = count / n_replicas
+                population += mean_count**exp / count
         per_replica[replica_i] = population
 
     return StatePopulation(total=float(per_replica.sum()), per_replica=per_replica)
@@ -241,6 +219,7 @@ def radial_pmf(
         for key in keys:
             counts[key] = counts.get(key, 0) + 1
 
+    n_replicas = len(coords_list)
     n_shells = max(1, math.ceil(max_radius / bin_size))
     shell_pop = np.zeros(n_shells, dtype=np.float64)
     for keys, radii, exp in zip(keys_per_replica, radii_per_replica, exponents, strict=False):
@@ -248,7 +227,11 @@ def radial_pmf(
             shell = int(r // bin_size)
             if 0 <= shell < n_shells:
                 count = counts[key]
-                shell_pop[shell] += float(count) ** exp / count
+                # Per-escape mean occupancy, matching :func:`reweight_state`. The
+                # PMF is min-normalised below, so this only removes a constant
+                # offset, but keeps the reweighting identical across functions.
+                mean_count = count / n_replicas
+                shell_pop[shell] += mean_count**exp / count
 
     centers = (np.arange(n_shells) + 0.5) * bin_size
     with np.errstate(divide="ignore"):
@@ -259,32 +242,72 @@ def radial_pmf(
     return centers, pmf
 
 
-def einstein_smoluchowski_unbound(
-    config: ModBindDGSettings,
+def bound_well_diagnostics(
+    coords_list: list[np.ndarray],
     *,
+    bin_size: float,
+    boundary_radius: float,
+    exponent: float,
     rt: float,
-    n_bound_escapes: int | None = None,
-) -> tuple[float, float]:
-    """Estimate the unbound population and free energy (SI Eq. SI-1..SI-4).
+) -> dict:
+    """Diagnose the sampled bound-well depth from pooled bound trajectories.
 
-    Treats the ligand as a hard sphere diffusing with coefficient ``D``; the
-    mean time to diffuse ``r`` is ``t = r^2 / (6 D)``. The unbound "population"
-    matches the bound-state simulation parameters: ``N_escapes * t /
-    frame_interval``, where ``N_escapes`` is the number of bound replicas
-    included in the current population ratio (defaults to ``config.n_replicas``).
+    Bins all bound frames into the same cubic histogram used by
+    :func:`reweight_state` and reports, purely as diagnostics:
+
+    * ``c_min`` -- occupancy of the most-populated bin (the well bottom).
+    * ``c_boundary`` -- occupancy of the most-populated bin whose frames sit
+      within one bin width of the absorbing boundary (the free-ligand reference);
+      falls back to the outermost occupied bin.
+    * ``c_min_radius`` -- mean COM radius (Angstrom) of the well-bottom bin.
+    * ``delta_g_well`` -- the well depth this sampling can support,
+      ``-exponent * RT * ln(c_min / c_boundary)``. This is boundary-anchored so it
+      is independent of replica count and frame rate, but bounded in magnitude by
+      ``exponent * RT * ln(frames_per_escape)``: if it is far shallower than the
+      expected affinity, the bound trajectory is capture-limited (the boundary
+      transit is faster than one ``bound_frame_interval``, so ``c_boundary`` is
+      floored at ~1 frame/escape).
     """
-    from openmm import unit
+    counts: dict[tuple[int, int, int], int] = {}
+    radius_sum: dict[tuple[int, int, int], float] = {}
+    for coords in coords_list:
+        arr = np.asarray(coords, dtype=np.float64)
+        radii = np.linalg.norm(arr, axis=1)
+        bin_idx = np.floor(arr / bin_size).astype(int)
+        for row, r in zip(bin_idx, radii, strict=False):
+            key = (int(row[0]), int(row[1]), int(row[2]))
+            counts[key] = counts.get(key, 0) + 1
+            radius_sum[key] = radius_sum.get(key, 0.0) + float(r)
 
-    radius_m = config.einstein_radius * 1e-10
-    t_seconds = radius_m**2 / (6.0 * config.diffusion_coefficient_m2_s)
-    t_ns = t_seconds * 1e9
-    # SI Eq. SI-4 applies the bound simulation's frame-capture interval.
-    frame_interval_ns = config.bound_frame_interval.value_in_unit(unit.nanosecond)
+    if not counts:
+        return {"c_min": 0, "c_boundary": 0, "c_min_radius": math.nan, "delta_g_well": math.nan}
 
-    n_escapes = config.n_replicas if n_bound_escapes is None else n_bound_escapes
-    population = n_escapes * t_ns / frame_interval_ns
-    g = -rt * math.log(population) if population > 0 else math.inf
-    return population, g
+    mean_radius = {k: radius_sum[k] / counts[k] for k in counts}
+
+    # Well bottom: the most-occupied bin.
+    c_min_key = max(counts, key=lambda k: counts[k])
+    c_min = counts[c_min_key]
+
+    # Boundary reference: most-occupied bin within one bin width of the boundary,
+    # else the outermost occupied bin.
+    boundary_bins = [
+        c for k, c in counts.items() if abs(mean_radius[k] - boundary_radius) <= bin_size
+    ]
+    if boundary_bins:
+        c_boundary = max(boundary_bins)
+    else:
+        c_boundary = counts[max(counts, key=lambda k: mean_radius[k])]
+
+    delta_g_well = (
+        -exponent * rt * math.log(c_min / c_boundary) if c_min > 0 and c_boundary > 0 else math.nan
+    )
+
+    return {
+        "c_min": int(c_min),
+        "c_boundary": int(c_boundary),
+        "c_min_radius": float(mean_radius[c_min_key]),
+        "delta_g_well": float(delta_g_well),
+    }
 
 
 def _compute_delta_g_core(
@@ -295,42 +318,55 @@ def _compute_delta_g_core(
     rt: float,
 ) -> dict:
     """Compute pooled dG and intermediate terms from reweighted populations."""
+    exponent = config.reweight_exponent
     bound = reweight_state(
         bound_coords,
         bin_size=config.bin_size,
-        exponent=config.bound_reweight_exponents(),
+        exponent=exponent,
         radius=config.bound_state_radius,
     )
 
     n_bound_escapes = len(bound_coords)
-    unbound_g = None
-    if config.unbound_mode == "einstein":
-        unbound_population, unbound_g = einstein_smoluchowski_unbound(
-            config, rt=rt, n_bound_escapes=n_bound_escapes
-        )
-        n_unbound_escapes = 0
-        unbound_ess = 0.0
-    else:
-        unbound_exponent = config.unbound_temperature.value_in_unit(
-            unit.kelvin
-        ) / config.reference_temperature.value_in_unit(unit.kelvin)
-        unbound = reweight_state(
-            unbound_coords,
-            bin_size=config.bin_size,
-            exponent=unbound_exponent,
-            radius=config.unbound_radius,
-        )
-        n_unbound_escapes = len(unbound_coords)
-        # Flux balance: equalise the number of escape events between states.
-        flux_factor = n_bound_escapes / n_unbound_escapes if n_unbound_escapes else 1.0
-        # Frame-rate normalisation: populations are time/dt (Eq. 3), so rescale
-        # the unbound counts (captured at a different interval) onto the bound
-        # state's frame-capture interval before forming the ratio.
-        bound_dt = config.bound_frame_interval.value_in_unit(unit.picosecond)
-        unbound_dt = config.unbound_frame_interval.value_in_unit(unit.picosecond)
-        frame_rate_factor = unbound_dt / bound_dt if bound_dt else 1.0
-        unbound_population = unbound.total * flux_factor * frame_rate_factor
-        unbound_ess = unbound.effective_sample_size
+    # The bound and unbound states are run at DIFFERENT temperatures, so each is
+    # reweighted to T_ref with its OWN exponent T_state/T_ref (Eq. 4): the hot
+    # bound state uses ``exponent`` (e.g. 900/300 = 3), while the unbound state,
+    # run at 300 K, uses ``unbound_exponent`` = 1 (already canonical -> no
+    # reweighting). This is the per-state generalisation of Eq. 14.
+    #
+    # The two "inequalities" between the states are handled independently:
+    #   * unequal escape counts (e.g. 8 bound vs 32 unbound): ``reweight_state``
+    #     divides each state's pooled bin count by its OWN number of escapes
+    #     BEFORE raising to the exponent, so each state's population is intensive
+    #     (invariant to its escape count) for ANY exponent. The ratio is thus
+    #     unaffected by 8 != 32. The paper permits this: "it is also acceptable
+    #     to normalize the populations of each state if different numbers of
+    #     escape simulations are performed".
+    #   * unequal frame-capture intervals: handled by ``frame_rate_factor`` below.
+    unbound_exponent = config.unbound_reweight_exponent
+    unbound = reweight_state(
+        unbound_coords,
+        bin_size=config.bin_size,
+        exponent=unbound_exponent,
+        radius=config.unbound_radius,
+    )
+    n_unbound_escapes = len(unbound_coords)
+    # Frame-rate normalisation. The reweighted population is built from bin
+    # COUNTS = t/dt (p*(r) = C t/dt, Eq. 3), so the two states must be expressed
+    # at a common capture interval before they can be compared. The bound
+    # interval is the reference; each unbound per-escape count (captured every
+    # ``unbound_dt``) is rescaled to ``bound_dt`` by (unbound_dt / bound_dt) and
+    # then raised to the UNBOUND exponent:
+    #     frame_rate_factor = (unbound_dt / bound_dt) ** unbound_exponent.
+    # NB: when the exponents differ (mixed-temperature two-state model) the ratio
+    # retains a residual dependence on the reference interval ~ bound_dt **
+    # (exponent - unbound_exponent); this is intrinsic (the Eq. 3 constant C no
+    # longer cancels across states) and is pinned by keeping bound_frame_interval
+    # at the paper's 0.01 ns.
+    bound_dt = config.bound_frame_interval.value_in_unit(unit.picosecond)
+    unbound_dt = config.unbound_frame_interval.value_in_unit(unit.picosecond)
+    frame_rate_factor = (unbound_dt / bound_dt) ** unbound_exponent if bound_dt else 1.0
+    unbound_population = unbound.total * frame_rate_factor
+    unbound_ess = unbound.effective_sample_size
 
     if bound.total <= 0 or unbound_population <= 0:
         delta_g_comp = math.inf if bound.total <= 0 else -math.inf
@@ -339,6 +375,16 @@ def _compute_delta_g_core(
 
     volume_correction = -rt * math.log(config.unbound_volume / config.standard_volume)
     delta_g = delta_g_comp + volume_correction
+
+    # Sampled bound-well depth (diagnostic): reveals whether the bound trajectory
+    # actually resolves a deep well or is capture-/sampling-limited.
+    well = bound_well_diagnostics(
+        bound_coords,
+        bin_size=config.bin_size,
+        boundary_radius=config.absorbing_boundary_radius,
+        exponent=exponent,
+        rt=rt,
+    )
 
     return {
         "delta_g": delta_g,
@@ -352,8 +398,11 @@ def _compute_delta_g_core(
         "bound_max_replica_fraction": bound.max_replica_fraction,
         "bound_population_min": (float(bound.per_replica.min()) if bound.per_replica.size else 0.0),
         "bound_population_max": (float(bound.per_replica.max()) if bound.per_replica.size else 0.0),
-        "unbound_g": unbound_g,
         "unbound_ess": unbound_ess,
+        "c_min": well["c_min"],
+        "c_boundary": well["c_boundary"],
+        "c_min_radius": well["c_min_radius"],
+        "delta_g_well": well["delta_g_well"],
     }
 
 
@@ -387,7 +436,7 @@ def bootstrap_delta_g(
     samples: list[float] = []
     for _ in range(n_bootstrap):
         bound_sample = [bound_coords[i] for i in rng.integers(0, n_bound, n_bound)]
-        if config.unbound_mode == "explicit" and n_unbound > 0:
+        if n_unbound > 0:
             unbound_sample = [unbound_coords[i] for i in rng.integers(0, n_unbound, n_unbound)]
         else:
             unbound_sample = unbound_coords

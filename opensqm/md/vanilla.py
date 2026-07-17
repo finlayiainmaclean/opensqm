@@ -11,7 +11,6 @@ from openmm import (
     LangevinMiddleIntegrator,
     State,
     System,
-    app,
     unit,
 )
 from openmm.app.forcefield import ForceField
@@ -20,6 +19,7 @@ from pydantic import BaseModel, ConfigDict
 from pydantic_units import OpenMMQuantity
 from tqdm import tqdm
 
+from opensqm.md.platforms import make_simulation
 from opensqm.md.prepare import create_integrator, create_system
 from opensqm.md.restraints import add_distal_restraints, add_restraints
 from opensqm.md.terminal_ring_mc import TerminalRingMC, find_terminal_group
@@ -54,7 +54,7 @@ def anneal_and_minimise(
     system0, _ = add_restraints(
         system, positions, topology.atoms(), 4.0, restraints=("heavy_atom",)
     )
-    simulation = app.Simulation(topology, system0, integrator0)
+    simulation = make_simulation(topology, system0, integrator0)
     simulation.context.setPositions(positions)
     simulation.minimizeEnergy()
     simulation.context.setVelocitiesToTemperature(50 * unit.kelvin)
@@ -80,14 +80,14 @@ def anneal_and_minimise(
         restraints=("ligand", "backbone"),
     )
     integrator1 = copy.deepcopy(integrator)
-    simulation = app.Simulation(topology, system1, integrator1)
+    simulation = make_simulation(topology, system1, integrator1)
     simulation.context.setPositions(positions)
     simulation.minimizeEnergy()
     positions = simulation.context.getState(getPositions=True).getPositions()
 
     # Minimise the system without restraints
     integrator2 = copy.deepcopy(integrator)
-    simulation = app.Simulation(topology, system, integrator2)
+    simulation = make_simulation(topology, system, integrator2)
     simulation.context.setPositions(positions)
     simulation.minimizeEnergy()
 
@@ -130,7 +130,7 @@ def production(
     )
 
     integrator = create_integrator(config.integrator_step_size)
-    simulation = app.Simulation(topology, system, integrator)
+    simulation = make_simulation(topology, system, integrator)
 
     # Set box vectors before positions
     simulation.context.setPeriodicBoxVectors(*topology.getPeriodicBoxVectors())

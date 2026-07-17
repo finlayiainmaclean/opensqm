@@ -53,6 +53,7 @@ from opensqm.md.equilibrate import (
     equilibrate,
 )
 from opensqm.md.mmgbsa import get_interaction_energy
+from opensqm.md.platforms import make_context, set_platform
 from opensqm.md.prepare import create_integrator, create_system, prepare_complex
 from opensqm.md.vanilla import ProductionSettings, production
 from opensqm.rdkit_utils import set_coordinates, set_residue_info
@@ -201,15 +202,15 @@ class _ImplicitScorer:
 
         # The complex forcefield (ligand SMIRNOFF + amber + GBn2) parametrises the
         # protein-only and ligand-only sub-topologies too.
-        self._complex_ctx = Context(
+        self._complex_ctx = make_context(
             create_system(forcefield, topology, implicit_solvent=True),
             create_integrator(0.002 * unit.picoseconds),
         )
-        self._prot_ctx = Context(
+        self._prot_ctx = make_context(
             create_system(forcefield, prot_mod.topology, implicit_solvent=True),
             create_integrator(0.002 * unit.picoseconds),
         )
-        self._lig_ctx = Context(
+        self._lig_ctx = make_context(
             create_system(forcefield, lig_mod.topology, implicit_solvent=True),
             create_integrator(0.002 * unit.picoseconds),
         )
@@ -610,9 +611,13 @@ def run_mmgbsa(
         #    then pick the single best corrected score for the full explicit run.
         implicit_ranked: list[tuple[float, int]] = []  # (corrected, protomer index)
         for i, protomer in enumerate(protomers):
+            logger.info(f"Building implicit complex for {protomer.smiles}")
             topology, positions, forcefield = _build_implicit_complex(protomer, protein_modeller)
             scorer = _ImplicitScorer(topology, positions, forcefield, config.ligand_resname)
-            interaction = scorer.interaction_energy(scorer.minimize(positions))
+            logger.info(f"Minimising complex for {protomer.smiles}")
+            minimised_positions = scorer.minimize(positions)
+            logger.info(f"Computing interaction energy for {protomer.smiles}")
+            interaction = scorer.interaction_energy(minimised_positions)
             corrected = protomer.intrinsic_kcal + interaction
             records[i]["implicit_min_kcal"] = interaction
             records[i]["implicit_min_corrected"] = corrected
@@ -635,6 +640,7 @@ def run_mmgbsa(
         if len(records) > 1:
             logger.info(f"Protomer funnel:\n{protomers_df.to_string(index=False)}")
 
+        logger.info(f"Equilibrating final complex for {winner.smiles}")
         # 5. Full explicit run for the winner only: solvate, equilibrate, produce.
         prepared = _prepare_and_equilibrate(winner, protein_modeller, config, tmp_dir / "winner")
 
@@ -648,6 +654,7 @@ def run_mmgbsa(
         contact_counts: dict[str, int] = {}
         contact_frames = 0
         for r in range(config.n_replicas):
+            logger.info(f"Running replica {r}")
             energies_r, traj_r, rmsd_r = _produce_and_score(
                 prepared, config, config.production_time, f"production_r{r}"
             )
@@ -788,6 +795,15 @@ def run_mmgbsa(
     help="Enumerate every protomer within this uniKa free-energy window (kcal/mol).",
 )
 @click.option("--n-closest-waters", default=5, show_default=True, help="Explicit waters to keep.")
+@click.option(
+    "--platform",
+    "platform",
+    type=click.Choice(["cuda", "mps"], case_sensitive=False),
+    default=None,
+    help="Force the OpenMM compute platform: 'cuda' (NVIDIA GPU) or 'mps' "
+    "(Apple Silicon Metal/OpenCL). Fails if unavailable. "
+    "Default: OpenMM auto-selects the fastest platform.",
+)
 def main(
     protein: str,
     ligand: str,
@@ -797,8 +813,10 @@ def main(
     ph: float,
     protonation_penalty: float,
     n_closest_waters: int,
+    platform: str | None,
 ) -> None:
     """Run an MMGBSA calculation from the command line."""
+    set_platform(platform)
     config = MMGBSASettings(
         production_time=production_time * unit.nanosecond,
         n_replicas=n_replicas,

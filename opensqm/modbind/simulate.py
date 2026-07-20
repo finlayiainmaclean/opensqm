@@ -152,7 +152,8 @@ def collect_trajectories(
             f"  well: ΔG_well={partial['delta_g_well']:.2f} kcal/mol "
             f"(c_min={partial['c_min']} @ {partial['c_min_radius']:.1f} A, "
             f"c_boundary={partial['c_boundary']}); "
-            f"P_bound={partial['bound_population']:.3g}, P_unbound={partial['unbound_population']:.3g}"
+            f"P_bound={partial['bound_population']:.3g}, "
+            f"P_unbound={partial['unbound_population']:.3g}"
         )
 
     with tqdm(total=config.n_replicas, desc="Bound escapes", unit="replica") as pbar:

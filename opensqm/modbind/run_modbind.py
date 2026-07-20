@@ -6,11 +6,12 @@ Sinko et al. (*PNAS* 2026). Builds the bound (ligand-protein) and unbound
 reports ``ΔG°`` with a bootstrapped confidence interval.
 """
 
+import json
 import tempfile
 from pathlib import Path
 
 import click
-from cloudpathlib import AnyPath
+from cloudpathlib import AnyPath, CloudPath
 from loguru import logger
 from openmm import unit
 from rdkit import RDLogger
@@ -21,7 +22,12 @@ from opensqm.md.run_mmgbsa import MMGBSASettings, run_mmgbsa
 from opensqm.modbind.analyze import analyze_modbinddg
 from opensqm.modbind.config import ModBindDGSettings
 from opensqm.modbind.simulate import collect_trajectories
-from opensqm.modbind.states import build_bound_state_from_state, build_unbound_state
+from opensqm.modbind.states import (
+    build_bound_state_from_state,
+    build_unbound_state,
+    load_prepared_state,
+    save_prepared_state,
+)
 
 RDLogger.DisableLog("rdApp.warning")
 
@@ -42,57 +48,85 @@ def run_modbind(
     starting conformation for the escape simulations.
 
     ``protein``, ``ligand`` and ``output`` may each be a local path or an
-    ``s3://`` URI. All work runs in a temp dir; only ``results.csv`` is published
-    to ``output``.
+    ``s3://`` URI. When ``output`` is a local directory it is used as the working
+    directory: staged inputs, the equilibrated states, escape trajectories and
+    results are all written there and REUSED on re-run -- any stage whose
+    checkpoint already exists is skipped, so re-running only redoes the analysis.
+    For an ``s3://`` output a local temp dir is used and ``results.csv`` published.
     """
     if config is None:
         config = ModBindDGSettings()
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_dir = Path(tmpdir)
+    out_dir = AnyPath(output)
+    remote = isinstance(out_dir, CloudPath)
+    scratch = tempfile.TemporaryDirectory() if remote else None
+    work_dir = Path(scratch.name) if scratch is not None else Path(output)
+    work_dir.mkdir(parents=True, exist_ok=True)
 
-        # Stage inputs locally (downloading from S3 when needed). All heavy work
-        # runs in the temp dir; only results.csv is published.
+    try:
+        # Stage inputs into the work dir, skipping the copy if already present so
+        # re-runs are cheap. For a local output these persist with the results.
         protein_src, ligand_src = AnyPath(protein), AnyPath(ligand)
-        local_protein = tmp_dir / f"protein_input{protein_src.suffix or '.pdb'}"
-        local_protein.write_bytes(protein_src.read_bytes())
-        local_ligand = tmp_dir / f"ligand_input{ligand_src.suffix or '.sdf'}"
-        local_ligand.write_bytes(ligand_src.read_bytes())
+        local_protein = work_dir / f"protein_input{protein_src.suffix or '.pdb'}"
+        local_ligand = work_dir / f"ligand_input{ligand_src.suffix or '.sdf'}"
+        if not local_protein.exists():
+            local_protein.write_bytes(protein_src.read_bytes())
+        if not local_ligand.exists():
+            local_ligand.write_bytes(ligand_src.read_bytes())
 
-        checkpoint_dir = tmp_dir / "checkpoints"
-        trajectory_dir = tmp_dir / "trajectories"
+        checkpoint_dir = work_dir / "checkpoints"
+        trajectory_dir = work_dir / "trajectories"
 
-        # --- MMGBSA protomer-funnel equilibration ---
+        # --- MMGBSA protomer-funnel equilibration (cached) ---
         # Find the bound protomer, equilibrate the solvated complex, run a short
-        # production MD, and take the lowest-energy frame as the escape start.
-        logger.info(
-            f"Running MMGBSA protomer-funnel equilibration "
-            f"({config.mmgbsa_equilibration_ns} ns production)"
-        )
-        mmgbsa_result = run_mmgbsa(
-            str(local_protein),
-            str(local_ligand),
-            output=str(tmp_dir / "mmgbsa_equilibration"),
-            config=MMGBSASettings(
-                production_time=config.mmgbsa_equilibration_ns * unit.nanosecond,
-                n_replicas=1,
-                protomer_ph=7.0,
-                protonation_penalty=3.0 * unit.kilocalories_per_mole,
-            ),
-        )
-        snapshot = mmgbsa_result.snapshot
-        logger.info(
-            f"MMGBSA equilibration score: {mmgbsa_result.scores['interaction_energy']:.2f} kcal/mol"
-        )
+        # production MD, and take the lowest-energy frame as the escape start. The
+        # equilibrated states are temperature-independent, so they are cached as
+        # CIF + System XML and reused on re-run.
+        equil_dir = work_dir / "equil"
+        scores_path = equil_dir / "mmgbsa_scores.json"
+        bound_state = load_prepared_state(equil_dir, "bound")
+        unbound_state = load_prepared_state(equil_dir, "unbound")
+        if bound_state is not None and unbound_state is not None and scores_path.exists():
+            mmgbsa_scores = json.loads(scores_path.read_text())
+            logger.info(f"Loaded cached equilibrated states + MMGBSA scores from {equil_dir}")
+        else:
+            logger.info(
+                f"Running MMGBSA protomer-funnel equilibration "
+                f"({config.mmgbsa_equilibration_ns} ns production)"
+            )
+            mmgbsa_result = run_mmgbsa(
+                str(local_protein),
+                str(local_ligand),
+                output=str(work_dir / "mmgbsa_equilibration"),
+                config=MMGBSASettings(
+                    production_time=config.mmgbsa_equilibration_ns * unit.nanosecond,
+                    n_replicas=1,
+                    protomer_ph=7.0,
+                    protonation_penalty=3.0 * unit.kilocalories_per_mole,
+                ),
+            )
+            snapshot = mmgbsa_result.snapshot
+            mmgbsa_scores = {}
+            for key, value in mmgbsa_result.scores.items():
+                try:
+                    mmgbsa_scores[key] = float(value)
+                except (TypeError, ValueError):
+                    mmgbsa_scores[key] = value
+            logger.info(
+                f"MMGBSA equilibration score: {mmgbsa_scores['interaction_energy']:.2f} kcal/mol"
+            )
 
-        logger.info("Building and equilibrating unbound state")
-        unbound_state = build_unbound_state(
-            snapshot.ligand,
-            equilibration_config=EquilibrationSettings(),
-        )
+            logger.info("Building and equilibrating unbound state")
+            unbound_state = build_unbound_state(
+                snapshot.ligand,
+                equilibration_config=EquilibrationSettings(),
+            )
+            logger.info("Using MMGBSA lowest-energy snapshot as protein starting structure")
+            bound_state = build_bound_state_from_state(snapshot)
 
-        logger.info("Using MMGBSA lowest-energy snapshot as protein starting structure")
-        bound_state = build_bound_state_from_state(snapshot)
+            save_prepared_state(bound_state, equil_dir, "bound")
+            save_prepared_state(unbound_state, equil_dir, "unbound")
+            scores_path.write_text(json.dumps(mmgbsa_scores))
 
         logger.info("Collecting escape trajectories (unbound first, then bound replicas)")
         data = collect_trajectories(
@@ -101,27 +135,24 @@ def run_modbind(
             config,
             checkpoint_dir=checkpoint_dir,
             trajectory_dir=trajectory_dir,
-            resume=False,
+            resume=True,
         )
 
         logger.info("Analyzing")
-        results = analyze_modbinddg(
-            data,
-            config,
-            tmp_dir,
-            ligand_path=local_ligand,
-            trajectory_dir=trajectory_dir,
-        )
+        results = analyze_modbinddg(data, config, work_dir)
+        results["mmgbsa_score"] = mmgbsa_scores.get("mmgbsa_score", float("nan"))
 
-        for col in ["mmgbsa_score"]:
-            results[col] = mmgbsa_result.scores[col]
-
-        # Publish only the results CSV to the destination (local dir or S3 prefix).
-        out_dir = AnyPath(output)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_results = out_dir / "results.csv"
-        out_results.write_bytes((tmp_dir / "results.csv").read_bytes())
-        logger.info(f"Saved results to {out_results}")
+        # results.csv is written into work_dir by analyze_modbinddg. For a local
+        # output that already IS the destination; for a remote output, publish it.
+        if remote:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "results.csv").write_bytes((work_dir / "results.csv").read_bytes())
+            logger.info(f"Published results to {out_dir / 'results.csv'}")
+        else:
+            logger.info(f"Saved results to {work_dir / 'results.csv'}")
+    finally:
+        if scratch is not None:
+            scratch.cleanup()
 
     return results
 

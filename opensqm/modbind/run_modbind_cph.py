@@ -107,13 +107,7 @@ def run_modbind(
         )
 
         logger.info("Analyzing")
-        results = analyze_modbinddg(
-            data,
-            config,
-            tmp_dir,
-            ligand_path=local_ligand,
-            trajectory_dir=trajectory_dir,
-        )
+        results = analyze_modbinddg(data, config, tmp_dir)
 
         # Publish only the results CSV to the destination (local dir or S3 prefix).
         out_dir = AnyPath(output)

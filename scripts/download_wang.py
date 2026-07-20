@@ -40,8 +40,7 @@ def main():
             header=None,
         )
 
-        _df.columns = ["id", "pX"]
-        _df["pX"] = -_df["pX"]
+        _df.columns = ["id", "dG"]
         _df["target_name"] = target_name
 
         target_dir = Path("data") / "inputs" / DATASET / target_name
@@ -52,7 +51,7 @@ def main():
         for row in _df.to_dict("records"):
             pdb_code = TARGET_PDB_CODES[target_name]
             mol_id = row["id"]
-            pX = row["pX"]
+            dG = row["dG"]
 
             if "pose" in mol_id:
                 continue
@@ -95,7 +94,7 @@ def main():
                     "inchikey": inchikey,
                     "id": pdb_code,
                     "smi": smi,
-                    "pX": pX,
+                    "dG": dG,
                 }
             )
 

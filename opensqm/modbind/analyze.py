@@ -45,12 +45,6 @@ RESULTS_COLUMNS = [
     "bound_population_min",
     "bound_population_max",
     "temperature_K",
-    "mmgbsa_mean",
-    "mmgbsa_std",
-    "mmgbsa_min",
-    "mmgbsa_n_frames",
-    "mmgbsa_n_decorrelated",
-    "n_closest_waters",
     "bound_sim_time_ns",
     "unbound_sim_time_ns",
     "total_sim_time_ns",
@@ -82,9 +76,6 @@ def analyze_modbinddg(
     data: ModBindDGData,
     config: ModBindDGSettings,
     output_path: Path,
-    *,
-    ligand_path: str,
-    trajectory_dir: Path,
 ) -> dict:
     """Compute dG (Eq. 14), bootstrap CI, PMF, and write results.csv/pmf.csv."""
     output_path = Path(output_path)

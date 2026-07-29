@@ -32,6 +32,7 @@ from opensqm.md.omm import (
 from opensqm.md.terminal_ring_mc import (
     TerminalGroup,
     find_terminal_group,
+    rotate_terminal_group,
 )
 
 if TYPE_CHECKING:
@@ -1251,7 +1252,7 @@ class ConstantPH(object):
                     .getPositions(asNumpy=True)
                     .value_in_unit(nanometers)
                 )
-                post_flip_implicit_pos = self._rotate_around_bond(
+                post_flip_implicit_pos = rotate_terminal_group(
                     pre_flip_implicit_pos,
                     anchor_index=record.implicit.bond[0],
                     pivot_index=record.implicit.bond[1],
@@ -1367,7 +1368,7 @@ class ConstantPH(object):
                 explicit_pos_for_relax = np.asarray(explicit_positions).copy()
                 for flip_res_index, flip_record_idx, flip_angle_deg in accepted_coupled_flips:
                     record = self.ringFlips[flip_res_index][flip_record_idx]
-                    explicit_pos_for_relax = self._rotate_around_bond(
+                    explicit_pos_for_relax = rotate_terminal_group(
                         explicit_pos_for_relax,
                         anchor_index=record.explicit.bond[0],
                         pivot_index=record.explicit.bond[1],
@@ -1496,7 +1497,7 @@ class ConstantPH(object):
         energy_before = self.implicitContext.getState(getEnergy=True).getPotentialEnergy()
 
         # 3) Flip in the implicit solvent simulation.
-        implicit_pos_after = self._rotate_around_bond(
+        implicit_pos_after = rotate_terminal_group(
             implicit_pos_before,
             anchor_index=record.implicit.bond[0],
             pivot_index=record.implicit.bond[1],
@@ -1523,7 +1524,7 @@ class ConstantPH(object):
 
         # 6) Accepted: apply same rotation to the explicit context, then run a
         # short relaxation block so the surrounding solvent can adapt.
-        explicit_pos_after = self._rotate_around_bond(
+        explicit_pos_after = rotate_terminal_group(
             explicit_pos,
             anchor_index=record.explicit.bond[0],
             pivot_index=record.explicit.bond[1],
@@ -1556,42 +1557,6 @@ class ConstantPH(object):
                 f"rotated {angle_deg:+.0f} deg"
             )
         return True
-
-    @staticmethod
-    def _rotate_around_bond(
-        positions: np.ndarray,
-        anchor_index: int,
-        pivot_index: int,
-        rotatable_indices: Iterable[int],
-        angle_deg: float,
-    ) -> np.ndarray:
-        """Rigidly rotate ``rotatable_indices`` (Rodrigues) about the pivot-anchor axis.
-
-        The rotation axis points from ``pivot_index`` to ``anchor_index`` and
-        the angle is ``angle_deg``. The pivot atom is the fixed point of the
-        rotation; the axis points outward toward the anchor (i.e. into the rest
-        of the molecule). This matches the convention used by
-        :func:`opensqm.md.terminal_ring_mc.find_terminal_group`, which returns
-        ``bond=(anchor, pivot)`` with ``pivot`` on the rotatable-group side.
-
-        Returns a new ``ndarray`` in nm; ``positions`` is not mutated.
-        """
-        positions = np.asarray(positions)
-        p_pivot = positions[pivot_index]
-        axis = positions[anchor_index] - p_pivot
-        axis_norm = float(np.linalg.norm(axis))
-        if axis_norm == 0.0:
-            return positions.copy()
-        axis = axis / axis_norm
-        theta = float(np.deg2rad(angle_deg))
-        cos_t = np.cos(theta)
-        sin_t = np.sin(theta)
-        rotated = positions.copy()
-        for idx in rotatable_indices:
-            v = positions[idx] - p_pivot
-            v_rot = v * cos_t + np.cross(axis, v) * sin_t + axis * np.dot(axis, v) * (1.0 - cos_t)
-            rotated[idx] = p_pivot + v_rot
-        return rotated
 
     def set_residue_state(self, residue_index: int, state_index: int, relax: bool = False) -> None:
         """

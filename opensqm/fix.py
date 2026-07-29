@@ -1,15 +1,27 @@
 """PDBFixer-based preparation of protein structures (add hydrogens, renumber chains)."""
 
+import itertools
 import logging
+import math
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import click
 import numpy as np
-from openmm import unit
+from loguru import logger
+from openmm import Vec3, unit
 from openmm.app import Atom, Modeller, PDBFile, Residue, Topology
 from pdb2pqr.main import run_pdb2pqr
 from pdbfixer import PDBFixer
+
+from opensqm.md.terminal_ring_mc import (
+    RING_FLIP_BONDS,
+    find_residue_ring_bond,
+    find_terminal_group,
+    rotate_terminal_group,
+)
 
 # Max allowed distance (nm) before we consider the chain broken
 BREAK_THRESHOLD_NM = 0.25  # ~2.5 Å — generous but catches true breaks
@@ -94,7 +106,7 @@ def renumber_chains(fixer: PDBFixer) -> PDBFixer:
     return fixer
 
 
-def _protonate_with_propka(input_pdb: Path, output_pdb: Path, ph: float) -> None:
+def _protonate_with_propka(input_pdb: Path, output_pdb: Path, ph: float) -> list[dict]:
     """Assign titration states and optimise the H-bond network with PROPKA/PDB2PQR.
 
     Runs PDB2PQR (which drives PROPKA internally) to, at the requested ``ph``:
@@ -111,10 +123,16 @@ def _protonate_with_propka(input_pdb: Path, output_pdb: Path, ph: float) -> None
     written PDB keeps canonical residue names (HIS/ASP/GLU/CYS/...) — the chosen
     protonation state is encoded by which hydrogens are present (e.g. HD1 vs HE2
     on HIS). The PQR output is required by PDB2PQR but discarded here.
+
+    Returns PDB2PQR's own per-group PROPKA pKa predictions -- one ``dict`` per
+    ionisable group (keys include ``res_name``/``res_num``/``chain_id``/
+    ``pKa``) from the exact same PROPKA pass that decided the titration
+    states above, so a caller needing pKa *values* (not just the resulting
+    structure) doesn't need to run PROPKA a second time.
     """
     with tempfile.TemporaryDirectory() as tmp:
         pqr_path = Path(tmp) / "structure.pqr"
-        run_pdb2pqr(
+        _missed_residues, pka_groups, _biomolecule = run_pdb2pqr(
             [
                 "--ff=AMBER",
                 "--keep-chain",
@@ -125,6 +143,182 @@ def _protonate_with_propka(input_pdb: Path, output_pdb: Path, ph: float) -> None
                 str(pqr_path),
             ]
         )
+    return pka_groups or []
+
+
+def _his_tautomer(residue: Residue) -> str | None:
+    """Return the HIS tautomer/protonation state present on ``residue``.
+
+    Inferred from which ring-nitrogen hydrogens are present (see
+    :func:`_protonate_with_propka`): ``"HID"`` (HD1 only), ``"HIE"`` (HE2 only),
+    ``"HIP"`` (both, doubly protonated/charged), or ``None`` if neither is
+    present (not a valid HIS state; should not occur on a PROPKA-protonated
+    structure).
+    """
+    names = {a.name for a in residue.atoms()}
+    hd1, he2 = "HD1" in names, "HE2" in names
+    if hd1 and he2:
+        return "HIP"
+    if hd1:
+        return "HID"
+    if he2:
+        return "HIE"
+    return None
+
+
+@dataclass(frozen=True)
+class _FlipCandidate:
+    """One independently-toggleable HIS/ASN/GLN flip near the ligand.
+
+    ``"tautomer"`` moves a neutral HIS's ring-nitrogen hydrogen to the other
+    nitrogen (HID<->HIE); ``"ring"`` rigidly rotates the residue's terminal
+    ring/amide group 180 degrees about its
+    :data:`opensqm.md.terminal_ring_mc.RING_FLIP_BONDS` bond. These are
+    orthogonal degrees of freedom, so a single near-ligand HIS residue can
+    contribute both a ``"tautomer"`` and a ``"ring"`` candidate.
+    """
+
+    residue_index: int
+    label: str
+    kind: Literal["tautomer", "ring"]
+    distance_angstrom: float
+
+
+def _nearest_atom_distance(
+    residue: Residue, pos_ang: np.ndarray, ref_coords_angstrom: np.ndarray
+) -> float:
+    atom_indices = [a.index for a in residue.atoms()]
+    return float(
+        np.linalg.norm(
+            ref_coords_angstrom[:, None, :] - pos_ang[None, atom_indices, :], axis=-1
+        ).min()
+    )
+
+
+def find_flippable_residues(
+    topology: Topology,
+    positions: unit.Quantity,
+    ref_coords_angstrom: np.ndarray,
+    cutoff_angstrom: float = 5.0,
+) -> list[_FlipCandidate]:
+    """List HIS/ASN/GLN flip candidates within ``cutoff_angstrom`` of ``ref_coords_angstrom``.
+
+    PROPKA/PDB2PQR's H-bond network optimisation (:func:`_protonate_with_propka`)
+    and PDBFixer's heavy-atom placement only ever see the apo protein, so a
+    residue near the ligand may have been assigned a state that satisfies its
+    *other* protein neighbours rather than the ligand. This finds candidates
+    for :func:`enumerate_residue_flip_variants` to try the alternative state
+    on -- see :class:`_FlipCandidate` for the two kinds of flip and why HIS
+    can contribute both.
+
+    Returned nearest-first by distance to ``ref_coords_angstrom`` (typically
+    the ligand's atom positions, Angstrom), so a caller that must truncate the
+    list (see :func:`enumerate_residue_flip_variants`'s ``max_variants``)
+    keeps the candidates most likely to actually matter.
+    """
+    pos_ang = np.array([p.value_in_unit(unit.angstrom) for p in positions], dtype=float)
+    candidates: list[_FlipCandidate] = []
+    for index, residue in enumerate(topology.residues()):
+        resname = residue.name
+        if resname != "HIS" and resname not in RING_FLIP_BONDS:
+            continue
+        distance = _nearest_atom_distance(residue, pos_ang, ref_coords_angstrom)
+        if distance >= cutoff_angstrom:
+            continue
+        label = f"{residue.chain.id}/{resname}{residue.id}"
+        if resname == "HIS" and _his_tautomer(residue) in ("HID", "HIE"):
+            candidates.append(_FlipCandidate(index, label, "tautomer", distance))
+        if resname in RING_FLIP_BONDS:
+            candidates.append(_FlipCandidate(index, label, "ring", distance))
+    candidates.sort(key=lambda c: c.distance_angstrom)
+    return candidates
+
+
+def enumerate_residue_flip_variants(
+    topology: Topology,
+    positions: unit.Quantity,
+    candidates: list[_FlipCandidate],
+    max_variants: int = 8,
+) -> list[tuple[str, Topology, unit.Quantity]]:
+    """Enumerate every combination of ``candidates``' flips.
+
+    Each combination applies, in order:
+
+    1. every chosen ``"tautomer"`` candidate's HID<->HIE swap, realised with a
+       single ``Modeller.addHydrogens(variants=...)`` call passing ``None``
+       for every other residue so every residue PROPKA already assigned
+       (ASH/GLH/HIP/LYN/CYX/...) keeps its exact existing protonation state --
+       skipped entirely when no ``"tautomer"`` candidate is chosen; then
+    2. every chosen ``"ring"`` candidate's 180-degree rigid rotation about its
+       :data:`opensqm.md.terminal_ring_mc.RING_FLIP_BONDS` bond, applied via
+       :func:`opensqm.md.terminal_ring_mc.rotate_terminal_group` (each
+       candidate's rotatable atoms are disjoint from every other's, so
+       applying them one at a time is order-independent).
+
+    Returns ``(label, topology, positions)`` triples, always including the
+    unflipped baseline first (``label=""``, matching the input structure);
+    ``label`` comma-joins every candidate applied in that combination (e.g.
+    ``"A/HIS208:HIE->HID,A/HIS208:ring-flip,A/ASN45:ring-flip"``).
+
+    ``candidates`` longer than ``floor(log2(max_variants))`` is truncated to
+    its first that many entries (logged, not silent) to bound the ``2**n``
+    combinatorial blow-up -- pass them ordered by priority (e.g.
+    :func:`find_flippable_residues`'s nearest-first order).
+    """
+    if not candidates:
+        return [("", topology, positions)]
+
+    max_candidates = max(1, math.floor(math.log2(max_variants)))
+    if len(candidates) > max_candidates:
+        dropped = [f"{c.label}:{c.kind}" for c in candidates[max_candidates:]]
+        logger.warning(
+            f"{len(candidates)} HIS/ASN/GLN flip candidates qualify; keeping "
+            f"only the {max_candidates} closest to bound the 2^n combinatorial "
+            f"blow-up (dropping {dropped})"
+        )
+        candidates = candidates[:max_candidates]
+
+    residues = list(topology.residues())
+    flip_to = {"HID": "HIE", "HIE": "HID"}
+    n_res = topology.getNumResidues()
+
+    variants_out: list[tuple[str, Topology, unit.Quantity]] = []
+    for combo in itertools.product((False, True), repeat=len(candidates)):
+        chosen = [c for c, do_flip in zip(candidates, combo, strict=True) if do_flip]
+        tautomer_flips = [c for c in chosen if c.kind == "tautomer"]
+        ring_flips = [c for c in chosen if c.kind == "ring"]
+
+        applied_labels: list[str] = []
+        if tautomer_flips:
+            variants: list[str | None] = [None] * n_res
+            for candidate in tautomer_flips:
+                current_state = _his_tautomer(residues[candidate.residue_index])
+                target_state = flip_to[current_state]
+                variants[candidate.residue_index] = target_state
+                applied_labels.append(f"{candidate.label}:{current_state}->{target_state}")
+            modeller = Modeller(topology, positions)
+            modeller.addHydrogens(variants=variants)
+            out_topology, out_positions = modeller.topology, modeller.positions
+        else:
+            out_topology, out_positions = topology, positions
+
+        if ring_flips:
+            pos_nm = np.array([p.value_in_unit(unit.nanometer) for p in out_positions], dtype=float)
+            out_residues = list(out_topology.residues())
+            for candidate in ring_flips:
+                residue = out_residues[candidate.residue_index]
+                anchor_idx, pivot_idx = find_residue_ring_bond(
+                    out_topology, residue.name, residue.id, residue.chain.id
+                )
+                group = find_terminal_group(out_topology, anchor_idx, pivot_idx)
+                pos_nm = rotate_terminal_group(
+                    pos_nm, group.bond[0], group.bond[1], group.rotatable_group, 180.0
+                )
+                applied_labels.append(f"{candidate.label}:ring-flip")
+            out_positions = unit.Quantity([Vec3(*row) for row in pos_nm], unit.nanometer)
+
+        variants_out.append((",".join(applied_labels), out_topology, out_positions))
+    return variants_out
 
 
 def run_pdbfixer(
@@ -133,14 +327,20 @@ def run_pdbfixer(
     keep_waters: bool = True,
     keep_ions: bool = True,
     ph: float = 7.0,
-) -> Path:
+) -> tuple[Path, list[dict]]:
     """Prepare a protein structure and write the protonated result.
 
     PDBFixer completes the structure (missing residues/atoms, standard residue
     substitution), then PROPKA/PDB2PQR assigns pH-dependent titration states and
     optimises the hydrogen-bonding network — see :func:`_protonate_with_propka`.
     Waters are protonated and optimised in place; monatomic ions are stripped by
-    ``removeHeterogens`` and re-added afterwards. Returns the output path.
+    ``removeHeterogens`` and re-added afterwards.
+
+    Returns ``(output_path, pka_groups)`` -- ``pka_groups`` is
+    :func:`_protonate_with_propka`'s own per-group PROPKA pKa predictions
+    (see its docstring), from the same PROPKA pass that decided the
+    titration states written to ``output_path``, so a caller needing pKa
+    values doesn't need a second, separate PROPKA run.
     """
     input_protein_path = Path(input_protein_path)
     output_protein_path = Path(output_protein_path)
@@ -179,7 +379,7 @@ def run_pdbfixer(
         protonated_pdb = Path(tmp) / "protonated.pdb"
         with heavy_pdb.open("w") as handle:
             PDBFile.writeFile(fixer.topology, fixer.positions, handle, keepIds=True)
-        _protonate_with_propka(heavy_pdb, protonated_pdb, ph)
+        pka_groups = _protonate_with_propka(heavy_pdb, protonated_pdb, ph)
         protonated = PDBFile(str(protonated_pdb))
         topology, positions = protonated.topology, protonated.positions
 
@@ -197,7 +397,7 @@ def run_pdbfixer(
 
     with output_protein_path.open("w") as handle:
         PDBFile.writeFile(topology, positions, handle, keepIds=True)
-    return output_protein_path
+    return output_protein_path, pka_groups
 
 
 @click.command()

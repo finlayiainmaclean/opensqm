@@ -1,6 +1,7 @@
 """Monte Carlo moves that rigidly rotate terminal groups (e.g. ring flips)."""
 
 from dataclasses import dataclass
+from typing import Iterable
 
 import numpy as np
 from openmm import app, unit
@@ -152,6 +153,42 @@ def find_terminal_group(
     if angles is None:
         angles = [180.0]
     return TerminalGroup(angles=angles, bond=(anchor, pivot), rotatable_group=mobile_atoms)
+
+
+def rotate_terminal_group(
+    positions: np.ndarray,
+    anchor_index: int,
+    pivot_index: int,
+    rotatable_indices: Iterable[int],
+    angle_deg: float,
+) -> np.ndarray:
+    """Rigidly rotate ``rotatable_indices`` (Rodrigues) about the pivot-anchor axis.
+
+    The rotation axis points from ``pivot_index`` to ``anchor_index`` and
+    the angle is ``angle_deg``. The pivot atom is the fixed point of the
+    rotation; the axis points outward toward the anchor (i.e. into the rest
+    of the molecule). This matches the convention used by
+    :func:`find_terminal_group`, which returns ``bond=(anchor, pivot)`` with
+    ``pivot`` on the rotatable-group side.
+
+    Returns a new ``ndarray`` in nm; ``positions`` is not mutated.
+    """
+    positions = np.asarray(positions)
+    p_pivot = positions[pivot_index]
+    axis = positions[anchor_index] - p_pivot
+    axis_norm = float(np.linalg.norm(axis))
+    if axis_norm == 0.0:
+        return positions.copy()
+    axis = axis / axis_norm
+    theta = float(np.deg2rad(angle_deg))
+    cos_t = np.cos(theta)
+    sin_t = np.sin(theta)
+    rotated = positions.copy()
+    for idx in rotatable_indices:
+        v = positions[idx] - p_pivot
+        v_rot = v * cos_t + np.cross(axis, v) * sin_t + axis * np.dot(axis, v) * (1.0 - cos_t)
+        rotated[idx] = p_pivot + v_rot
+    return rotated
 
 
 class TerminalRingMC:

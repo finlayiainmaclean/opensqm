@@ -31,41 +31,43 @@ TARGET_PDB_CODES: Final[dict[str, str]] = {
 def main():
     """Download PL-REX dataset."""
     for target_name in tqdm(TARGET_NAMES):
-        URL = f"https://raw.githubusercontent.com/Honza-R/Wang_dataset_SQM/refs/heads/main/Zariquiey_structures_extended/{target_name}/experimental_dG.txt"
-        print(URL)
-        _df = pd.read_csv(
-            URL,
-            skiprows=2,
+        # Each molecule has several candidate poses; SQM2.20_selected_poses.txt
+        # names the single pose SQM2.20 selected for each (its directory under
+        # structures/ is named exactly by that pose id).
+        poses_url = f"{BASE_URL}/{target_name}/SQM2.20_selected_poses.txt"
+        print(poses_url)
+        poses_df = pd.read_csv(
+            poses_url,
             sep=r"\s+",
             header=None,
+            names=["pose_id", "sqm_score"],
         )
 
-        _df.columns = ["id", "dG"]
-        _df["target_name"] = target_name
+        # Experimental ΔG is keyed per pose id (the base molecule and each of its
+        # poses share the same value, e.g. ejm_31 and ejm_31_pose_orig).
+        dg_url = f"{BASE_URL}/{target_name}/experimental_dG.txt"
+        dg_df = pd.read_csv(dg_url, sep=r"\s+", header=None, names=["id", "dG"])
+        dG_by_id = dict(zip(dg_df["id"], dg_df["dG"], strict=False))
 
         target_dir = Path("data") / "inputs" / DATASET / target_name
         target_dir.mkdir(exist_ok=True, parents=True)
 
         inputs = []
 
-        for row in _df.to_dict("records"):
+        for row in poses_df.to_dict("records"):
             pdb_code = TARGET_PDB_CODES[target_name]
-            mol_id = row["id"]
-            dG = row["dG"]
-
-            if "pose" in mol_id:
-                continue
+            pose_id = row["pose_id"]
+            # Strip the "_pose_*" suffix to recover the base molecule id.
+            mol_id = pose_id.split("_pose")[0]
+            dG = dG_by_id.get(pose_id, dG_by_id.get(mol_id))
 
             lig_sdf_path = target_dir / f"{mol_id}.sdf"
 
             raw_prot_pdb_path = target_dir / f"{pdb_code}.raw.pdb"
             fixed_prot_pdb_path = target_dir / f"{pdb_code}.fixed.pdb"
 
-            raw_prot_pdb_path = target_dir / f"{pdb_code}.raw.pdb"
-            fixed_prot_pdb_path = target_dir / f"{pdb_code}.fixed.pdb"
-
             if not fixed_prot_pdb_path.exists():
-                URL = f"{BASE_URL}/{target_name}/structures/{mol_id}/protein.pdb"
+                URL = f"{BASE_URL}/{target_name}/structures/{pose_id}/protein.pdb"
                 wget.download(
                     URL,
                     out=str(raw_prot_pdb_path),
@@ -73,7 +75,7 @@ def main():
                 run_pdbfixer(raw_prot_pdb_path, fixed_prot_pdb_path, keep_waters=True)
 
             if not lig_sdf_path.exists():
-                URL = f"{BASE_URL}/{target_name}/structures/{mol_id}/ligand.sdf"
+                URL = f"{BASE_URL}/{target_name}/structures/{pose_id}/ligand.sdf"
                 print(URL)
                 wget.download(
                     URL,
@@ -93,8 +95,10 @@ def main():
                     "target_name": target_name,
                     "inchikey": inchikey,
                     "id": pdb_code,
+                    "pose_id": pose_id,
                     "smi": smi,
-                    "dG": dG,
+                    # benchmark_wang.py reads "pX", which stores -ΔG in kcal/mol.
+                    "pX": -dG,
                 }
             )
 

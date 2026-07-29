@@ -126,24 +126,23 @@ def run_sqm(inp: SQMConfig) -> SQMOutput:
         ligand, protein = relax_complex(ligand=ligand, protein=protein, simulation_time=2)
 
     if inp.settings.sqm_optimise:
-        logger.info("Crudely optimising ligand")
+        logger.info("Optimising ligand (gnorm 20)")
+        ligand, protein = optimise_complex(
+            ligand=ligand,
+            protein=protein,
+            mode="ligand",
+            gnorm=20,
+            num_epochs=3,  # ~4 minutes an epoch
+            use_rapid=True,
+        )
 
-        # ligand, protein = optimise_complex(
-        #     ligand=ligand,
-        #     protein=protein,
-        #     mode="ligand",
-        #     gnorm=20,
-        #     num_epochs=3,  # ~4 minutes an epoch
-        #     use_rapid=True,
-        # )
-
-        logger.info("Refining ligand")
+        logger.info("Refining ligand hydrogens (gnorm 10)")
         ligand, protein = optimise_complex(
             ligand=ligand,
             protein=protein,
             mode="hydrogens",
             gnorm=10,
-            num_epochs=3,  # # ~5 minutes an epoch
+            num_epochs=3,  # ~5 minutes an epoch
             use_rapid=False,
         )
 

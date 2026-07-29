@@ -33,11 +33,11 @@ import numpy as np
 import pandas as pd
 from cloudpathlib import AnyPath
 from loguru import logger
-from openmm import Context, LocalEnergyMinimizer, Vec3, unit
+from openmm import Context, CustomExternalForce, LocalEnergyMinimizer, System, Vec3, unit
 from openmm.app import Modeller
 from openmm.app.forcefield import ForceField
 from openmm.app.pdbfile import PDBFile
-from openmm.app.topology import Topology
+from openmm.app.topology import Atom, Topology
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_units import OpenMMQuantity
 from rdkit import Chem, RDLogger
@@ -231,15 +231,136 @@ class _ImplicitScorer:
         e_ligand = self._potential(self._lig_ctx, positions_nm[self.lig_idx])
         return e_complex - e_protein - e_ligand
 
-    def minimize(self, positions: unit.Quantity) -> np.ndarray:
-        """Minimise the complex in implicit solvent; return the minimised coords (nm)."""
-        self._complex_ctx.setPositions(positions)
-        LocalEnergyMinimizer.minimize(self._complex_ctx, maxIterations=1000)
-        return np.asarray(
-            self._complex_ctx.getState(getPositions=True)
-            .getPositions()
-            .value_in_unit(unit.nanometer)
+
+_BACKBONE_ATOM_NAMES = ("CA", "C", "N")
+# Residues whose CA/C/N are not protein backbone (ligand, cofactor, caps).
+_NON_BACKBONE_RESNAMES = ("LIG", "COF", "ACE", "NME")
+
+# Default restraints for the implicit-solvent minimisation. Any kept crystal water
+# oxygens are pinned stiffly at their sites and the protein backbone gently, so
+# GBn2 relaxes the ligand, side chains and free water hydrogens without moving the
+# waters or distorting the fold. Added to a throwaway minimisation system only,
+# never to the scoring contexts, so they never enter the interaction energy.
+WATER_RESTRAINT_K = 100.0 * unit.kilocalories_per_mole / unit.angstroms**2
+BACKBONE_RESTRAINT_K = 4.0 * unit.kilocalories_per_mole / unit.angstroms**2
+# Optional stiff pin on the ligand heavy atoms, holding the pose at its input
+# geometry (only side chains / hydrogens relax around it). Off by default; used to
+# prepare a congeneric series to a *consistent* pose so a geometry-sensitive
+# rescore (e.g. SQM) isn't biased toward whichever ligand happened to drift least.
+LIGAND_RESTRAINT_K = 4.0 * unit.kilocalories_per_mole / unit.angstroms**2
+
+
+def _is_water_oxygen(atom: Atom) -> bool:
+    """Return True for a crystallographic water's oxygen (its hydrogens stay free)."""
+    return (
+        atom.residue.name in _WATER_RESNAMES
+        and atom.element is not None
+        and atom.element.symbol == "O"
+    )
+
+
+def _is_backbone(atom: Atom) -> bool:
+    """Return True for a protein backbone atom (CA/C/N, excluding ligand/cofactor/caps)."""
+    return atom.name in _BACKBONE_ATOM_NAMES and atom.residue.name not in _NON_BACKBONE_RESNAMES
+
+
+def _add_position_restraint(
+    system: System,
+    coords_nm: np.ndarray,
+    atom_indices: list[int],
+    force_constant: unit.Quantity,
+) -> int:
+    """Add a harmonic ``CustomExternalForce`` pinning ``atom_indices`` in place.
+
+    Non-periodic (the implicit complex is non-periodic); references come from
+    ``coords_nm`` (n_atoms x 3, nm). Returns the number of restrained atoms; adds
+    nothing when the list is empty. ``k`` is a per-particle parameter, not global,
+    so two restraint forces (water, backbone) with different force constants can
+    coexist without clashing on a shared global ``k``.
+    """
+    if not atom_indices:
+        return 0
+    force = CustomExternalForce("k*((x-x0)^2+(y-y0)^2+(z-z0)^2)")
+    for parameter in ("k", "x0", "y0", "z0"):
+        force.addPerParticleParameter(parameter)
+    k = force_constant.value_in_unit(unit.kilojoule_per_mole / unit.nanometer**2)
+    for index in atom_indices:
+        x0, y0, z0 = (float(c) for c in coords_nm[index])
+        force.addParticle(int(index), [k, x0, y0, z0])
+    system.addForce(force)
+    return force.getNumParticles()
+
+
+def _minimize_implicit_restrained(
+    forcefield: ForceField,
+    topology: Topology,
+    positions: unit.Quantity,
+    *,
+    restrain_water: bool = True,
+    water_restraint_k: unit.Quantity = WATER_RESTRAINT_K,
+    restrain_backbone: bool = True,
+    backbone_restraint_k: unit.Quantity = BACKBONE_RESTRAINT_K,
+    restrain_ligand: bool = True,
+    ligand_restraint_k: unit.Quantity = LIGAND_RESTRAINT_K,
+    ligand_resname: str = "LIG",
+) -> np.ndarray:
+    """Minimise an implicit-solvent complex, pinning water oxygens and the backbone.
+
+    The restraints are added to a throwaway minimisation system built from
+    ``forcefield``/``topology`` - kept crystal water oxygens stiffly, the protein
+    backbone gently - so GBn2 relaxes the ligand, side chains and free water
+    hydrogens without moving the waters off their sites or distorting the fold. The
+    scoring contexts are untouched, so the restraints bias only the minimised
+    geometry, never the interaction energy. Returns the minimised coordinates
+    (n_atoms x 3, nm). Restraints that select no atoms (e.g. water when the complex
+    has none) are simply no-ops.
+
+    With ``restrain_ligand`` the ligand heavy atoms are also pinned at their
+    input positions (only side chains and hydrogens relax around a fixed pose). This
+    holds every ligand at its input geometry, so a congeneric series is prepared to
+    a consistent pose rather than each ligand drifting a different amount - important
+    before a geometry-sensitive rescore.
+    """
+    system = create_system(forcefield, topology, implicit_solvent=True)
+    coords_nm = np.asarray(positions.value_in_unit(unit.nanometer))
+    n_water = n_backbone = n_ligand = 0
+    if restrain_water:
+        n_water = _add_position_restraint(
+            system,
+            coords_nm,
+            [a.index for a in topology.atoms() if _is_water_oxygen(a)],
+            water_restraint_k,
         )
+    if restrain_backbone:
+        n_backbone = _add_position_restraint(
+            system,
+            coords_nm,
+            [a.index for a in topology.atoms() if _is_backbone(a)],
+            backbone_restraint_k,
+        )
+    if restrain_ligand:
+        n_ligand = _add_position_restraint(
+            system,
+            coords_nm,
+            [
+                a.index
+                for a in topology.atoms()
+                if a.residue.name == ligand_resname
+                and a.element is not None
+                and a.element.symbol != "H"
+            ],
+            ligand_restraint_k,
+        )
+    logger.info(
+        f"Restrained {n_water} water oxygen(s), {n_backbone} backbone atom(s) and "
+        f"{n_ligand} ligand heavy atom(s) during implicit minimisation"
+    )
+    context = make_context(system, create_integrator(0.002 * unit.picoseconds))
+    context.setPositions(positions)
+    LocalEnergyMinimizer.minimize(context, maxIterations=1000)
+    return np.asarray(
+        context.getState(getPositions=True).getPositions().value_in_unit(unit.nanometer)
+    )
 
 
 def _build_implicit_complex(
@@ -535,6 +656,66 @@ class MMGBSAResult:
     contacts: dict[str, float]
 
 
+def run_singlepoint(
+    protein: str,
+    ligand: str,
+    *,
+    ligand_resname: str = "LIG",
+    fix_protein: bool = True,
+    minimize: bool = False,
+) -> float:
+    """Single-point MMGBSA interaction energy of a pose, scored exactly as given.
+
+    No protomer enumeration and no MD: the ligand is scored in the protonation
+    state of its input SDF against the protein in GBn2 implicit solvent.
+    Crystallographic waters and ions are stripped (``solvent_mode="implicit"``),
+    so the returned value is the bare protein-ligand interaction energy
+    ``E_complex - E_protein - E_ligand`` in kcal/mol.
+
+    With ``minimize=False`` (default) the energy is evaluated on the input
+    coordinates as-is. With ``minimize=True`` the complex is first relaxed by a
+    local energy minimisation in implicit solvent (still no MD) before scoring,
+    via :func:`_minimize_implicit_restrained` -- the protein backbone (and any
+    kept crystal waters) is harmonically held at its input position so GBn2
+    relieves the raw-pose clashes by relaxing the ligand and side chains without
+    distorting the fold. The restraint biases only the minimised geometry, never
+    the scored interaction energy.
+
+    ``fix_protein`` runs PDBFixer/propka protonation on ``protein`` first; pass
+    ``False`` when it is already a prepared, protonated PDB (re-fixing an
+    already-fixed structure can fail on chain gaps in pdb2pqr).
+
+    ``protein`` and ``ligand`` may each be a local path or an ``s3://`` URI.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_dir = Path(tmpdir)
+
+        protein_src, ligand_src = AnyPath(protein), AnyPath(ligand)
+        local_protein = tmp_dir / f"protein_input{protein_src.suffix or '.pdb'}"
+        local_protein.write_bytes(protein_src.read_bytes())
+        local_ligand = tmp_dir / f"ligand_input{ligand_src.suffix or '.sdf'}"
+        local_ligand.write_bytes(ligand_src.read_bytes())
+
+        if fix_protein:
+            fixed_protein = tmp_dir / "protein_prepared.pdb"
+            run_pdbfixer(local_protein, fixed_protein)
+        else:
+            fixed_protein = local_protein
+        protein_pdb = PDBFile(str(fixed_protein))
+        protein_modeller = Modeller(protein_pdb.topology, protein_pdb.positions)
+
+        mol = set_residue_info(Chem.MolFromMolFile(str(local_ligand), removeHs=False))
+        topology, positions, forcefield = prepare_complex(
+            mol, protein_modeller=protein_modeller, solvent_mode="implicit"
+        )
+        scorer = _ImplicitScorer(topology, positions, forcefield, ligand_resname)
+        if minimize:
+            positions_nm = _minimize_implicit_restrained(forcefield, topology, positions)
+        else:
+            positions_nm = np.asarray(positions.value_in_unit(unit.nanometer))
+        return scorer.interaction_energy(positions_nm)
+
+
 def run_mmgbsa(
     protein: str,
     ligand: str,
@@ -583,7 +764,7 @@ def run_mmgbsa(
         prot_path = tmp_dir / "prot.pdb"
         lig_path = tmp_dir / "lig.sdf"
         score_path = tmp_dir / "scores.csv"
-        protomers_path = tmp_dir / "protomers.csv"
+        tmp_dir / "protomers.csv"
 
         # 1. Protonate the protein (shared by every protomer's complex).
         run_pdbfixer(local_protein, fixed_protein)
@@ -615,7 +796,7 @@ def run_mmgbsa(
             topology, positions, forcefield = _build_implicit_complex(protomer, protein_modeller)
             scorer = _ImplicitScorer(topology, positions, forcefield, config.ligand_resname)
             logger.info(f"Minimising complex for {protomer.smiles}")
-            minimised_positions = scorer.minimize(positions)
+            minimised_positions = _minimize_implicit_restrained(forcefield, topology, positions)
             logger.info(f"Computing interaction energy for {protomer.smiles}")
             interaction = scorer.interaction_energy(minimised_positions)
             corrected = protomer.intrinsic_kcal + interaction
@@ -634,11 +815,6 @@ def run_mmgbsa(
         logger.info(
             f"Funnel selected {winner.smiles} (charge {winner.charge:+d}) for the full explicit run"
         )
-
-        protomers_df = pd.DataFrame(records)
-        protomers_df.to_csv(protomers_path, index=False)
-        if len(records) > 1:
-            logger.info(f"Protomer funnel:\n{protomers_df.to_string(index=False)}")
 
         logger.info(f"Equilibrating final complex for {winner.smiles}")
         # 5. Full explicit run for the winner only: solvate, equilibrate, produce.
@@ -750,7 +926,6 @@ def run_mmgbsa(
         out_prot.write_bytes(prot_path.read_bytes())
         out_lig.write_bytes(lig_path.read_bytes())
         out_scores.write_bytes(score_path.read_bytes())
-        (out_dir / "protomers.csv").write_bytes(protomers_path.read_bytes())
         (out_dir / "contacts.csv").write_bytes(contacts_path.read_bytes())
 
         logger.info(f"Saved scores to {out_scores}")
@@ -772,7 +947,7 @@ def run_mmgbsa(
 @click.option("--output", required=True, help="Output directory (local path or s3:// prefix).")
 @click.option(
     "--production-time",
-    default=0.5,
+    default=1.0,
     show_default=True,
     help="Full explicit production MD time (ns) for the winning protomer.",
 )

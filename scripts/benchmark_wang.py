@@ -286,6 +286,75 @@ def run_mmgbsa_pass(
         logger.warning("No ligands completed; nothing to report.")
 
 
+def run_singlepoint_pass(
+    system: str,
+    protein: Path,
+    ligands: pd.DataFrame,
+    cache: Path,
+    *,
+    minimize: bool = False,
+) -> None:
+    """Single-point MMGBSA benchmark: one interaction-energy evaluation per pose
+    (no protomer enumeration, no MD), correlated against exp ΔG.
+
+    The pose is scored against the PDBFixer-protonated protein in GBn2 implicit
+    solvent, so this is the fastest possible ranking signal -- seconds per ligand.
+    With ``minimize=True`` the complex is relaxed by a local energy minimisation
+    (still no MD) before scoring, to relieve steric clashes in the raw pose."""
+    from opensqm.md.run_mmgbsa import run_singlepoint
+
+    label = "minimised MMGBSA" if minimize else "single-point MMGBSA"
+    suffix = "singlepoint_min" if minimize else "singlepoint"
+    results_csv = cache / f"benchmark_{system}_{suffix}.csv"
+    rows_by_id: dict[str, dict] = {}
+    if results_csv.exists():
+        prev = pd.read_csv(results_csv)
+        rows_by_id = {r["lig_id"]: r for r in prev.to_dict("records")}
+        logger.info(f"Resuming: {len(rows_by_id)} ligand(s) already in {results_csv}")
+
+    for _, lig in ligands.iterrows():
+        lig_id = lig["lig_id"]
+        cached = rows_by_id.get(lig_id)
+        if cached is not None and pd.notna(cached.get("interaction_energy")):
+            logger.info(f"[{lig_id}] cached {label}, skipping")
+            continue
+        logger.info(f"=== {lig_id}  {label}  (exp ΔG = {lig['exp_dg']:.2f}) ===")
+        try:
+            # protein is the CSV's already-fixed PDB, so skip re-fixing.
+            ie = run_singlepoint(str(protein), lig["sdf"], fix_protein=False, minimize=minimize)
+        except Exception as exc:  # one bad ligand must not kill the benchmark
+            logger.exception(f"[{lig_id}] {label} FAILED: {exc}")
+            continue
+        rec = {
+            "lig_id": lig_id,
+            "pX": lig["pX"],
+            "exp_dg": lig["exp_dg"],
+            "interaction_energy": float(ie),
+        }
+        rows_by_id[lig_id] = rec
+        rows = list(rows_by_id.values())
+        pd.DataFrame(rows).to_csv(results_csv, index=False)
+        rdf = pd.DataFrame(rows)
+        m = metrics(rdf["interaction_energy"].to_numpy(), rdf["exp_dg"].to_numpy())
+        logger.info(
+            f"[{lig_id}] interaction={ie:.2f}  |  RUNNING ({len(rows)}): "
+            f"R2={m['r2']:.2f} R={m['r']:.2f}"
+        )
+
+    rows = list(rows_by_id.values())
+    if not rows:
+        logger.warning("No ligands completed; nothing to report.")
+        return
+    rdf = pd.DataFrame(rows)
+    m = metrics(rdf["interaction_energy"].to_numpy(), rdf["exp_dg"].to_numpy())
+    logger.info("=" * 78)
+    logger.info(f"FINAL {label.upper()}: {system}  ({len(rdf)} ligands)")
+    logger.info(rdf[["lig_id", "exp_dg", "interaction_energy"]].round(2).to_string(index=False))
+    logger.info(f"interaction_energy vs exp ΔG: R2={m['r2']:.3f}  R={m['r']:.3f}")
+    logger.info("=" * 78)
+    logger.info(f"Results: {results_csv}")
+
+
 def _final_report(system: str, rows: list[dict], results_csv: Path) -> None:
     if not rows:
         logger.warning("No ligands completed; nothing to report.")
@@ -344,6 +413,16 @@ def main() -> None:
         "--mmgbsa-only", action="store_true", help="MMGBSA-only correlation pass (no escape sims)."
     )
     ap.add_argument(
+        "--singlepoint",
+        action="store_true",
+        help="Single-point MMGBSA on the input poses (no minimise, no MD); fastest pass.",
+    )
+    ap.add_argument(
+        "--minimize",
+        action="store_true",
+        help="Like --singlepoint but relax the complex (implicit-solvent minimise, no MD) first.",
+    )
+    ap.add_argument(
         "--mmgbsa-replicas", type=int, default=3, help="MMGBSA production replicas (--mmgbsa-only)."
     )
     ap.add_argument(
@@ -378,7 +457,9 @@ def main() -> None:
         bound_box_shape="dodecahedron",  # type: ignore[arg-type]
     )
 
-    if args.mmgbsa_only:
+    if args.singlepoint or args.minimize:
+        run_singlepoint_pass(args.system, protein, ligands, cache, minimize=args.minimize)
+    elif args.mmgbsa_only:
         run_mmgbsa_pass(
             args.system,
             protein,

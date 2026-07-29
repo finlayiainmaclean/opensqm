@@ -211,6 +211,64 @@ def _resolve_geometry_reference(
     )
 
 
+def _skeleton_match_indices(template: Chem.Mol, reference: Chem.Mol) -> list[int] | None:
+    """Map each of ``reference``'s heavy atoms (in its own atom order) to a ``template`` atom index.
+
+    Charge/H-count-insensitive (via :func:`_heavy_skeleton`, the same
+    normalisation the rest of this module already relies on) and, unlike
+    RDKit's default substructure matching, insensitive to aromaticity/bond-
+    type disagreements too -- verified necessary: the maximally-protonated
+    template is a freshly rebuilt ``RWMol`` (re-sanitized after manually
+    setting H-counts/charges), and for lactam/pyrimidone-like tautomeric
+    rings (e.g. a purine base) RDKit's aromaticity perception can genuinely
+    disagree between that rebuilt Mol and the original input Mol even
+    though the heavy-atom connectivity is identical -- which breaks
+    ``AllChem.ConstrainedEmbed``'s own internal (aromaticity-sensitive)
+    match outright.
+    """
+    template_skel = _heavy_skeleton(template)
+    reference_skel = _heavy_skeleton(reference)
+    match = template_skel.GetSubstructMatch(reference_skel, useChirality=False)
+    return list(match) if match else None
+
+
+def _transfer_geometry_via_skeleton_match(template: Chem.Mol, reference: Chem.Mol) -> None:
+    """Give ``template`` a 3D conformer by transplanting ``reference``'s heavy-atom positions.
+
+    Heavy atoms never move between protonation states of the same skeleton
+    -- only which of them carry a hydrogen does -- so there's no embedding
+    *problem* to solve for the heavy atoms at all: copy their positions
+    directly (matched via :func:`_skeleton_match_indices`) and place every
+    hydrogen from that fixed skeleton with ``Chem.AddHs(addCoords=True)``.
+    This is both simpler and far more robust than asking a stochastic
+    distance-geometry embedder (``AllChem.EmbedMolecule``/
+    ``ConstrainedEmbed``) to reproduce an already-known, real heavy-atom
+    conformer from scratch -- verified necessary: a case with nearly every
+    heavy atom pinned by the match (so only a handful of hydrogens were
+    actually free to place) still failed ``EmbedMolecule`` across 20 random
+    seeds, even with ``useRandomCoords``.
+    """
+    match = _skeleton_match_indices(template, reference)
+    if match is None:
+        raise ValueError("template and reference do not share a heavy-atom skeleton")
+
+    ref_conf = reference.GetConformer()
+    ref_heavy_atom_indices = [a.GetIdx() for a in reference.GetAtoms() if a.GetAtomicNum() != 1]
+
+    heavy_only = Chem.RemoveHs(Chem.Mol(template))
+    conf = Chem.Conformer(heavy_only.GetNumAtoms())
+    for t_idx, r_idx in zip(match, ref_heavy_atom_indices, strict=True):
+        conf.SetAtomPosition(t_idx, ref_conf.GetAtomPosition(r_idx))
+    heavy_only.RemoveAllConformers()
+    heavy_only.AddConformer(conf, assignId=True)
+
+    with_hs = Chem.AddHs(heavy_only, addCoords=True)
+    if with_hs.GetNumAtoms() != template.GetNumAtoms():
+        raise RuntimeError("Hydrogen placement produced a different atom count than the template")
+    template.RemoveAllConformers()
+    template.AddConformer(with_hs.GetConformer(), assignId=True)
+
+
 def _embed_template(
     template: Chem.Mol,
     *,
@@ -223,11 +281,7 @@ def _embed_template(
         if not _has_conformer(reference):
             raise ValueError("geometry_mol must carry a 3D conformer")
         try:
-            AllChem.ConstrainedEmbed(
-                template,
-                Chem.RemoveHs(reference),
-                useTethers=False,
-            )
+            _transfer_geometry_via_skeleton_match(template, reference)
         except Exception as exc:
             raise RuntimeError(
                 "Failed to transfer the input conformer onto the protonation template"

@@ -1,6 +1,7 @@
 """Module containing vanilla MD protocols."""
 
 import copy
+import math
 import time
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from tqdm import tqdm
 
 from opensqm.md.platforms import make_simulation
 from opensqm.md.prepare import create_integrator, create_system
+from opensqm.md.rest import REST_CTX_PARAM, REST_CTX_PARAM_SQRT
 from opensqm.md.restraints import add_distal_restraints, add_restraints
 from opensqm.md.terminal_ring_mc import TerminalRingMC, find_terminal_group
 
@@ -33,6 +35,10 @@ class ProductionSettings(BaseModel):
     log_interval: OpenMMQuantity[unit.picosecond] = 1 * unit.picoseconds
     run_time: OpenMMQuantity[unit.picosecond] = 0.5 * unit.nanoseconds
     rest_ligand: bool = True
+    # REST2 effective temperature for the ligand solute. At 300 K bm_b0 = 1.0, so
+    # the REST forces are inert (no tempering); raise it to actually scale down the
+    # ligand's intra-solute / solute-solvent interactions and enhance its sampling.
+    rest_temperature: OpenMMQuantity[unit.kelvin] = 300 * unit.kelvin
 
 
 def anneal_and_minimise(
@@ -141,6 +147,18 @@ def production(
 
     # Set velocities at production temperature
     simulation.context.setVelocitiesToTemperature(300 * unit.kelvin)
+
+    # Activate REST2 ligand tempering. apply_rest() (via create_system) adds the
+    # scaling forces but leaves bm_b0 = 1.0, i.e. no effect. Setting bm_b0 = T0/T_eff
+    # scales the ligand's intra-solute interactions by bm_b0 and its solute-solvent
+    # interactions by sqrt(bm_b0), so the ligand samples as if at T_eff.
+    if config.rest_ligand and config.rest_temperature > 300 * unit.kelvin:
+        lam = 300.0 / config.rest_temperature.value_in_unit(unit.kelvin)
+        simulation.context.setParameter(REST_CTX_PARAM, lam)
+        simulation.context.setParameter(REST_CTX_PARAM_SQRT, math.sqrt(lam))
+        logger.info(
+            f"REST2 ligand tempering active: T_eff={config.rest_temperature}, bm_b0={lam:.3f}"
+        )
 
     # Add trajectory reporter
     reporter = DCDReporter(str(traj_path), num_steps_per_log)

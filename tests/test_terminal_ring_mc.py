@@ -1,31 +1,25 @@
 """Tests for the terminal ring MC flipping module."""
 
 from pathlib import Path
-from typing import Tuple, Union
 
 import numpy as np
 import pytest
 from openmm import app, openmm, unit
 
-from opensqm.md.terminal_ring_mc import TerminalRingMC, find_terminal_group
-
-nonbonded_amber = {
-    "nonbondedMethod": app.PME,
-    "nonbondedCutoff": 1.0 * unit.nanometer,
-    "constraints": app.HBonds,
-}
+from opensqm.md.terminal_ring_mc import (
+    TerminalRingMC,
+    find_residue_ring_bond,
+    find_terminal_group,
+)
 
 platform_ref = openmm.Platform.getPlatformByName("Reference")
 
-
-def load_amber_sys(
-    inpcrd_file: Union[str, Path], prmtop_file: Union[str, Path], nonbonded_settings: dict
-) -> Tuple[app.AmberInpcrdFile, app.AmberPrmtopFile, openmm.System]:
-    """Load Amber system from inpcrd and prmtop file."""
-    inpcrd = app.AmberInpcrdFile(str(inpcrd_file))
-    prmtop = app.AmberPrmtopFile(str(prmtop_file), periodicBoxVectors=inpcrd.boxVectors)
-    sys = prmtop.createSystem(**nonbonded_settings)
-    return inpcrd, prmtop, sys
+# ACE-HIS-NME capped dipeptide, checked into the repo for constant-pH reference-energy
+# generation (opensqm/cph/reference_energy) - reused here as a small, always-available
+# vacuum system with a real HIS residue to rotate.
+_MODEL_COMPOUND_PDB = (
+    Path(__file__).resolve().parents[1] / "opensqm" / "cph" / "model-compounds" / "HIS.pdb"
+)
 
 
 class TestRotateTerminal:
@@ -33,29 +27,35 @@ class TestRotateTerminal:
 
     @pytest.fixture(autouse=True)
     def setup_system(self):
-        """Set up OpenMM system for testing."""
-        self.base = Path(__file__).resolve().parent
-        self.output = self.base / "output"
-        self.output.mkdir(exist_ok=True)
+        """Build a vacuum ACE-HIS-NME system and its HIS ring-flip terminal group.
 
-        inpcrd, prmtop, system = load_amber_sys(
-            self.base / "data" / "07_tip3p.inpcrd",
-            self.base / "data" / "07_tip3p.prmtop",
-            nonbonded_amber,
+        Uses :func:`opensqm.md.terminal_ring_mc.find_residue_ring_bond` to resolve the
+        CB-CG bond by residue name/number, exactly as production code
+        (``opensqm.fix.enumerate_residue_flip_variants``) does, rather than hardcoding
+        atom indices.
+        """
+        pdb = app.PDBFile(str(_MODEL_COMPOUND_PDB))
+        # The checked-in file is this ACE-HIS-NME dipeptide solvated in a TIP3P box for
+        # reference-energy generation; strip the water back out for a small vacuum system.
+        modeller = app.Modeller(pdb.topology, pdb.positions)
+        modeller.delete([res for res in modeller.topology.residues() if res.name == "HOH"])
+        self.topology = modeller.topology
+        forcefield = app.ForceField("amber/ff14SB.xml")
+        system = forcefield.createSystem(
+            self.topology, nonbondedMethod=app.NoCutoff, constraints=app.HBonds
         )
-        self.topology = prmtop.topology
 
         integrator = openmm.LangevinMiddleIntegrator(
             298.15 * unit.kelvin, 1.0 * unit.picosecond**-1, 2.0 * unit.femtosecond
         )
         simulation = app.Simulation(self.topology, system, integrator, platform_ref)
-        simulation.context.setPositions(inpcrd.positions)
+        simulation.context.setPositions(modeller.positions)
 
-        # Uses programmatically derived TerminalGroup for the C15-C16 splitting
-        derived_group = find_terminal_group(self.topology, 19, 20)
-        assert derived_group.bond == (19, 20)
-        assert derived_group.rotatable_group == [21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
-
+        his_residue = next(res for res in self.topology.residues() if res.name == "HIS")
+        anchor_idx, pivot_idx = find_residue_ring_bond(
+            self.topology, "HIS", his_residue.id, his_residue.chain.id
+        )
+        derived_group = find_terminal_group(self.topology, anchor_idx, pivot_idx)
         terminal_list = [derived_group]
 
         kBT = 298.15 * unit.kelvin * unit.MOLAR_GAS_CONSTANT_R
@@ -71,60 +71,49 @@ class TestRotateTerminal:
         state = self.flipmc.simulation.context.getState(getPositions=True)
         return state.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
 
-    def _save_pdb(self, filename):
-        state = self.flipmc.simulation.context.getState(getPositions=True, enforcePeriodicBox=False)
-        positions = state.getPositions()
-        path = self.output / filename
-        with path.open("w") as f:
-            app.PDBFile.writeFile(self.topology, positions, f)
-        print(f"  Saved: {path}")
-
     def test_rotate_terminal(self):
         """Test that rotate_terminal executes correctly."""
-        print("\n# Test rotate_terminal: 180° rotation around C15-C16 bond")
         group = self.flipmc.terminal_list[0]
-        pivot_idx = group.bond[1]  # C16 - rotation centre
-        axis_idx = group.bond[0]  # C15 - axis start
-        mobile = group.rotatable_group  # phenyl ring atoms
+        pivot_idx = group.bond[1]  # CG - rotation centre
+        axis_idx = group.bond[0]  # CB - axis start
+        mobile = group.rotatable_group  # imidazole ring atoms
+        assert mobile, "expected a non-empty rotatable group for the HIS CB-CG bond"
 
         pos_before = self._get_positions()
-        self._save_pdb("rotate_terminal_before.pdb")
 
         self.flipmc.rotate_terminal(0)
 
         pos_after = self._get_positions()
-        self._save_pdb("rotate_terminal_after.pdb")
 
         # Axis and pivot atoms must NOT move
         np.testing.assert_allclose(
             pos_after[axis_idx],
             pos_before[axis_idx],
             atol=1e-5,
-            err_msg="Axis-start atom (C15) should not move",
+            err_msg="Axis-start atom (CB) should not move",
         )
         np.testing.assert_allclose(
             pos_after[pivot_idx],
             pos_before[pivot_idx],
             atol=1e-5,
-            err_msg="Pivot atom (C16) should not move",
+            err_msg="Pivot atom (CG) should not move",
         )
 
         # All mobile atoms must have moved
         for idx in mobile:
             assert not np.allclose(pos_after[idx], pos_before[idx], atol=1e-5), (
-                f"Mobile atom {idx} should have moved after 180° rotation"
+                f"Mobile atom {idx} should have moved after 180 degree rotation"
             )
 
-        # A second 180° must restore the mobile atoms
+        # A second 180 degree rotation must restore the mobile atoms
         self.flipmc.rotate_terminal(0)
         pos_restored = self._get_positions()
         np.testing.assert_allclose(
             pos_restored[mobile],
             pos_before[mobile],
             atol=1e-5,
-            err_msg="Two 180° rotations should restore all mobile atom positions",
+            err_msg="Two 180 degree rotations should restore all mobile atom positions",
         )
-        print("  PASSED: axis/pivot unmoved, mobile atoms rotated, double-180° restores positions")
 
         # Basic functional test that move_dihe works as well
         self.flipmc.move_dihe()

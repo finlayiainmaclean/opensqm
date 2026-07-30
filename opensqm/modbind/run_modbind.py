@@ -6,46 +6,32 @@ Sinko et al. (*PNAS* 2026). Builds the bound (ligand-protein) and unbound
 reports ``ΔG°`` with a bootstrapped confidence interval.
 """
 
+import json
 import tempfile
 from pathlib import Path
 
 import click
-from cloudpathlib import AnyPath
+from cloudpathlib import AnyPath, CloudPath
 from loguru import logger
 from openmm import unit
 from rdkit import RDLogger
 
-from opensqm.cph.run_cph import ConstantpHRunSettings, PHResult, run_cph
-from opensqm.fix import run_pdbfixer
 from opensqm.md.equilibrate import EquilibrationSettings
+from opensqm.md.platforms import set_platform
+from opensqm.md.run_mmgbsa import MMGBSASettings, run_mmgbsa
 from opensqm.modbind.analyze import analyze_modbinddg
 from opensqm.modbind.config import ModBindDGSettings
 from opensqm.modbind.simulate import collect_trajectories
-from opensqm.modbind.states import build_bound_state_from_state, build_unbound_state
+from opensqm.modbind.states import (
+    build_bound_state_from_state,
+    build_unbound_state,
+    load_prepared_state,
+    save_prepared_state,
+)
 
 RDLogger.DisableLog("rdApp.warning")
 
 MANIFEST_FILENAME = "modbinddg_manifest.json"
-
-
-def _normalize_replica_temperatures(
-    temperatures: tuple[float, ...], n_replicas: int, *, adaptive: bool
-) -> tuple[float, ...]:
-    if not temperatures:
-        raise click.BadParameter("At least one --temperature value is required.")
-    if adaptive:
-        if len(temperatures) != 1:
-            raise click.BadParameter(
-                "Adaptive escape tuning uses a single --temperature for replica 0."
-            )
-        return temperatures
-    if len(temperatures) == 1:
-        return temperatures * n_replicas
-    if len(temperatures) != n_replicas:
-        raise click.BadParameter(
-            f"Expected 1 or {n_replicas} --temperature values, got {len(temperatures)}."
-        )
-    return temperatures
 
 
 def run_modbind(
@@ -56,67 +42,91 @@ def run_modbind(
 ) -> dict:
     """Run a full ModBinddG calculation for one protein-ligand pair.
 
-    Constant-pH MD at pH 7 is used as an equilibration step to determine the
-    dominant protonation state and provide an equilibrated protein structure.
-    The lowest-energy snapshot from that 1 ns run is then used as the starting
-    conformation for the escape simulations.
+    An MMGBSA protomer funnel is the equilibration step: it selects the ligand
+    protonation state in the pocket, equilibrates the solvated complex, runs a
+    short production MD, and returns the lowest-energy frame. That frame is the
+    starting conformation for the escape simulations.
 
     ``protein``, ``ligand`` and ``output`` may each be a local path or an
-    ``s3://`` URI. All work runs in a temp dir; only ``results.csv`` is published
-    to ``output``.
+    ``s3://`` URI. When ``output`` is a local directory it is used as the working
+    directory: staged inputs, the equilibrated states, escape trajectories and
+    results are all written there and REUSED on re-run -- any stage whose
+    checkpoint already exists is skipped, so re-running only redoes the analysis.
+    For an ``s3://`` output a local temp dir is used and ``results.csv`` published.
     """
     if config is None:
         config = ModBindDGSettings()
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_dir = Path(tmpdir)
+    out_dir = AnyPath(output)
+    remote = isinstance(out_dir, CloudPath)
+    scratch = tempfile.TemporaryDirectory() if remote else None
+    work_dir = Path(scratch.name) if scratch is not None else Path(output)
+    work_dir.mkdir(parents=True, exist_ok=True)
 
-        # Stage inputs locally (downloading from S3 when needed). All heavy work
-        # runs in the temp dir; only results.csv is published.
+    try:
+        # Stage inputs into the work dir, skipping the copy if already present so
+        # re-runs are cheap. For a local output these persist with the results.
         protein_src, ligand_src = AnyPath(protein), AnyPath(ligand)
-        local_protein = tmp_dir / f"protein_input{protein_src.suffix or '.pdb'}"
-        local_protein.write_bytes(protein_src.read_bytes())
-        local_ligand = tmp_dir / f"ligand_input{ligand_src.suffix or '.sdf'}"
-        local_ligand.write_bytes(ligand_src.read_bytes())
+        local_protein = work_dir / f"protein_input{protein_src.suffix or '.pdb'}"
+        local_ligand = work_dir / f"ligand_input{ligand_src.suffix or '.sdf'}"
+        if not local_protein.exists():
+            local_protein.write_bytes(protein_src.read_bytes())
+        if not local_ligand.exists():
+            local_ligand.write_bytes(ligand_src.read_bytes())
 
-        checkpoint_dir = tmp_dir / "checkpoints"
-        fixed_protein = tmp_dir / "protein_prepared.pdb"
-        trajectory_dir = tmp_dir / "trajectories"
+        checkpoint_dir = work_dir / "checkpoints"
+        trajectory_dir = work_dir / "trajectories"
 
-        run_pdbfixer(local_protein, fixed_protein)
+        # --- MMGBSA protomer-funnel equilibration (cached) ---
+        # Find the bound protomer, equilibrate the solvated complex, run a short
+        # production MD, and take the lowest-energy frame as the escape start. The
+        # equilibrated states are temperature-independent, so they are cached as
+        # CIF + System XML and reused on re-run.
+        equil_dir = work_dir / "equil"
+        scores_path = equil_dir / "mmgbsa_scores.json"
+        bound_state = load_prepared_state(equil_dir, "bound")
+        unbound_state = load_prepared_state(equil_dir, "unbound")
+        if bound_state is not None and unbound_state is not None and scores_path.exists():
+            mmgbsa_scores = json.loads(scores_path.read_text())
+            logger.info(f"Loaded cached equilibrated states + MMGBSA scores from {equil_dir}")
+        else:
+            logger.info(
+                f"Running MMGBSA protomer-funnel equilibration "
+                f"({config.mmgbsa_equilibration_ns} ns production)"
+            )
+            mmgbsa_result = run_mmgbsa(
+                str(local_protein),
+                str(local_ligand),
+                output=str(work_dir / "mmgbsa_equilibration"),
+                config=MMGBSASettings(
+                    production_time=config.mmgbsa_equilibration_ns * unit.nanosecond,
+                    n_replicas=1,
+                    protomer_ph=7.0,
+                    protonation_penalty=3.0 * unit.kilocalories_per_mole,
+                ),
+            )
+            snapshot = mmgbsa_result.snapshot
+            mmgbsa_scores = {}
+            for key, value in mmgbsa_result.scores.items():
+                try:
+                    mmgbsa_scores[key] = float(value)
+                except (TypeError, ValueError):
+                    mmgbsa_scores[key] = value
+            logger.info(
+                f"MMGBSA equilibration score: {mmgbsa_scores['interaction_energy']:.2f} kcal/mol"
+            )
 
-        config.cph_equilibration_ns = 0.5
-
-        # --- constant-pH equilibration at pH 7 ---
-        logger.info(f"Running {config.cph_equilibration_ns} ns CpH equilibration at pH 7")
-        cph_result = run_cph(
-            fixed_protein,
-            output=str(tmp_dir / "cph_equilibration"),
-            ligand=local_ligand,
-            config=ConstantpHRunSettings(
-                ph=7.0,
-                production_time=config.cph_equilibration_ns * unit.nanosecond,
-                use_ph_remd=False,
-                n_replicas=1,
-                protonation_penalty=3.0 * unit.kilocalories_per_mole,
-                titratable_residue_query="(protein within 5 of resn LIG) or (resn LIG)",
-            ),
-            resume=False,
-        )
-        cph_result: PHResult = cph_result["ph_results"][0]  # ph 7
-        snapshot = cph_result.lowest_energy_snapshot
-        logger.info(f"Lowest-energy snapshot at pH 7: {cph_result.population}")
-
-        unbound_state = None
-        if config.unbound_mode == "explicit":
             logger.info("Building and equilibrating unbound state")
             unbound_state = build_unbound_state(
                 snapshot.ligand,
                 equilibration_config=EquilibrationSettings(),
             )
+            logger.info("Using MMGBSA lowest-energy snapshot as protein starting structure")
+            bound_state = build_bound_state_from_state(snapshot)
 
-        logger.info("Using CpH lowest-energy snapshot as protein starting structure")
-        bound_state = build_bound_state_from_state(snapshot)
+            save_prepared_state(bound_state, equil_dir, "bound")
+            save_prepared_state(unbound_state, equil_dir, "unbound")
+            scores_path.write_text(json.dumps(mmgbsa_scores))
 
         logger.info("Collecting escape trajectories (unbound first, then bound replicas)")
         data = collect_trajectories(
@@ -125,32 +135,24 @@ def run_modbind(
             config,
             checkpoint_dir=checkpoint_dir,
             trajectory_dir=trajectory_dir,
-            resume=False,
+            resume=True,
         )
-
-        if data.bound_temperatures_k:
-            config = config.copy(
-                update={
-                    "temperature": data.bound_temperatures_k[0] * unit.kelvin,
-                    "replica_temperatures": tuple(data.bound_temperatures_k),
-                }
-            )
 
         logger.info("Analyzing")
-        results = analyze_modbinddg(
-            data,
-            config,
-            tmp_dir,
-            ligand_path=local_ligand,
-            trajectory_dir=trajectory_dir,
-        )
+        results = analyze_modbinddg(data, config, work_dir)
+        results["mmgbsa_score"] = mmgbsa_scores.get("mmgbsa_score", float("nan"))
 
-        # Publish only the results CSV to the destination (local dir or S3 prefix).
-        out_dir = AnyPath(output)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_results = out_dir / "results.csv"
-        out_results.write_bytes((tmp_dir / "results.csv").read_bytes())
-        logger.info(f"Saved results to {out_results}")
+        # results.csv is written into work_dir by analyze_modbinddg. For a local
+        # output that already IS the destination; for a remote output, publish it.
+        if remote:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "results.csv").write_bytes((work_dir / "results.csv").read_bytes())
+            logger.info(f"Published results to {out_dir / 'results.csv'}")
+        else:
+            logger.info(f"Saved results to {work_dir / 'results.csv'}")
+    finally:
+        if scratch is not None:
+            scratch.cleanup()
 
     return results
 
@@ -161,58 +163,36 @@ def run_modbind(
 @click.option("--output", required=True, help="Output directory (local path or s3:// prefix).")
 @click.option(
     "--temperature",
-    type=str,
-    default="900",
+    type=float,
+    default=900.0,
     show_default=True,
-    help=(
-        "Bound-state temperature (K) for each replica. Pass one value to use "
-        "the same temperature for all replicas, or one value per replica."
-    ),
+    help="Bound-state (unbinding) simulation temperature (K). The unbound "
+    "ligand-in-solvent state is always run at 300 K (the reweighting reference).",
 )
 @click.option("--n-replicas", default=8, show_default=True, help="Number of bound escape replicas.")
 @click.option(
-    "--ideal-escape-time",
-    type=float,
-    default=0.0,
-    show_default=True,
-    help=(
-        "Target bound escape time (ns) for adaptive replica temperatures. "
-        "Replica 0 uses --temperature; later replicas are tuned from the "
-        "running ΔG°_well estimate. Pass 0 to disable and use a fixed "
-        "temperature for every replica."
-    ),
-)
-@click.option(
-    "--unbound-mode",
-    type=click.Choice(["explicit", "einstein"]),
-    default="einstein",
-    show_default=True,
-    help="Compute the unbound state from explicit MD or the Einstein-Smoluchowski estimate.",
+    "--platform",
+    "platform",
+    type=click.Choice(["cuda", "mps"], case_sensitive=False),
+    default=None,
+    help="Force the OpenMM compute platform: 'cuda' (NVIDIA GPU) or 'mps' "
+    "(Apple Silicon Metal/OpenCL). Fails if unavailable. "
+    "Default: OpenMM auto-selects the fastest platform.",
 )
 def main(
     protein: str,
     ligand: str,
     output: str,
-    temperature: str,
-    ideal_escape_time: float,
+    temperature: float,
     n_replicas: int,
-    unbound_mode: str,
+    platform: str | None,
 ) -> None:
     """Run ModBinddG from the command line."""
-    adaptive = ideal_escape_time > 0
-    temperature = [float(t) for t in temperature.split(",")]
-    ideal_escape_time_ns = ideal_escape_time if adaptive else None
-    replica_temperatures = _normalize_replica_temperatures(
-        temperature, n_replicas, adaptive=adaptive
-    )
+    set_platform(platform)
     config = ModBindDGSettings(
-        temperature=replica_temperatures[0] * unit.kelvin,
-        replica_temperatures=replica_temperatures
-        if not adaptive and len(set(replica_temperatures)) > 1
-        else None,
-        ideal_escape_time_ns=ideal_escape_time_ns,
+        bound_temperature=temperature * unit.kelvin,
+        unbound_temperature=temperature * unit.kelvin,
         n_replicas=n_replicas,
-        unbound_mode=unbound_mode,  # type: ignore[arg-type]
         bound_box_shape="dodecahedron",  # type: ignore[arg-type]
     )
     results = run_modbind(protein, ligand, output, config=config)

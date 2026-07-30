@@ -178,8 +178,8 @@ pyrightconfig.json
 # Pixi
 .pixi
 
-# Data folder
-data/
+# Data folder (repo-root only - unanchored "data/" also matches tests/data/)
+/data/
 sqm/
 bespoke-executor/
 
@@ -188,3 +188,5 @@ AGENTS.md
 LEAN-CTX.md
 .antigravitycli
 .DS_Store
+
+benchmark_runs/

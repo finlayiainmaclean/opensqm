@@ -1,0 +1,23 @@
+{
+  "residue_name": "ASN",
+  "main_variant": "ASN",
+  "variant_names": [
+    "ASN"
+  ],
+  "variants": [
+    "ASN"
+  ],
+  "charges": [
+    0
+  ],
+  "reference_energies_kj_per_mole": [
+    0.0
+  ],
+  "transitions": [],
+  "ring_flip_bonds": [
+    [
+      "CB",
+      "CG"
+    ]
+  ]
+}

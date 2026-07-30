@@ -790,6 +790,132 @@ def plot_microstate_populations(
     return figure_paths
 
 
+def plot_titration_curves(
+    df: pd.DataFrame,
+    pkas: dict[int, dict[tuple[int, int], tuple[float, float]]],
+    cph: ConstantPH,
+    output_path: str | Path,
+    *,
+    filename: str = "titration_curves.png",
+) -> Path | None:
+    """Plot fraction-protonated titration curves vs pH, overlaying all residues.
+
+    For each adjacent charge transition of each titratable residue, the per-pH
+    fraction of samples in the higher-charge (more protonated) state is drawn as
+    markers, computed identically to :func:`calculate_pkas` so the points match
+    the fit. The fitted Henderson-Hasselbalch curve is overlaid and the fitted
+    macroscopic pKa is shown in the legend, mirroring a classic pH-REMD
+    titration plot. All transitions share one axes.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Long-form sampling output with a ``'ph'`` column and one column per
+        titratable residue index.
+    pkas : dict
+        Output of :func:`calculate_pkas` (``{residue_index: {(c_high, c_low):
+        (pka, pka_err)}}``). Supplies the fitted pKa for each fit curve.
+    cph : ConstantPH
+        The constant-pH model that produced ``df``.
+    output_path : str | Path
+        Directory in which to write the figure.
+    filename : str, optional
+        Output image filename.
+
+    Returns
+    -------
+    pathlib.Path | None
+        Path to the saved figure, or ``None`` when there is nothing to plot
+        (e.g. a single-pH run, or no titratable transitions were sampled).
+    """
+    import matplotlib.pyplot as plt
+
+    output_dir = Path(output_path)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    figure_path = output_dir / filename
+
+    if df.empty or df["ph"].nunique() < 2:
+        # A single-pH run yields one point on the pH axis; no curve to draw.
+        return None
+
+    curves: list[tuple[Any, int, int, tuple[float, float] | None, pd.DataFrame]] = []
+    for residue_index, titration in cph.titrations.items():
+        charges = titration.reference.charges
+        residue = next(r for r in cph.explicitTopology.residues() if r.index == residue_index)
+        unique_charges = sorted(set(charges), reverse=True)
+        charge_series = df[residue_index].map(lambda i, ch=charges: ch[i])
+        for c_high, c_low in itertools.pairwise(unique_charges):
+            mask = charge_series.isin([c_high, c_low])
+            if not mask.any():
+                continue
+            sub_charge = charge_series[mask]
+            if set(sub_charge.unique()) != {c_high, c_low}:
+                # e.g. a serial replica that never visits one charge state.
+                continue
+            frac = (
+                df.loc[mask]
+                .assign(_charge=sub_charge)
+                .groupby("ph")["_charge"]
+                .apply(lambda x, ch=c_high: float(np.mean(x == ch)))
+                .reset_index(name="f_high")
+                .sort_values("ph")
+            )
+            pka_entry = pkas.get(residue_index, {}).get((c_high, c_low))
+            curves.append((residue, c_high, c_low, pka_entry, frac))
+
+    if not curves:
+        return None
+
+    ph_lo = float(df["ph"].min())
+    ph_hi = float(df["ph"].max())
+    ph_grid = np.linspace(ph_lo, ph_hi, 200)
+    markers = ("+", "x", "*", "o", "s", "^", "v", "D")
+    colors = ("#d6604d", "#4393c3", "#4daf4a", "#984ea3", "#ff7f00", "#a65628")
+    # Disambiguate the legend when a residue contributes more than one transition.
+    residue_indices = [residue.index for residue, *_ in curves]
+    multi_transition = len(set(residue_indices)) < len(curves)
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    for i, (residue, c_high, c_low, pka_entry, frac) in enumerate(curves):
+        color = colors[i % len(colors)]
+        marker = markers[i % len(markers)]
+        base_label = residue_label(residue)
+        if multi_transition:
+            base_label = f"{base_label} ({c_high:+d}/{c_low:+d})"
+        label = f"{base_label} (pKa={pka_entry[0]:.2f})" if pka_entry is not None else base_label
+        ax.plot(
+            frac["ph"],
+            frac["f_high"],
+            linestyle="none",
+            marker=marker,
+            markersize=8,
+            markeredgewidth=1.5,
+            color=color,
+            label=label,
+            zorder=3,
+        )
+        if pka_entry is not None:
+            ax.plot(
+                ph_grid,
+                henderson_hasselbalch(ph_grid, pka_entry[0]),
+                color="black",
+                linewidth=1.2,
+                zorder=2,
+            )
+
+    ax.set_xlabel("pH")
+    ax.set_ylabel("Fraction protonated")
+    ax.set_ylim(0.0, 1.0)
+    ax.set_xlim(ph_lo, ph_hi)
+    ax.set_title("Titration curves")
+    ax.legend(loc="best", fontsize=9)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(figure_path, dpi=150)
+    plt.close(fig)
+    return figure_path
+
+
 def analyze_cph_results(
     df: pd.DataFrame,
     cph: ConstantPH,
@@ -919,6 +1045,8 @@ def analyze_cph_results(
         plot_microstate_populations(populations, cph, output_dir)
     if pka_rows:
         pd.DataFrame(pka_rows).to_csv(output_dir / "pkas.csv", index=False)
+    if not skip_pka:
+        plot_titration_curves(df, pkas, cph, output_dir)
     if not pka_timeseries.empty:
         pka_timeseries.to_csv(output_dir / "pka_timeseries.csv", index=False)
         plot_pka_timeseries(

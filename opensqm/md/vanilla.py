@@ -1,6 +1,7 @@
 """Module containing vanilla MD protocols."""
 
 import copy
+import math
 import time
 from pathlib import Path
 
@@ -11,7 +12,6 @@ from openmm import (
     LangevinMiddleIntegrator,
     State,
     System,
-    app,
     unit,
 )
 from openmm.app.forcefield import ForceField
@@ -20,7 +20,9 @@ from pydantic import BaseModel, ConfigDict
 from pydantic_units import OpenMMQuantity
 from tqdm import tqdm
 
+from opensqm.md.platforms import make_simulation
 from opensqm.md.prepare import create_integrator, create_system
+from opensqm.md.rest import REST_CTX_PARAM, REST_CTX_PARAM_SQRT
 from opensqm.md.restraints import add_distal_restraints, add_restraints
 from opensqm.md.terminal_ring_mc import TerminalRingMC, find_terminal_group
 
@@ -33,6 +35,10 @@ class ProductionSettings(BaseModel):
     log_interval: OpenMMQuantity[unit.picosecond] = 1 * unit.picoseconds
     run_time: OpenMMQuantity[unit.picosecond] = 0.5 * unit.nanoseconds
     rest_ligand: bool = True
+    # REST2 effective temperature for the ligand solute. At 300 K bm_b0 = 1.0, so
+    # the REST forces are inert (no tempering); raise it to actually scale down the
+    # ligand's intra-solute / solute-solvent interactions and enhance its sampling.
+    rest_temperature: OpenMMQuantity[unit.kelvin] = 300 * unit.kelvin
 
 
 def anneal_and_minimise(
@@ -54,7 +60,7 @@ def anneal_and_minimise(
     system0, _ = add_restraints(
         system, positions, topology.atoms(), 4.0, restraints=("heavy_atom",)
     )
-    simulation = app.Simulation(topology, system0, integrator0)
+    simulation = make_simulation(topology, system0, integrator0)
     simulation.context.setPositions(positions)
     simulation.minimizeEnergy()
     simulation.context.setVelocitiesToTemperature(50 * unit.kelvin)
@@ -80,14 +86,14 @@ def anneal_and_minimise(
         restraints=("ligand", "backbone"),
     )
     integrator1 = copy.deepcopy(integrator)
-    simulation = app.Simulation(topology, system1, integrator1)
+    simulation = make_simulation(topology, system1, integrator1)
     simulation.context.setPositions(positions)
     simulation.minimizeEnergy()
     positions = simulation.context.getState(getPositions=True).getPositions()
 
     # Minimise the system without restraints
     integrator2 = copy.deepcopy(integrator)
-    simulation = app.Simulation(topology, system, integrator2)
+    simulation = make_simulation(topology, system, integrator2)
     simulation.context.setPositions(positions)
     simulation.minimizeEnergy()
 
@@ -130,7 +136,7 @@ def production(
     )
 
     integrator = create_integrator(config.integrator_step_size)
-    simulation = app.Simulation(topology, system, integrator)
+    simulation = make_simulation(topology, system, integrator)
 
     # Set box vectors before positions
     simulation.context.setPeriodicBoxVectors(*topology.getPeriodicBoxVectors())
@@ -141,6 +147,18 @@ def production(
 
     # Set velocities at production temperature
     simulation.context.setVelocitiesToTemperature(300 * unit.kelvin)
+
+    # Activate REST2 ligand tempering. apply_rest() (via create_system) adds the
+    # scaling forces but leaves bm_b0 = 1.0, i.e. no effect. Setting bm_b0 = T0/T_eff
+    # scales the ligand's intra-solute interactions by bm_b0 and its solute-solvent
+    # interactions by sqrt(bm_b0), so the ligand samples as if at T_eff.
+    if config.rest_ligand and config.rest_temperature > 300 * unit.kelvin:
+        lam = 300.0 / config.rest_temperature.value_in_unit(unit.kelvin)
+        simulation.context.setParameter(REST_CTX_PARAM, lam)
+        simulation.context.setParameter(REST_CTX_PARAM_SQRT, math.sqrt(lam))
+        logger.info(
+            f"REST2 ligand tempering active: T_eff={config.rest_temperature}, bm_b0={lam:.3f}"
+        )
 
     # Add trajectory reporter
     reporter = DCDReporter(str(traj_path), num_steps_per_log)
@@ -197,7 +215,15 @@ def production(
             # Get current simulation time
             current_time_ps = (i + 1) * ps_per_update
 
-            pbar.set_postfix({"Time": f"{current_time_ps:.0f}ps", "ns/day": f"{ns_per_day:.2f}"})
+            current_time_ps = current_time_ps.value_in_unit(unit.picoseconds)
+            ns_per_day = ns_per_day.value_in_unit(unit.nanoseconds)
+
+            pbar.set_postfix(
+                {
+                    "Time": f"{current_time_ps:.0f}ps",
+                    "ns/day": f"{ns_per_day:.2f}",
+                }
+            )
             pbar.update(1)
 
     # Close reporters to prevent file handle leaks and double-free segfaults

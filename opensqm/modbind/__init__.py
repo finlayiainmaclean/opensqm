@@ -11,7 +11,6 @@ from opensqm.modbind.config import ModBindDGSettings
 from opensqm.modbind.reweight import (
     bootstrap_delta_g,
     compute_delta_g,
-    einstein_smoluchowski_unbound,
     radial_pmf,
     reweight_state,
 )
@@ -36,7 +35,6 @@ __all__ = [
     "build_unbound_state",
     "collect_trajectories",
     "compute_delta_g",
-    "einstein_smoluchowski_unbound",
     "load_prepared_state",
     "radial_pmf",
     "reweight_state",

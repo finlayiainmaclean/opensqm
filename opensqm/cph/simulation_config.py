@@ -1,6 +1,7 @@
 """Pydantic configuration model for constant-pH force fields and integrators."""
 
 import json
+import math
 from typing import TYPE_CHECKING, Any, Literal
 
 import xxhash
@@ -45,6 +46,14 @@ class ConstantpHSettings(BaseModel):
     explicit_params: dict = Field(default_factory=_default_explicit_params)
     implicit_params: dict = Field(default_factory=_default_implicit_params)
     temperature: OpenMMQuantity[unit.kelvin] = 300 * unit.kelvin
+    # Ionic strength for the implicit-solvent (GB) Debye screening that governs
+    # the protonation-state MC and the reference-energy calibration. Without it
+    # the electrostatic influence of nearby fixed charges (e.g. peptide termini)
+    # on titratable pKas is unscreened and overestimated, widening pKa spreads.
+    # The explicit box is salted separately in ``opensqm.md.prepare``; this is
+    # the salt the *pKa* actually feels. Converted to ``implicitSolventKappa``
+    # in ``_apply_implicit_salt_screening``. Set to 0 to disable screening.
+    salt_concentration: OpenMMQuantity[unit.molar] = 0.15 * unit.molar
     relaxation_steps: int = 100
     timestep: OpenMMQuantity[unit.picosecond] = 0.004 * unit.picoseconds
     relaxation_timestep: OpenMMQuantity[unit.picosecond] = 0.002 * unit.picoseconds
@@ -58,6 +67,36 @@ class ConstantpHSettings(BaseModel):
     def __init__(self, **data: Any) -> None:
         super().__init__(**data)
         self._make_integrators()
+        self._apply_implicit_salt_screening()
+
+    def _apply_implicit_salt_screening(self) -> None:
+        """Derive the GB Debye screening length from ``salt_concentration``.
+
+        Injects ``implicitSolventKappa`` into ``implicit_params`` (consumed by
+        ``ForceField.createSystem`` for the GBn2 force via ``implicit/gbn2.xml``)
+        unless the caller already set a kappa explicitly, or the salt is zero.
+
+        Uses OpenMM's Amber salt-concentration -> kappa conversion (see
+        ``openmm.app.AmberPrmtopFile.createSystem``): ``kappa`` [1/nm] =
+        ``50.33355 * sqrt(I / eps / T) * 7.3``, where the 7.3 prefactor folds in
+        the 0.73 ion-exclusion factor and the 1/A -> 1/nm unit conversion.
+
+        Because ``implicit_params`` participates in :meth:`hash`, changing the
+        salt (or temperature) invalidates the reference-energy cache and forces
+        recalibration of the model compounds in the salted solvent - so model
+        pKas stay fixed while only the environmental shifts get screened. The
+        GBn2 forcefield script reads ``implicitSolventKappa`` (not
+        ``implicitSolventSaltConc``), so the kappa must be set directly.
+        """
+        if "implicitSolventKappa" in self.implicit_params:
+            return
+        conc = self.salt_concentration.value_in_unit(unit.molar)
+        if conc <= 0.0:
+            return
+        temperature_k = self.temperature.value_in_unit(unit.kelvin)
+        solvent_dielectric = self.implicit_params.get("solventDielectric", 78.5)
+        kappa_per_nm = 50.33355 * math.sqrt(conc / solvent_dielectric / temperature_k) * 7.3
+        self.implicit_params["implicitSolventKappa"] = kappa_per_nm / unit.nanometer
 
     def make_explicit_ff(self) -> ForceField:
         """Build a fresh OpenMM ForceField for the explicit-solvent system.

@@ -56,6 +56,16 @@ openmm-ml = "*"
 mdtop = "*"
 pytorch = ">=2.4"
 
+[tool.pixi.target.linux-64.dependencies]
+# Pin the CUDA runtime to 13.0 so NVRTC emits PTX that the GPU driver accepts.
+# The T4 pods run driver 580.x, which maxes out at CUDA 13.0; left unpinned the
+# solver pulls cuda-nvrtc 13.3, whose PTX the 13.0 driver rejects at OpenMM
+# Context creation with CUDA_ERROR_UNSUPPORTED_PTX_VERSION (222). Linux-only --
+# osx-arm64 has no CUDA. Widen this once the pods' driver moves past CUDA 13.0.
+cuda-version = "13.0.*"
+cuda-nvrtc = "13.0.*"
+
+
 [tool.pixi.pypi-dependencies]
 opensqm = { path = ".", editable = true }
 

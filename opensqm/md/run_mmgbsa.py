@@ -1,26 +1,24 @@
 """MMGBSA interaction energy with a protonation-state funnel.
 
-The protein is protonated with PDBFixer. Rather than trust uniKa's single
-solution-dominant ligand protomer (which ignores the pocket - e.g. it calls
-benzamidine neutral, though it binds trypsin as the cationic amidinium), every
-protomer within a free-energy window of the dominant one at the target pH is
-funnelled from cheap to expensive:
+Protein protonation (PDBFixer + PROPKA/PDB2PQR titration, plus the near-ligand
+HIS/ASN/GLN flip) and the ligand protomer funnel - every uniKa protomer within a
+free-energy window of the solution-dominant one at the target pH, filtered
+through GBn2 implicit solvent - are delegated to :func:`run_mmgbsa_implicit`.
+Its winning (flip state, protomer) pair - a protonated protein PDB and a
+minimised-pose ligand SDF - then earns a full explicit run here: solvation,
+equilibration (NVT warmup + NPT) and production, scored by the n-closest-waters
+MMGBSA.
 
-1. each protomer is minimised and scored in implicit solvent;
-2. the top-k advance to a short implicit-solvent MD, scored over its frames;
-3. the single best of those earns a full explicit run - solvation, equilibration
-   (NVT warmup + NPT) and production - scored by the n-closest-waters MMGBSA.
+The winner is ranked by ``intrinsic_free_energy + MMGBSA`` - the bound-state
+free energy - so the pocket can flip the protonation state when binding pays
+for the intrinsic cost, without a blanket bias toward the most-charged
+protomer. The published score and the representative snapshot (lowest-energy
+frame, split into a protein plus-closest-waters PDB and a protonated-ligand
+SDF) come from the winner's full explicit run.
 
-At each stage a protomer is ranked by ``intrinsic_free_energy + MMGBSA`` - the
-bound-state free energy - so the pocket can flip the protonation state when
-binding pays for the intrinsic cost, without a blanket bias toward the
-most-charged protomer. The published score and the representative snapshot
-(lowest-energy frame, split into a protein plus-closest-waters PDB and a
-protonated-ligand SDF) come from the winner's full explicit run.
-
-Inputs (protein, ligand) and the output location may each be a local path or an
-``s3://`` URI: inputs are staged into a temp dir, all work happens locally, and
-only the published artifacts are copied/uploaded to the output location.
+``protein``, ``ligand`` and ``output`` may each be a local path or an
+``s3://`` URI; ``run_mmgbsa_implicit`` stages and publishes its own artifacts,
+and only the final explicit-run artifacts are copied/uploaded to ``output``.
 """
 
 import tempfile
@@ -55,6 +53,7 @@ from opensqm.md.equilibrate import (
 from opensqm.md.mmgbsa import get_interaction_energy
 from opensqm.md.platforms import make_context, set_platform
 from opensqm.md.prepare import create_integrator, create_system, prepare_complex
+from opensqm.md.restraints import add_distal_restraints
 from opensqm.md.vanilla import ProductionSettings, production
 from opensqm.rdkit_utils import set_coordinates, set_residue_info
 
@@ -248,6 +247,13 @@ BACKBONE_RESTRAINT_K = 4.0 * unit.kilocalories_per_mole / unit.angstroms**2
 # prepare a congeneric series to a *consistent* pose so a geometry-sensitive
 # rescore (e.g. SQM) isn't biased toward whichever ligand happened to drift least.
 LIGAND_RESTRAINT_K = 4.0 * unit.kilocalories_per_mole / unit.angstroms**2
+# Optional alternative to the uniform backbone restraint: every protein heavy
+# atom is restrained by its distance to the ligand instead, free near the
+# pocket and ramping up to a stiff hold on the bulk of the protein (see
+# ``restrain_protein_distal`` below). Off by default.
+DISTAL_MIN_DISTANCE = 0.5 * unit.nanometers
+DISTAL_MAX_DISTANCE = 1.0 * unit.nanometers
+DISTAL_MAX_RESTRAINT_FORCE = 100.0 * unit.kilocalories_per_mole / unit.angstroms**2
 
 
 def _is_water_oxygen(atom: Atom) -> bool:
@@ -257,6 +263,11 @@ def _is_water_oxygen(atom: Atom) -> bool:
         and atom.element is not None
         and atom.element.symbol == "O"
     )
+
+
+def _is_restrainable_ion(atom: Atom) -> bool:
+    """Return True for a kept crystallographic ion (a single-atom residue)."""
+    return atom.residue.name in _ION_RESNAMES
 
 
 def _is_backbone(atom: Atom) -> bool:
@@ -302,16 +313,21 @@ def _minimize_implicit_restrained(
     backbone_restraint_k: unit.Quantity = BACKBONE_RESTRAINT_K,
     restrain_ligand: bool = True,
     ligand_restraint_k: unit.Quantity = LIGAND_RESTRAINT_K,
+    restrain_protein_distal: bool = False,
+    distal_min_distance: unit.Quantity = DISTAL_MIN_DISTANCE,
+    distal_max_distance: unit.Quantity = DISTAL_MAX_DISTANCE,
+    distal_max_restraint_force: unit.Quantity = DISTAL_MAX_RESTRAINT_FORCE,
     ligand_resname: str = "LIG",
 ) -> np.ndarray:
-    """Minimise an implicit-solvent complex, pinning water oxygens and the backbone.
+    """Minimise an implicit-solvent complex, pinning water/ions and the backbone.
 
     The restraints are added to a throwaway minimisation system built from
-    ``forcefield``/``topology`` - kept crystal water oxygens stiffly, the protein
-    backbone gently - so GBn2 relaxes the ligand, side chains and free water
-    hydrogens without moving the waters off their sites or distorting the fold. The
-    scoring contexts are untouched, so the restraints bias only the minimised
-    geometry, never the interaction energy. Returns the minimised coordinates
+    ``forcefield``/``topology`` - kept crystal water oxygens and monatomic ions
+    (Na/Cl/...) stiffly, the protein backbone gently - so GBn2 relaxes the ligand,
+    side chains and free water hydrogens without moving the waters/ions off their
+    sites or distorting the fold. The scoring contexts are untouched, so the
+    restraints bias only the minimised geometry, never the interaction energy.
+    Returns the minimised coordinates
     (n_atoms x 3, nm). Restraints that select no atoms (e.g. water when the complex
     has none) are simply no-ops.
 
@@ -320,15 +336,23 @@ def _minimize_implicit_restrained(
     holds every ligand at its input geometry, so a congeneric series is prepared to
     a consistent pose rather than each ligand drifting a different amount - important
     before a geometry-sensitive rescore.
+
+    With ``restrain_protein_distal`` every protein heavy atom (backbone and side
+    chains, not just the backbone) is instead restrained by its distance to the
+    ligand: free within ``distal_min_distance`` of any ligand atom so the pocket
+    can relax around it, ramping linearly up to ``distal_max_restraint_force`` at
+    ``distal_max_distance`` and beyond so the bulk of the protein is held rigid and
+    the minimisation converges faster. Combine with ``restrain_backbone=False`` to
+    avoid double-restraining backbone atoms with both schemes at once.
     """
     system = create_system(forcefield, topology, implicit_solvent=True)
     coords_nm = np.asarray(positions.value_in_unit(unit.nanometer))
-    n_water = n_backbone = n_ligand = 0
+    n_water = n_backbone = n_ligand = n_distal = 0
     if restrain_water:
         n_water = _add_position_restraint(
             system,
             coords_nm,
-            [a.index for a in topology.atoms() if _is_water_oxygen(a)],
+            [a.index for a in topology.atoms() if _is_water_oxygen(a) or _is_restrainable_ion(a)],
             water_restraint_k,
         )
     if restrain_backbone:
@@ -351,26 +375,36 @@ def _minimize_implicit_restrained(
             ],
             ligand_restraint_k,
         )
+    if restrain_protein_distal:
+        distal_min_distance_nm = distal_min_distance.value_in_unit(unit.nanometers)
+        system, distal_idx = add_distal_restraints(
+            system,
+            positions,
+            topology.atoms(),
+            min_distance=distal_min_distance_nm,
+            max_distance=distal_max_distance.value_in_unit(unit.nanometers),
+            max_restraint_force=distal_max_restraint_force.value_in_unit(
+                unit.kilocalories_per_mole / unit.angstroms**2
+            ),
+            restraints=("protein",),
+            # add_distal_restraints's own default (1.0 nm) is unrelated to our
+            # min/max distance and would silently exclude (leave free) every atom
+            # inside it - short-circuiting the min->max ramp whenever it overlaps.
+            # Match it to min_distance so nearer atoms are simply free (same as
+            # the ramp gives at that boundary) and the ramp itself is honoured.
+            exclusion_distance=distal_min_distance_nm,
+        )
+        n_distal = system.getForce(distal_idx).getNumParticles()
     logger.info(
-        f"Restrained {n_water} water oxygen(s), {n_backbone} backbone atom(s) and "
-        f"{n_ligand} ligand heavy atom(s) during implicit minimisation"
+        f"Restrained {n_water} water oxygen(s)/ion(s), {n_backbone} backbone atom(s), "
+        f"{n_ligand} ligand heavy atom(s) and {n_distal} distance-restrained protein "
+        "heavy atom(s) during implicit minimisation"
     )
     context = make_context(system, create_integrator(0.002 * unit.picoseconds))
     context.setPositions(positions)
     LocalEnergyMinimizer.minimize(context, maxIterations=1000)
     return np.asarray(
         context.getState(getPositions=True).getPositions().value_in_unit(unit.nanometer)
-    )
-
-
-def _build_implicit_complex(
-    protomer: _ProtomerCandidate, protein_modeller: Modeller
-) -> tuple[Topology, unit.Quantity, ForceField]:
-    """Build the ligand-protein complex in implicit solvent (waters stripped, no box)."""
-    return prepare_complex(
-        protomer.mol,
-        protein_modeller=protein_modeller,
-        solvent_mode="implicit",
     )
 
 
@@ -724,20 +758,20 @@ def run_mmgbsa(
 ) -> MMGBSAResult:
     """Run an MMGBSA calculation for one protein-ligand pair.
 
-    PDBFixer protonates the protein and uniKa enumerates the ligand's protomers
-    within ``config.protonation_penalty`` of the solution-dominant one at the
-    target pH. The protomers are funnelled from cheap to expensive:
+    :func:`run_mmgbsa_implicit` protonates the protein (PDBFixer + PROPKA/PDB2PQR
+    titration, plus the near-ligand HIS/ASN/GLN flip), enumerates the ligand's
+    protomers within ``config.protonation_penalty`` of the solution-dominant one
+    at the target pH, and funnels every (flip state, protomer) candidate through
+    the GBn2 implicit-solvent filter. Its winner - a protonated protein PDB and a
+    minimised-pose ligand SDF - then earns a full explicit run here: solvation,
+    equilibration and ``config.production_time`` production, scored by the
+    n-closest-waters MMGBSA.
 
-    1. every protomer is minimised and scored in implicit solvent;
-    2. the single best of those earns a full explicit run - solvation,
-       equilibration and ``config.production_time`` production - scored by the
-       n-closest-waters MMGBSA.
-
-    At every stage a protomer is ranked by ``intrinsic_free_energy + MMGBSA`` -
-    the bound-state free energy - so the pocket can shift the protonation state
-    away from the solution-dominant one when binding pays for the intrinsic cost
-    (e.g. an amidinium against an aspartate), without a blanket bias toward the
-    most charged protomer. The published score and representative outputs
+    The winner is ranked by ``intrinsic_free_energy + MMGBSA`` - the bound-state
+    free energy - so the pocket can shift the protonation state away from the
+    solution-dominant one when binding pays for the intrinsic cost (e.g. an
+    amidinium against an aspartate), without a blanket bias toward the most
+    charged protomer. The published score and representative outputs
     (lowest-energy frame, split into protein-plus-close-waters and ligand) come
     from the winner's full explicit run.
 
@@ -749,75 +783,46 @@ def run_mmgbsa(
     if config is None:
         config = MMGBSASettings()
 
+    # Deferred: run_mmgbsa_implicit imports several helpers from this module at
+    # load time, so importing it back at module level here would be circular.
+    from opensqm.md.run_mmgbsa_implicit import MMGBSAImplicitSettings, run_mmgbsa_implicit
+
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_dir = Path(tmpdir)
 
-        # Stage inputs locally (downloading from S3 when needed). All heavy work
-        # runs in the temp dir; only the published artifacts below are copied out.
-        protein_src, ligand_src = AnyPath(protein), AnyPath(ligand)
-        local_protein = tmp_dir / f"protein_input{protein_src.suffix or '.pdb'}"
-        local_protein.write_bytes(protein_src.read_bytes())
-        local_ligand = tmp_dir / f"ligand_input{ligand_src.suffix or '.sdf'}"
-        local_ligand.write_bytes(ligand_src.read_bytes())
-
-        fixed_protein = tmp_dir / "protein_prepared.pdb"
         prot_path = tmp_dir / "prot.pdb"
         lig_path = tmp_dir / "lig.sdf"
         score_path = tmp_dir / "scores.csv"
-        tmp_dir / "protomers.csv"
 
-        # 1. Protonate the protein (shared by every protomer's complex).
-        run_pdbfixer(local_protein, fixed_protein)
-        protein_pdb = PDBFile(str(fixed_protein))
+        # 1-3. Protonate the protein, enumerate ligand protomers and funnel every
+        #      (flip state, protomer) candidate through the GBn2 implicit-solvent
+        #      filter; the winner is the protonated protein and minimised ligand
+        #      pose that earn the full explicit run below.
+        implicit_result = run_mmgbsa_implicit(
+            protein,
+            ligand,
+            str(tmp_dir / "implicit"),
+            config=MMGBSAImplicitSettings(
+                ligand_resname=config.ligand_resname,
+                ph=config.protomer_ph,
+                protonation_penalty=config.protonation_penalty,
+            ),
+        )
+        winner_row = implicit_result.protomers.loc[implicit_result.protomers["selected"]].iloc[0]
+        winner = _ProtomerCandidate(
+            mol=set_residue_info(Chem.MolFromMolFile(implicit_result.ligand_path, removeHs=False)),
+            smiles=str(winner_row["smiles"]),
+            charge=int(winner_row["charge"]),
+            intrinsic_kcal=float(winner_row["intrinsic_kcal"]),
+        )
+        protein_pdb = PDBFile(implicit_result.protein_path)
         protein_modeller = Modeller(protein_pdb.topology, protein_pdb.positions)
-
-        # 2. Enumerate ligand protomers within the penalty window at the target pH.
-        penalty_kcal = config.protonation_penalty.value_in_unit(unit.kilocalories_per_mole)
-        protomers = _enumerate_protomers(local_ligand, config.protomer_ph, penalty_kcal, UnipKa())
-
-        # Per-protomer bookkeeping for protomers.csv, keyed by enumeration order.
-        records: list[dict] = [
-            {
-                "smiles": p.smiles,
-                "charge": p.charge,
-                "intrinsic_kcal": p.intrinsic_kcal,
-                "implicit_min_kcal": float("nan"),
-                "implicit_min_corrected": float("nan"),
-                "selected": False,
-            }
-            for p in protomers
-        ]
-
-        # 3. Implicit filter: minimise + score every protomer in implicit solvent,
-        #    then pick the single best corrected score for the full explicit run.
-        implicit_ranked: list[tuple[float, int]] = []  # (corrected, protomer index)
-        for i, protomer in enumerate(protomers):
-            logger.info(f"Building implicit complex for {protomer.smiles}")
-            topology, positions, forcefield = _build_implicit_complex(protomer, protein_modeller)
-            scorer = _ImplicitScorer(topology, positions, forcefield, config.ligand_resname)
-            logger.info(f"Minimising complex for {protomer.smiles}")
-            minimised_positions = _minimize_implicit_restrained(forcefield, topology, positions)
-            logger.info(f"Computing interaction energy for {protomer.smiles}")
-            interaction = scorer.interaction_energy(minimised_positions)
-            corrected = protomer.intrinsic_kcal + interaction
-            records[i]["implicit_min_kcal"] = interaction
-            records[i]["implicit_min_corrected"] = corrected
-            implicit_ranked.append((corrected, i))
-            logger.info(
-                f"[implicit-min] {protomer.smiles} (charge {protomer.charge:+d}): "
-                f"interaction {interaction:.2f} + intrinsic {protomer.intrinsic_kcal:.2f} "
-                f"= corrected {corrected:.2f} kcal/mol"
-            )
-
-        winner_idx = min(implicit_ranked)[1]
-        records[winner_idx]["selected"] = True
-        winner = protomers[winner_idx]
         logger.info(
             f"Funnel selected {winner.smiles} (charge {winner.charge:+d}) for the full explicit run"
         )
 
         logger.info(f"Equilibrating final complex for {winner.smiles}")
-        # 5. Full explicit run for the winner only: solvate, equilibrate, produce.
+        # 4. Full explicit run for the winner only: solvate, equilibrate, produce.
         prepared = _prepare_and_equilibrate(winner, protein_modeller, config, tmp_dir / "winner")
 
         # Run ``n_replicas`` independent production replicas from the shared

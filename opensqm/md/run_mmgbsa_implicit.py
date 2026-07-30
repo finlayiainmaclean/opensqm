@@ -17,15 +17,20 @@ same schema as ``run_mmgbsa`` (single-point rather than trajectory-averaged).
    HIS/ASN/GLN alike) its terminal ring/amide group rotated 180 degrees about
    its CB-CG or CG-CD bond, the standard "MolProbity flip" that corrects
    X-ray's O/N ambiguity for ASN/GLN and explores ring orientation for HIS;
+1b. before any ligand is added, each flip variant's bare protein is minimised in
+   GBn2 with a uniform, stiff restraint (``protein_premin_restraint_k``) on every
+   heavy atom - relieving whatever local clash PDBFixer/PROPKA protonation, or
+   the flip's rigid 180-degree rotation, introduced while there is no ligand in
+   the system yet, so it doesn't show up as clash energy in step 3's cheap
+   single-point screen;
 2. uniKa enumerates every ligand protomer within a free-energy window of the
    solution-dominant one at the target pH;
 3. each (residue-flip combination x ligand-protomer) complex is scored in GBn2
-   implicit solvent and the best one is selected: above ``singlepoint_top_n``
-   candidates, every one is first ranked by a cheap single-point score (no
-   minimisation) and only the best ``singlepoint_top_n`` are fully minimised,
-   since the combinatorics of step 1's flips can otherwise make minimising
-   every candidate the dominant cost; at or below that many, they're all
-   minimised directly.
+   implicit solvent and the best one is selected: every candidate is first
+   ranked by a cheap single-point score (no minimisation), and only those
+   within ``singlepoint_window_kcal`` of the best are fully minimised, since
+   the combinatorics of step 1's flips can otherwise make minimising every
+   candidate the dominant cost.
 
 By default a protomer is ranked by ``intrinsic_free_energy + MMGBSA`` - the
 bound-state free energy - so the pocket can flip the ligand's protonation state
@@ -39,12 +44,17 @@ The published complex is the winning protomer's minimised structure, split into
 ``output_dir/prot.pdb`` (protein, PROPKA-protonated) and ``output_dir/lig.sdf``
 (ligand, at the minimised pose). By default the protein's crystallographic waters
 and ions are kept as explicit residues in the GBn2 minimisation (rather than
-stripped) and written into ``prot.pdb``. The minimisation is restrained so GBn2
-relaxes only what should move: each kept water's oxygen is stiffly pinned at its
-crystal site (hydrogens stay free to reorient) and the protein backbone is gently
-held, while the ligand and side chains relax into the pocket. Pass
-``keep_solvent=False`` for the bare protonated protein, or ``restrain_backbone=False``
-to let the whole protein relax.
+stripped) and written into ``prot.pdb``. The prot-lig complex minimisation (step
+3) is restrained so GBn2 relaxes only what should move: each kept water's oxygen
+is stiffly pinned at its crystal site (hydrogens stay free to reorient), and
+every protein heavy atom is held by a restraint graded by its distance to the
+ligand - free within ``distal_min_distance`` so the pocket can relax around it,
+ramping up to ``distal_max_restraint_force`` at ``distal_max_distance`` and
+beyond so the bulk of the protein converges quickly - while the ligand and
+near-pocket side chains relax into place. A near-ligand flip's moved atoms are
+themselves within the free zone (they were built within ``flip_cutoff_angstrom``
+of the ligand), so the restraint does not fight the flip. Pass
+``keep_solvent=False`` for the bare protonated protein.
 
 Inputs (protein, ligand) and the output location may each be a local path or an
 ``s3://`` URI: inputs are staged into a temp dir, all work happens locally, and
@@ -62,7 +72,7 @@ import pandas as pd
 from cloudpathlib import AnyPath
 from loguru import logger
 from openff.toolkit.topology import Molecule  # type: ignore
-from openmm import Vec3, unit
+from openmm import LocalEnergyMinimizer, Vec3, unit
 from openmm.app import Modeller
 from openmm.app.forcefield import ForceField
 from openmm.app.pdbfile import PDBFile
@@ -77,9 +87,15 @@ from opensqm.fix import (
     find_flippable_residues,
     run_pdbfixer,
 )
-from opensqm.md.platforms import set_platform
-from opensqm.md.prepare import get_ligand_forcefield, strip_solvent
+from opensqm.md.platforms import make_context, set_platform
+from opensqm.md.prepare import (
+    create_integrator,
+    create_system,
+    get_ligand_forcefield,
+    strip_solvent,
+)
 from opensqm.md.run_mmgbsa import (
+    _add_position_restraint,
     _enumerate_protomers,
     _ImplicitScorer,
     _minimize_implicit_restrained,
@@ -123,9 +139,10 @@ class MMGBSAImplicitSettings(BaseModel):
     # (step 3) still run as normal.
     skip_protein_preparation: bool = False
     # pH at which the protein titration states (PROPKA) and the ligand protomers
-    # (uniKa) are assigned. Ignored for the protein when ``skip_protein_preparation``.
-    protein_ph: float = 7.0
-    protomer_ph: float = 7.0
+    # (uniKa) are assigned - the same experimental pH for both, so the protein and
+    # ligand protonation states are mutually consistent. Ignored for the protein
+    # when ``skip_protein_preparation``.
+    ph: float = 7.0
     # Every ligand protomer whose uniKa solution free energy is within this
     # window of the dominant one is scored; the winner minimises the selection
     # metric below. A generous window lets the pocket flip the protonation state
@@ -161,12 +178,13 @@ class MMGBSAImplicitSettings(BaseModel):
     # The full (residue-flip combination x ligand-protomer) candidate set can
     # grow large (2**n_flip_candidates x n_protomers); minimising every one is
     # the expensive step (a GBn2 minimisation vs. one cheap potential-energy
-    # call). Above this many candidates, every candidate is first scored at a
-    # single point (no minimisation, at its as-built geometry) by
-    # ``select_metric``, and only the best ``singlepoint_top_n`` are fully
-    # minimised. At or below this many candidates the single-point pass is
-    # skipped - it would cost about as much as just minimising them all.
-    singlepoint_top_n: int = 3
+    # call). Every candidate is first scored at a single point (no
+    # minimisation, at its as-built geometry) by ``select_metric``, and only
+    # those within this many kcal/mol of the best singlepoint score are fully
+    # minimised - the rest are far enough behind that minimisation (which
+    # mostly relaxes clashes, not the ranking) is very unlikely to close the
+    # gap.
+    singlepoint_window_kcal: float = 3.0
     # Keep the crystallographic waters and ions the protein carries (PDBFixer
     # protonates them) as explicit residues in the GBn2 minimisation, so they are
     # written into prot.pdb. When False they are stripped and prot.pdb is the bare
@@ -181,13 +199,33 @@ class MMGBSAImplicitSettings(BaseModel):
     water_restraint_k: OpenMMQuantity[unit.kilocalories_per_mole / unit.angstroms**2] = (
         100.0 * unit.kilocalories_per_mole / unit.angstroms**2
     )
-    # Restrain the protein backbone (CA/C/N) to its input position during
-    # minimisation so GBn2 relaxes the ligand and side chains without distorting
-    # the fold. Gentler than the water pin (the house equilibration default), so
-    # the backbone can relax locally while holding its crystal geometry.
-    restrain_backbone: bool = True
-    backbone_restraint_k: OpenMMQuantity[unit.kilocalories_per_mole / unit.angstroms**2] = (
-        4.0 * unit.kilocalories_per_mole / unit.angstroms**2
+    # Before any prot-lig complex is built, each flip variant's protein alone (no
+    # ligand yet) is minimised in GBn2 with a uniform restraint at this force
+    # constant on every heavy atom - backbone, side chains and any kept crystal
+    # water/ion alike. Stiff enough that the protein barely moves from its input
+    # conformation, but enough to relax whatever local clash PDBFixer/PROPKA
+    # protonation, or a residue flip's rigid 180-degree rotation, introduced -
+    # before that clash energy dominates the single-point screen below.
+    # Deliberately a single stage: with no ligand in the system yet, loosening
+    # this to a backbone-only pass would let a pocket-lining side chain collapse
+    # into the (empty) binding site, clashing badly once the ligand is added.
+    protein_premin_restraint_k: OpenMMQuantity[unit.kilocalories_per_mole / unit.angstroms**2] = (
+        100.0 * unit.kilocalories_per_mole / unit.angstroms**2
+    )
+    # Speeds up the prot-lig complex minimisation below: every protein heavy atom
+    # (backbone and side chains alike) is restrained by its distance to the
+    # ligand instead of a uniform backbone-only hold - free within
+    # ``distal_min_distance`` of any ligand atom (so the pocket can relax around
+    # it), ramping linearly up to ``distal_max_restraint_force`` at
+    # ``distal_max_distance`` and beyond (so the bulk of the protein, far from
+    # the ligand, is held essentially rigid and converges quickly). A near-ligand
+    # residue flip is built within ``flip_cutoff_angstrom`` of the ligand, so its
+    # moved atoms land inside the free zone here and are not fought by the
+    # restraint - it does not "know" the atom flipped, only where it starts.
+    distal_min_distance: OpenMMQuantity[unit.nanometer] = 0.6 * unit.nanometer
+    distal_max_distance: OpenMMQuantity[unit.nanometer] = 1.0 * unit.nanometer
+    distal_max_restraint_force: OpenMMQuantity[unit.kilocalories_per_mole / unit.angstroms**2] = (
+        100.0 * unit.kilocalories_per_mole / unit.angstroms**2
     )
     # Stiffly pin the ligand heavy atoms at their input pose during minimisation
     # (only side chains and hydrogens relax around a fixed ligand). On by default,
@@ -257,19 +295,57 @@ def _build_implicit_complex(
     return modeller.topology, modeller.positions, forcefield
 
 
+def _minimize_protein_only(
+    topology: Topology,
+    positions: unit.Quantity,
+    config: "MMGBSAImplicitSettings",
+) -> unit.Quantity:
+    """Minimise the bare protein (no ligand yet) in GBn2, pinned by a uniform restraint.
+
+    Run once per flip variant before it is used to build any prot-lig complex, so
+    whatever local clash PDBFixer/PROPKA protonation - or a residue flip's rigid
+    180-degree rotation - introduced is relieved while it's cheap (no ligand atoms
+    in the system yet), rather than showing up as clash energy in the single-point
+    screen below. ``protein_premin_restraint_k`` restrains every heavy atom -
+    protein, kept crystal water and ions alike - stiffly enough that the protein
+    barely moves from its input conformation. Deliberately does not loosen to a
+    backbone-only pass afterward: with no ligand in the system yet, nothing keeps
+    the binding pocket open, so a fully side-chain-free relaxation here lets a
+    pocket-lining residue collapse into the (empty) binding site, clashing badly
+    once the ligand is added at its native pose.
+    """
+    forcefield = ForceField(*_IMPLICIT_SOLVENT_FORCEFIELD_FILES)
+    system = create_system(forcefield, topology, implicit_solvent=True)
+    coords_nm = np.asarray(positions.value_in_unit(unit.nanometer))
+    # Every heavy atom in the topology - protein backbone/side chains, any kept
+    # crystal water's oxygen, and any ion (itself a single heavy atom) - leaving
+    # only hydrogens (protein and water alike) free to reorient.
+    _add_position_restraint(
+        system,
+        coords_nm,
+        [a.index for a in topology.atoms() if a.element is not None and a.element.symbol != "H"],
+        config.protein_premin_restraint_k,
+    )
+    context = make_context(system, create_integrator(0.002 * unit.picoseconds))
+    context.setPositions(positions)
+    LocalEnergyMinimizer.minimize(context, maxIterations=1000)
+    return context.getState(getPositions=True).getPositions()
+
+
 def _minimize(
     forcefield: ForceField,
     topology: Topology,
     positions: unit.Quantity,
     config: "MMGBSAImplicitSettings",
 ) -> np.ndarray:
-    """Minimise the implicit complex with the shared water + backbone restraints.
+    """Minimise the implicit complex with the shared water + distal-protein restraints.
 
     Delegates to ``run_mmgbsa._minimize_implicit_restrained`` so this tool and
-    ``run_mmgbsa`` minimise identically: ``keep_solvent`` toggles the water-oxygen
-    pin (there are no waters to pin once solvent is stripped) and
-    ``restrain_backbone`` the gentle backbone hold. Returns the minimised
-    coordinates (n_atoms x 3, nm).
+    ``run_mmgbsa`` share the same minimisation machinery: ``keep_solvent`` toggles
+    the water-oxygen pin (there are no waters to pin once solvent is stripped) and
+    the protein heavy atoms are held by the distance-graded restraint (free near
+    the ligand, stiff far from it) rather than a uniform backbone-only hold.
+    Returns the minimised coordinates (n_atoms x 3, nm).
     """
     return _minimize_implicit_restrained(
         forcefield,
@@ -277,10 +353,13 @@ def _minimize(
         positions,
         restrain_water=config.keep_solvent,
         water_restraint_k=config.water_restraint_k,
-        restrain_backbone=config.restrain_backbone,
-        backbone_restraint_k=config.backbone_restraint_k,
+        restrain_backbone=False,
         restrain_ligand=config.restrain_ligand,
         ligand_restraint_k=config.ligand_restraint_k,
+        restrain_protein_distal=True,
+        distal_min_distance=config.distal_min_distance,
+        distal_max_distance=config.distal_max_distance,
+        distal_max_restraint_force=config.distal_max_restraint_force,
         ligand_resname=config.ligand_resname,
     )
 
@@ -368,7 +447,7 @@ def run_mmgbsa_implicit(
         if config.skip_protein_preparation:
             protein_pdb = PDBFile(str(local_protein))
         else:
-            run_pdbfixer(local_protein, fixed_protein, ph=config.protein_ph)
+            run_pdbfixer(local_protein, fixed_protein, ph=config.ph)
             protein_pdb = PDBFile(str(fixed_protein))
         protein_modeller = Modeller(protein_pdb.topology, protein_pdb.positions)
 
@@ -409,7 +488,7 @@ def run_mmgbsa_implicit(
 
         # 2. Enumerate ligand protomers within the penalty window at the target pH.
         penalty_kcal = config.protonation_penalty.value_in_unit(unit.kilocalories_per_mole)
-        protomers = _enumerate_protomers(local_ligand, config.protomer_ph, penalty_kcal, UnipKa())
+        protomers = _enumerate_protomers(local_ligand, config.ph, penalty_kcal, UnipKa())
 
         # 3a. Build every (residue-flip combo x ligand protomer) candidate's implicit
         #     complex and scorer. Building is cheap relative to minimising (one
@@ -420,7 +499,11 @@ def run_mmgbsa_implicit(
             tuple[str, _ProtomerCandidate, Topology, unit.Quantity, ForceField, _ImplicitScorer]
         ] = []
         for flip_label, flip_topology, flip_positions in flip_variants:
-            flip_modeller = Modeller(flip_topology, flip_positions)
+            logger.info(
+                f"Pre-minimising protein alone (flip state: {flip_label or 'PDB2PQR default'})"
+            )
+            preminimized_positions = _minimize_protein_only(flip_topology, flip_positions, config)
+            flip_modeller = Modeller(flip_topology, preminimized_positions)
             for protomer in protomers:
                 logger.info(
                     f"Building implicit complex for {protomer.smiles} "
@@ -432,13 +515,11 @@ def run_mmgbsa_implicit(
                 scorer = _ImplicitScorer(topology, positions, forcefield, config.ligand_resname)
                 candidates.append((flip_label, protomer, topology, positions, forcefield, scorer))
 
-        # 3b. Above ``singlepoint_top_n`` candidates, score every one at a single
-        #     point (its as-built geometry, no minimisation) and keep only the best
-        #     ``singlepoint_top_n`` by ``select_metric`` for the expensive full
-        #     minimisation below. At or below that many candidates, minimising them
-        #     all costs about the same as screening plus minimising the survivors,
-        #     so the screen is skipped.
-        if len(candidates) > config.singlepoint_top_n:
+        # 3b. Score every candidate at a single point (its as-built geometry, no
+        #     minimisation) and keep only those within ``singlepoint_window_kcal``
+        #     of the best by ``select_metric`` for the expensive full minimisation
+        #     below. Skipped for a single candidate - there is nothing to filter.
+        if len(candidates) > 1:
 
             def _singlepoint_score(
                 candidate: tuple[
@@ -458,12 +539,17 @@ def run_mmgbsa_implicit(
                 )
                 return score
 
-            candidates.sort(key=_singlepoint_score)
+            scored = [(candidate, _singlepoint_score(candidate)) for candidate in candidates]
+            best_score = min(score for _candidate, score in scored)
+            window_kcal = config.singlepoint_window_kcal
+            candidates = [
+                candidate for candidate, score in scored if score - best_score <= window_kcal
+            ]
             logger.info(
-                f"Single-point screen: {len(candidates)} candidates -> fully minimising "
-                f"the {config.singlepoint_top_n} best by {config.select_metric}"
+                f"Single-point screen: {len(scored)} candidates -> fully minimising "
+                f"the {len(candidates)} within {window_kcal} kcal/mol of the best "
+                f"by {config.select_metric}"
             )
-            candidates = candidates[: config.singlepoint_top_n]
 
         # 3c. Fully minimise + score the surviving candidates, keeping each minimised
         #     complex so the winner's can be written out below.
@@ -624,11 +710,9 @@ def main(
     """Run an implicit-solvent MMGBSA protonation funnel from the command line."""
     set_platform(platform)
     config = MMGBSAImplicitSettings(
-        protein_ph=ph,
-        protomer_ph=ph,
+        ph=ph,
         protonation_penalty=3 * unit.kilocalories_per_mole,
         keep_solvent=True,
-        restrain_backbone=True,
         skip_protein_preparation=skip_protein_preparation,
     )
     result = run_mmgbsa_implicit(protein, ligand, output, config=config)

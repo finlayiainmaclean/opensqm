@@ -12,7 +12,7 @@ import click
 import numpy as np
 from loguru import logger
 from openmm import Vec3, unit
-from openmm.app import Atom, Modeller, PDBFile, Residue, Topology
+from openmm.app import Atom, Modeller, PDBFile, Residue, Topology, element
 from pdb2pqr.main import run_pdb2pqr
 from pdbfixer import PDBFixer
 
@@ -33,6 +33,10 @@ ION_RESNAMES = ("ZN", "MG", "CA", "FE", "CU", "MN", "CO", "NA", "K", "NI", "MO")
 # PROPKA/PDB2PQR log the full titration curve at INFO; keep only warnings/errors.
 for _name in ("pdb2pqr", "propka"):
     logging.getLogger(_name).setLevel(logging.WARNING)
+
+
+class PDB2PQRError(Exception):
+    """PDB2PQR/PROPKA failed to protonate a structure."""
 
 
 def _is_protein(res: Residue) -> bool:
@@ -132,17 +136,23 @@ def _protonate_with_propka(input_pdb: Path, output_pdb: Path, ph: float) -> list
     """
     with tempfile.TemporaryDirectory() as tmp:
         pqr_path = Path(tmp) / "structure.pqr"
-        _missed_residues, pka_groups, _biomolecule = run_pdb2pqr(
-            [
-                "--ff=AMBER",
-                "--keep-chain",
-                "--titration-state-method=propka",
-                f"--with-ph={ph}",
-                f"--pdb-output={output_pdb}",
-                str(input_pdb),
-                str(pqr_path),
-            ]
-        )
+        try:
+            _missed_residues, pka_groups, _biomolecule = run_pdb2pqr(
+                [
+                    "--ff=AMBER",
+                    "--keep-chain",
+                    "--titration-state-method=propka",
+                    f"--with-ph={ph}",
+                    f"--pdb-output={output_pdb}",
+                    str(input_pdb),
+                    str(pqr_path),
+                ]
+            )
+        except RuntimeError as err:
+            # PDB2PQR logs the real reason at CRITICAL then re-raises a bare, empty
+            # `RuntimeError` — the message survives only on __cause__, so without this
+            # the pod failure reaches Temporal with an empty error summary.
+            raise PDB2PQRError(f"PDB2PQR failed: {err.__cause__ or err}") from err
     return pka_groups or []
 
 
@@ -374,11 +384,18 @@ def run_pdbfixer(
 
     # Hydrogens are added by PROPKA/PDB2PQR (pKa-informed), not PDBFixer: write the
     # completed heavy-atom structure, protonate it, then read the result back.
+    # Hydrogens already on the input are dropped first, so re-preparing an
+    # already-prepared PDB works: PDB2PQR bonds atoms through its own residue
+    # templates, and an H it did not place itself (e.g. HD2 on a protonated ASP,
+    # which lives only in its ASH patch) is left bondless and aborts debumping with
+    # "Found gap in biomolecule structure".
+    heavy = Modeller(fixer.topology, fixer.positions)
+    heavy.delete([a for a in heavy.topology.atoms() if a.element == element.hydrogen])
     with tempfile.TemporaryDirectory() as tmp:
         heavy_pdb = Path(tmp) / "heavy.pdb"
         protonated_pdb = Path(tmp) / "protonated.pdb"
         with heavy_pdb.open("w") as handle:
-            PDBFile.writeFile(fixer.topology, fixer.positions, handle, keepIds=True)
+            PDBFile.writeFile(heavy.topology, heavy.positions, handle, keepIds=True)
         pka_groups = _protonate_with_propka(heavy_pdb, protonated_pdb, ph)
         protonated = PDBFile(str(protonated_pdb))
         topology, positions = protonated.topology, protonated.positions

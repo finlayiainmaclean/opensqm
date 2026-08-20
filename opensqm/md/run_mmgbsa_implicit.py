@@ -42,9 +42,12 @@ instead.
 
 The published complex is the winning protomer's minimised structure, split into
 ``output_dir/prot.pdb`` (protein, PROPKA-protonated) and ``output_dir/lig.sdf``
-(ligand, at the minimised pose). By default the protein's crystallographic waters
-and ions are kept as explicit residues in the GBn2 minimisation (rather than
-stripped) and written into ``prot.pdb``. The prot-lig complex minimisation (step
+(ligand, at the minimised pose), both rigidly realigned onto the input protein's
+frame (as ``run_mmgbsa`` does after its explicit MD - here the fit is normally
+near the identity, since nothing solvates or moves the complex bodily). By
+default the protein's crystallographic waters and ions are kept as explicit
+residues in the GBn2 minimisation (rather than stripped) and written into
+``prot.pdb``. The prot-lig complex minimisation (step
 3) is restrained so GBn2 relaxes only what should move: each kept water's oxygen
 is stiffly pinned at its crystal site (hydrogens stay free to reorient), and
 every protein heavy atom is held by a restraint graded by its distance to the
@@ -87,6 +90,7 @@ from opensqm.fix import (
     find_flippable_residues,
     run_pdbfixer,
 )
+from opensqm.md.align import align_positions_to_reference
 from opensqm.md.platforms import make_context, set_platform
 from opensqm.md.prepare import (
     create_integrator,
@@ -371,6 +375,7 @@ def _write_outputs(
     ligand_resname: str,
     prot_path: Path,
     lig_path: Path,
+    reference_protein: Path | None = None,
 ) -> None:
     """Split a minimised implicit complex into a protein PDB and a ligand SDF.
 
@@ -378,8 +383,19 @@ def _write_outputs(
     nm). The implicit complex places the ligand first and preserves the RDKit atom
     order of ``ligand_mol`` (OpenFF -> OpenMM keep atom order), so the ligand's
     frame coordinates map onto the RDKit mol positionally.
+
+    With ``reference_protein`` (the run's input protein PDB) the complex is first
+    rigidly realigned onto that input frame, so the published structures are
+    directly comparable to - and overlayable on - the input. Nothing in this
+    path solvates or runs MD, so the fit is normally close to the identity; it is
+    the same realignment ``run_mmgbsa`` needs after its explicit MD, and it keeps
+    the guarantee explicit rather than incidental.
     """
     _stringify_residue_ids(topology)
+    if reference_protein is not None:
+        positions_nm = align_positions_to_reference(
+            topology, positions_nm, reference_protein, label="minimised complex"
+        )
     positions = unit.Quantity([Vec3(*row) for row in positions_nm], unit.nanometer)
 
     prot_modeller = Modeller(topology, positions)
@@ -599,9 +615,18 @@ def run_mmgbsa_implicit(
         if len(records) > 1:
             logger.info(f"Protomer funnel:\n{protomers_df.to_string(index=False)}")
 
-        # 5. Write the winner's minimised complex, split into protein and ligand.
+        # 5. Write the winner's minimised complex, split into protein and ligand,
+        #    realigned onto the input protein's frame.
         topology, winner_pre, minimised = built[winner_idx]
-        _write_outputs(topology, minimised, winner.mol, config.ligand_resname, prot_path, lig_path)
+        _write_outputs(
+            topology,
+            minimised,
+            winner.mol,
+            config.ligand_resname,
+            prot_path,
+            lig_path,
+            reference_protein=local_protein,
+        )
 
         # Ligand heavy-atom RMSD from the input pose to the minimised pose (A). With
         # the backbone restrained the complex frame is stable, so this is the

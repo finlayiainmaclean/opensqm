@@ -14,7 +14,11 @@ free energy - so the pocket can flip the protonation state when binding pays
 for the intrinsic cost, without a blanket bias toward the most-charged
 protomer. The published score and the representative snapshot (lowest-energy
 frame, split into a protein plus-closest-waters PDB and a protonated-ligand
-SDF) come from the winner's full explicit run.
+SDF) come from the winner's full explicit run. Those two files are rigidly
+realigned onto the input protein's frame before they are written (solvation
+recentres the complex in its box and MD then tumbles it), so they can be
+overlaid on the input directly; the returned solvated snapshot deliberately
+stays in the MD frame, which its periodic box belongs to.
 
 ``protein``, ``ligand`` and ``output`` may each be a local path or an
 ``s3://`` URI; ``run_mmgbsa_implicit`` stages and publishes its own artifacts,
@@ -45,6 +49,7 @@ from unipka import UnipKa
 from opensqm.cph.reference_energy import build_protonation_states
 from opensqm.cph.run_cph import SystemState
 from opensqm.fix import run_pdbfixer
+from opensqm.md.align import align_positions_to_reference
 from opensqm.md.equilibrate import (
     EquilibrationSettings,
     _recenter_ligand_positions,
@@ -638,8 +643,29 @@ def _write_representative(
     config: MMGBSASettings,
     prot_path: Path,
     lig_path: Path,
+    reference_protein: Path | None = None,
 ) -> None:
-    """Split the lowest-MMGBSA frame into a protein+close-waters PDB and a ligand SDF."""
+    """Split the lowest-MMGBSA frame into a protein+close-waters PDB and a ligand SDF.
+
+    With ``reference_protein`` (the run's input protein PDB) the frame is first
+    rigidly realigned onto that input frame - solvation recentres the complex in
+    its box and MD then translates and tumbles it, so the raw frame sits in an
+    arbitrary pose relative to the input. The transform is a rigid body move
+    fitted on the protein C-alphas, so it changes no internal geometry and the
+    published protein and ligand stay consistent with each other; it is applied
+    before trimming, which only depends on ligand distances.
+    """
+    if reference_protein is not None:
+        positions = unit.Quantity(
+            [
+                Vec3(*row)
+                for row in align_positions_to_reference(
+                    topology, positions, reference_protein, label="representative frame"
+                )
+            ],
+            unit.nanometer,
+        )
+
     modeller = _closest_waters_complex(
         topology, positions, config.ligand_resname, config.n_closest_waters
     )
@@ -794,6 +820,13 @@ def run_mmgbsa(
         lig_path = tmp_dir / "lig.sdf"
         score_path = tmp_dir / "scores.csv"
 
+        # Local copy of the input protein, kept only as the frame the published
+        # representative structures are realigned back onto (``run_mmgbsa_implicit``
+        # stages its own copy for the work itself, inside a temp dir of its own).
+        protein_src = AnyPath(protein)
+        input_protein = tmp_dir / f"protein_input{protein_src.suffix or '.pdb'}"
+        input_protein.write_bytes(protein_src.read_bytes())
+
         # 1-3. Protonate the protein, enumerate ligand protomers and funnel every
         #      (flip state, protomer) candidate through the GBn2 implicit-solvent
         #      filter; the winner is the protonated protein and minimised ligand
@@ -917,8 +950,20 @@ def run_mmgbsa(
             f"{best_replica + 1}/{config.n_replicas} "
             f"(MMGBSA {min(replica_energies[best_replica]):.2f} kcal/mol)"
         )
+        # The snapshot deliberately stays in the MD frame: it carries the periodic
+        # box for MD to be resumed from, and rotating a periodic system's contents
+        # without rotating its box breaks the lattice. Only the published
+        # structures - trimmed and non-periodic - are realigned onto the input.
         snapshot = _snapshot_from_frame(topology, positions, winner.mol, config.ligand_resname)
-        _write_representative(topology, positions, winner.mol, config, prot_path, lig_path)
+        _write_representative(
+            topology,
+            positions,
+            winner.mol,
+            config,
+            prot_path,
+            lig_path,
+            reference_protein=input_protein,
+        )
 
         # Publish the artifacts to the destination (local dir or S3 prefix).
         out_dir = AnyPath(output)

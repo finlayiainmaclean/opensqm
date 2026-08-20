@@ -32,6 +32,7 @@ from openmm import LangevinMiddleIntegrator, unit
 from openmm.app import DCDReporter, Simulation
 from tqdm import tqdm
 
+from opensqm.md.align import kabsch_rt
 from opensqm.md.platforms import make_simulation
 
 if TYPE_CHECKING:
@@ -80,24 +81,6 @@ def _ligand_masses(state: PreparedState) -> np.ndarray:
         [state.system.getParticleMass(i).value_in_unit(unit.dalton) for i in state.ligand_indices],
         dtype=np.float64,
     )
-
-
-def _kabsch_rt(mobile: np.ndarray, target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Optimal rigid transform mapping ``mobile`` onto ``target`` (Kabsch).
-
-    Returns ``(R, t)`` such that ``x_aligned = R @ x + t`` best superposes the
-    ``mobile`` point set onto ``target`` in a least-squares sense. The
-    reflection-correcting determinant sign keeps ``R`` a proper rotation.
-    """
-    mob_c = mobile.mean(axis=0)
-    tgt_c = target.mean(axis=0)
-    p = mobile - mob_c
-    q = target - tgt_c
-    u, _, vt = np.linalg.svd(p.T @ q)
-    d = np.sign(np.linalg.det(vt.T @ u.T))
-    rotation = vt.T @ np.diag([1.0, 1.0, d]) @ u.T
-    translation = tgt_c - rotation @ mob_c
-    return rotation, translation
 
 
 def _ligand_com_nm(
@@ -184,7 +167,7 @@ def run_bound_escape(
     def _displacement_a(positions: np.ndarray) -> np.ndarray:
         com = np.average(positions[state.ligand_indices], axis=0, weights=masses)
         if ref_calpha_xyz is not None:
-            rotation, translation = _kabsch_rt(positions[calpha_indices], ref_calpha_xyz)
+            rotation, translation = kabsch_rt(positions[calpha_indices], ref_calpha_xyz)
             com = rotation @ com + translation
         return (com - ref_ligand_com) * _NM_TO_ANGSTROM
 

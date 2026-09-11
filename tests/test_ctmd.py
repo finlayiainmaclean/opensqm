@@ -16,6 +16,7 @@ from opensqm.ctmd.metad import (
     alignment_atoms,
     ct,
     ct_from_bias,
+    image_ligand_with_protein,
     ligand_rmsd_force,
     run_ctmd_replica,
 )
@@ -270,3 +271,22 @@ def test_a_run_too_small_to_score_is_rejected_before_it_starts(tmp_path) -> None
             checkpoint_dir=tmp_path / "checkpoints",
             trajectory_dir=tmp_path / "trajectories",
         )
+
+
+def test_the_imaging_bond_adds_no_energy() -> None:
+    # It exists only so OpenMM treats ligand and protein as one molecule for
+    # periodic imaging; if it ever contributed a force it would perturb the run.
+    state = _toy_state()
+    system = openmm.System()
+    for _ in range(state.topology.getNumAtoms()):
+        system.addParticle(12.0 * unit.dalton)
+    image_ligand_with_protein(system, state).setForceGroup(2)
+    context = openmm.Context(
+        system,
+        openmm.VerletIntegrator(0.001 * unit.picosecond),
+        openmm.Platform.getPlatformByName("Reference"),
+    )
+    context.setPositions(state.positions)
+    result = context.getState(getEnergy=True, getForces=True, groups={2})
+    assert result.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole) == 0.0
+    assert np.abs(result.getForces(asNumpy=True)).max() == 0.0

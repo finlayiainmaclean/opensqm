@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from loguru import logger
-from openmm import CustomCVForce, RMSDForce, unit
+from openmm import CustomCentroidBondForce, CustomCVForce, RMSDForce, System, unit
 from openmm.app import DCDReporter
 from openmm.app.metadynamics import BiasVariable, Metadynamics
 from scipy.special import logsumexp
@@ -132,6 +132,25 @@ def ligand_rmsd_force(state: PreparedState) -> CustomCVForce:
     return force
 
 
+def image_ligand_with_protein(system: System, state: PreparedState) -> CustomCentroidBondForce:
+    """Bond the ligand to the protein at zero strength, and add it to ``system``.
+
+    RMSDForce ignores periodic boundaries, so it breaks the moment the ligand is
+    imaged to the far side of the box. OpenMM works its molecules out from
+    bonded interactions, so a zero-strength bond puts the ligand and the protein
+    in one molecule and they are imaged together. The force contributes no
+    energy and no gradient. Taken from OpenBPMD, which needs it for the same
+    reason.
+    """
+    force = CustomCentroidBondForce(2, "0*distance(g1,g2)")
+    force.addGroup(list(state.ligand_indices))
+    force.addGroup(alignment_atoms(state))
+    force.addBond([0, 1])
+    force.setUsesPeriodicBoundaryConditions(True)
+    system.addForce(force)
+    return force
+
+
 def build_metadynamics(
     state: PreparedState, config: CTMDSettings
 ) -> tuple[PreparedState, Metadynamics]:
@@ -143,6 +162,7 @@ def build_metadynamics(
     biasing it in place would poison that cache.
     """
     system = copy.deepcopy(state.system)
+    image_ligand_with_protein(system, state)
     variable = BiasVariable(
         ligand_rmsd_force(state),
         minValue=0.0,

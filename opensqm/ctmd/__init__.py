@@ -15,9 +15,12 @@ seconds of import time that scoring an existing run does not need.
 from opensqm.ctmd.config import CTMDSettings
 from opensqm.ctmd.metad import (
     CTMDTrajectory,
+    alignment_atoms,
     build_metadynamics,
     ct,
     ct_from_bias,
+    image_ligand_with_protein,
+    ligand_rmsd_force,
     run_ctmd_replica,
 )
 from opensqm.ctmd.score import bootstrap_score, commit_frame, rank_ligands, score_replica
@@ -25,11 +28,14 @@ from opensqm.ctmd.score import bootstrap_score, commit_frame, rank_ligands, scor
 __all__ = [
     "CTMDSettings",
     "CTMDTrajectory",
+    "alignment_atoms",
     "bootstrap_score",
     "build_metadynamics",
     "commit_frame",
     "ct",
     "ct_from_bias",
+    "image_ligand_with_protein",
+    "ligand_rmsd_force",
     "rank_ligands",
     "run_ctmd_replica",
     "score_replica",

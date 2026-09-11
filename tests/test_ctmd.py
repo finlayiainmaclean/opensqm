@@ -290,3 +290,58 @@ def test_the_imaging_bond_adds_no_energy() -> None:
     result = context.getState(getEnergy=True, getForces=True, groups={2})
     assert result.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole) == 0.0
     assert np.abs(result.getForces(asNumpy=True)).max() == 0.0
+
+
+def _cv_context(state: PreparedState) -> openmm.Context:
+    system = openmm.System()
+    for _ in range(state.topology.getNumAtoms()):
+        system.addParticle(12.0 * unit.dalton)
+    system.addForce(ligand_rmsd_force(state))
+    return openmm.Context(
+        system,
+        openmm.VerletIntegrator(0.001 * unit.picosecond),
+        openmm.Platform.getPlatformByName("Reference"),
+    )
+
+
+def test_the_cv_gradient_matches_finite_difference() -> None:
+    # A CV with the right value but the wrong gradient would bias the ligand in
+    # the wrong direction and nothing else in the suite would notice.
+    state = _toy_state()
+    moved = np.asarray(state.positions.value_in_unit(unit.nanometer))
+    moved[state.ligand_indices] += np.array([0.3, 0.0, 0.0])
+    context = _cv_context(state)
+
+    def energy(xyz: np.ndarray) -> float:
+        context.setPositions(xyz * unit.nanometer)
+        return (
+            context.getState(getEnergy=True)
+            .getPotentialEnergy()
+            .value_in_unit(unit.kilojoule_per_mole)
+        )
+
+    context.setPositions(moved * unit.nanometer)
+    forces = context.getState(getForces=True).getForces(asNumpy=True)
+    analytic = forces.value_in_unit(unit.kilojoule_per_mole / unit.nanometer)
+    step = 1e-5
+    for atom, axis in ((state.ligand_indices[0], 0), (state.ligand_indices[-1], 2), (0, 1)):
+        plus, minus = moved.copy(), moved.copy()
+        plus[atom, axis] += step
+        minus[atom, axis] -= step
+        numeric = -(energy(plus) - energy(minus)) / (2 * step)
+        assert analytic[atom, axis] == pytest.approx(numeric, abs=1e-5)
+
+
+def test_the_cv_survives_a_protein_that_has_drifted() -> None:
+    # The realistic failure mode: both RMSD terms are dominated by the protein
+    # and nearly cancel, leaving the ligand signal in the rounding.
+    state = _toy_state()
+    ref = np.asarray(state.positions.value_in_unit(unit.nanometer))
+    rng = np.random.default_rng(4)
+    drifted = ref.copy()
+    protein = alignment_atoms(state)
+    drifted[protein] += rng.normal(0.0, 0.3, (len(protein), 3))
+    for displacement in (0.0, 0.05, 0.6):
+        xyz = drifted.copy()
+        xyz[state.ligand_indices] += np.array([displacement, 0.0, 0.0])
+        assert _read_cv(state, xyz) == pytest.approx(_kabsch_ligand_rmsd(state, xyz), abs=0.02)

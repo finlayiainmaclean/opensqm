@@ -11,9 +11,17 @@ from openmm import app, unit
 from openmm.app.metadynamics import BiasVariable, Metadynamics
 
 from opensqm.ctmd.config import CTMDSettings
-from opensqm.ctmd.metad import CTMDTrajectory, ct, ct_from_bias, run_ctmd_replica
+from opensqm.ctmd.metad import (
+    CTMDTrajectory,
+    alignment_atoms,
+    ct,
+    ct_from_bias,
+    ligand_rmsd_force,
+    run_ctmd_replica,
+)
 from opensqm.ctmd.run_ctmd import collect_replicas
 from opensqm.ctmd.score import bootstrap_score, commit_frame, rank_ligands, score_replica
+from opensqm.md.align import kabsch_rt
 from opensqm.modbind.states import PreparedState
 
 KT_300 = (unit.MOLAR_GAS_CONSTANT_R * 300 * unit.kelvin).value_in_unit(unit.kilojoule_per_mole)
@@ -150,22 +158,86 @@ def test_a_gap_wider_than_the_tolerance_is_not_a_tie() -> None:
     assert rank_ligands(["a", "b"], [30.0, 26.0], [1.0, 9.0], tie_tolerance=2.5) == ["a", "b"]
 
 
-def _toy_state() -> PreparedState:
-    """A three-particle 'ligand' in vacuum, enough to drive the real force stack."""
+def _toy_state(n_protein: int = 60, n_ligand: int = 4) -> PreparedState:
+    """A toy complex: a rigid-ish 'protein' cloud plus a small 'ligand'."""
+    rng = np.random.default_rng(0)
     system = openmm.System()
     topology = app.Topology()
-    residue = topology.addResidue("LIG", topology.addChain())
-    for _ in range(3):
-        system.addParticle(12.0 * unit.dalton)
-        topology.addAtom("C", app.element.carbon, residue)
-    positions = np.array([[0.0, 0.0, 0.0], [0.15, 0.0, 0.0], [0.0, 0.15, 0.0]]) * unit.nanometer
+    chain = topology.addChain()
+    positions = np.vstack(
+        [
+            rng.normal(0.0, 1.0, (n_protein, 3)),
+            rng.normal(0.0, 0.15, (n_ligand, 3)) + np.array([1.0, 0.0, 0.0]),
+        ]
+    )
+    for resname, count in (("ALA", n_protein), ("LIG", n_ligand)):
+        residue = topology.addResidue(resname, chain)
+        for _ in range(count):
+            system.addParticle(12.0 * unit.dalton)
+            topology.addAtom("C", app.element.carbon, residue)
     return PreparedState(
         topology=topology,
-        positions=positions,
+        positions=positions * unit.nanometer,
         system=system,
-        ligand_indices=[0, 1, 2],
+        ligand_indices=list(range(n_protein, n_protein + n_ligand)),
         is_bound=True,
     )
+
+
+def _read_cv(state: PreparedState, xyz_nm: np.ndarray) -> float:
+    """Evaluate the CV expression itself, which is the force's energy."""
+    system = openmm.System()
+    for _ in range(state.topology.getNumAtoms()):
+        system.addParticle(12.0 * unit.dalton)
+    force = ligand_rmsd_force(state)
+    force.setForceGroup(1)
+    system.addForce(force)
+    context = openmm.Context(
+        system,
+        openmm.VerletIntegrator(0.001 * unit.picosecond),
+        openmm.Platform.getPlatformByName("Reference"),
+    )
+    context.setPositions(xyz_nm * unit.nanometer)
+    energy = context.getState(getEnergy=True, groups={1}).getPotentialEnergy()
+    return energy.value_in_unit(unit.kilojoule_per_mole)
+
+
+def _kabsch_ligand_rmsd(state: PreparedState, xyz_nm: np.ndarray) -> float:
+    """The same quantity by direct superposition, as the independent answer."""
+    ref = np.asarray(state.positions.value_in_unit(unit.nanometer))
+    protein = alignment_atoms(state)
+    rotation, translation = kabsch_rt(xyz_nm[protein], ref[protein])
+    moved = xyz_nm @ rotation.T + translation
+    delta = moved[state.ligand_indices] - ref[state.ligand_indices]
+    return float(np.sqrt((delta**2).sum(axis=1).mean()))
+
+
+def test_the_cv_tracks_the_ligand_leaving_the_pocket() -> None:
+    state = _toy_state()
+    ref = np.asarray(state.positions.value_in_unit(unit.nanometer))
+    for displacement in (0.05, 0.2, 0.6):
+        moved = ref.copy()
+        moved[state.ligand_indices] += np.array([displacement, 0.0, 0.0])
+        assert _read_cv(state, moved) == pytest.approx(_kabsch_ligand_rmsd(state, moved), abs=0.005)
+        assert _read_cv(state, moved) == pytest.approx(displacement, abs=0.005)
+
+
+def test_the_cv_ignores_rigid_motion_of_the_whole_complex() -> None:
+    # The regression test for the defect this replaced: a single RMSDForce over
+    # the ligand superimposes what it measures, so it scored 0 for a ligand that
+    # had left the pocket AND 0 here. Only the second is correct.
+    state = _toy_state()
+    ref = np.asarray(state.positions.value_in_unit(unit.nanometer))
+    spin = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    assert _read_cv(state, ref) == pytest.approx(0.0, abs=1e-3)
+    assert _read_cv(state, ref @ spin.T + np.array([5.0, 3.0, -2.0])) == pytest.approx(
+        0.0, abs=1e-3
+    )
+
+
+def test_the_alignment_frame_must_outnumber_the_ligand() -> None:
+    with pytest.raises(ValueError, match="must outnumber"):
+        ligand_rmsd_force(_toy_state(n_protein=2, n_ligand=8))
 
 
 def test_a_replica_biases_the_rmsd_and_accumulates_an_offset() -> None:
@@ -182,7 +254,7 @@ def test_a_replica_biases_the_rmsd_and_accumulates_an_offset() -> None:
 
     assert len(trajectory.rmsd_nm) == config.max_frames + 1  # frame 0 is the unbiased start
     assert len(trajectory.ct_kj) == len(trajectory.rmsd_nm)
-    assert trajectory.rmsd_nm[0] == pytest.approx(0.0, abs=1e-4)  # single-precision RMSD
+    assert trajectory.rmsd_nm[0] == pytest.approx(0.0, abs=1e-3)  # sqrt floor + float32
     assert trajectory.ct_kj[0] == pytest.approx(0.0, abs=1e-9)
     assert trajectory.ct_kj[-1] > 0.0
     # The bias belongs to the copy, never to the cached prepared state.

@@ -1,14 +1,24 @@
 """Well-tempered metadynamics on the ligand RMSD, and its c(t) bias offset.
 
 The collective variable is the heavy-atom RMSD of the ligand from its docked
-pose. PLUMED gets the protein-aligned RMSD by splitting the reference PDB into
-alignment weights (protein) and displacement weights (ligand); OpenMM's
-``RMSDForce`` aligns and measures the same atom set and cannot express that
-split. It does not have to here: the bound state carries flat-bottom position
-restraints on the backbone distal to the pocket, anchored to absolute reference
-coordinates, so the protein cannot translate or rotate as a rigid body and the
-lab-frame ligand RMSD already is the protein-aligned one. Loosening those
-restraints silently breaks the CV.
+pose, measured after superimposing on the protein. PLUMED expresses that by
+splitting the reference PDB into alignment weights (protein) and displacement
+weights (ligand). A single ``RMSDForce`` cannot: it superimposes whatever it
+measures, so on the ligand alone it is blind to a ligand that leaves the pocket
+rigidly -- translate a ligand a full nanometre and it still scores zero.
+
+Two of them recover the protein-aligned value. Fitting protein and ligand
+together, and the protein alone, differ only by the ligand's displacement in the
+protein frame:
+
+    n_tot RMSD_tot^2 - n_prot RMSD_prot^2 = (n_lig n_prot / n_tot) d^2
+
+The n_prot/n_tot factor is there because the two fits use different centroids.
+The identity is exact while the protein dominates the joint fit, which any real
+protein does: against a direct Kabsch alignment the error is below 1e-4 nm for
+2000 protein heavy atoms against 25 ligand ones, and it is exactly zero when the
+whole complex translates or rotates. Nothing here depends on the protein being
+restrained.
 
 c(t) is the time-dependent offset of Tiwary and Parrinello (*JPCB* 2015), what
 PLUMED's ``METAD ... CALC_RCT`` prints as ``metad.rct``:
@@ -31,7 +41,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from loguru import logger
-from openmm import RMSDForce, unit
+from openmm import CustomCVForce, RMSDForce, unit
 from openmm.app import DCDReporter
 from openmm.app.metadynamics import BiasVariable, Metadynamics
 from scipy.special import logsumexp
@@ -42,6 +52,14 @@ from opensqm.modbind.escape import build_simulation
 if TYPE_CHECKING:
     from opensqm.ctmd.config import CTMDSettings
     from opensqm.modbind.states import PreparedState
+
+# Residues that are neither the ligand nor part of the alignment frame.
+NON_PROTEIN_RESIDUES = frozenset({"LIG", "HOH", "SOL", "WAT", "NA", "CL", "MG", "K", "ZN"})
+
+# Floor inside the square root. Both RMSDs vanish at the reference pose, where
+# d(sqrt)/du diverges; without it the very first step can produce a NaN force.
+# It offsets the CV by 1e-4 nm, a hundredth of the hill width.
+_SQRT_FLOOR = 1e-8
 
 
 @dataclass
@@ -80,6 +98,40 @@ def ct(meta: Metadynamics) -> float:
     return ct_from_bias(-free_energy * (gamma - 1.0) / gamma, kt_kj, gamma)
 
 
+def alignment_atoms(state: PreparedState) -> list[int]:
+    """Heavy atoms of the protein, which the ligand RMSD is measured against."""
+    return [
+        atom.index
+        for atom in state.topology.atoms()
+        if atom.element is not None
+        and atom.element.symbol != "H"
+        and atom.residue.name not in NON_PROTEIN_RESIDUES
+    ]
+
+
+def ligand_rmsd_force(state: PreparedState) -> CustomCVForce:
+    """Build the protein-aligned ligand RMSD in nm. See the module docstring.
+
+    Each RMSDForce takes reference coordinates for every particle in the system
+    even though it scores only its own subset.
+    """
+    protein = alignment_atoms(state)
+    n_prot, n_lig = len(protein), len(state.ligand_indices)
+    n_tot = n_prot + n_lig
+    if n_prot < n_lig:
+        raise ValueError(
+            f"The alignment frame ({n_prot} protein heavy atoms) must outnumber the "
+            f"ligand ({n_lig}); the joint fit would otherwise follow the ligand."
+        )
+    force = CustomCVForce(
+        f"sqrt({_SQRT_FLOOR} + max(0, "
+        f"({n_tot}*tot^2 - {n_prot}*prot^2)*{n_tot}/({n_lig}*{n_prot})))"
+    )
+    force.addCollectiveVariable("tot", RMSDForce(state.positions, protein + state.ligand_indices))
+    force.addCollectiveVariable("prot", RMSDForce(state.positions, protein))
+    return force
+
+
 def build_metadynamics(
     state: PreparedState, config: CTMDSettings
 ) -> tuple[PreparedState, Metadynamics]:
@@ -91,10 +143,8 @@ def build_metadynamics(
     biasing it in place would poison that cache.
     """
     system = copy.deepcopy(state.system)
-    # RMSDForce needs reference coordinates for every particle even though only
-    # the ligand heavy atoms (already the contents of ligand_indices) are scored.
     variable = BiasVariable(
-        RMSDForce(state.positions, state.ligand_indices),
+        ligand_rmsd_force(state),
         minValue=0.0,
         maxValue=config.grid_max.value_in_unit(unit.nanometer),
         biasWidth=config.hill_sigma.value_in_unit(unit.nanometer),

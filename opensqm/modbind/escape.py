@@ -92,7 +92,7 @@ def _ligand_com_nm(
     return np.average(ligand_positions, axis=0, weights=masses)
 
 
-def _build_simulation(
+def build_simulation(
     state: PreparedState,
     *,
     temperature: unit.Quantity,
@@ -100,6 +100,7 @@ def _build_simulation(
     friction: unit.Quantity,
     seed: int,
 ) -> Simulation:
+    """Build a Langevin simulation of ``state`` at ``temperature``, seeded and boxed."""
     integrator = LangevinMiddleIntegrator(temperature, friction, step_size)
     if seed:
         integrator.setRandomNumberSeed(int(seed))
@@ -133,7 +134,7 @@ def run_bound_escape(
     frame_interval_steps = max(1, round(config.bound_frame_interval / config.integrator_step_size))
     max_frames = max(1, round(config.max_escape_time / config.bound_frame_interval))
 
-    simulation = _build_simulation(
+    simulation = build_simulation(
         state,
         temperature=temperature or config.bound_temperature,
         step_size=config.integrator_step_size,
@@ -223,7 +224,7 @@ def run_unbound_escape(
     logger.info(
         f"Running unbound escape at {config.unbound_temperature.value_in_unit(unit.kelvin):.0f} K"
     )
-    simulation = _build_simulation(
+    simulation = build_simulation(
         state,
         temperature=config.unbound_temperature,
         step_size=config.integrator_step_size,

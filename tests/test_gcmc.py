@@ -8,6 +8,7 @@ import pytest
 from openmm import app, unit
 from pymbar import timeseries
 
+import opensqm.gcmc.sampler
 from opensqm.gcmc import GCMCSampler, GCMCSettings, water_interaction_energy
 
 TIP3P = np.array([[-0.834, 0.315061, 0.636386], [0.417, 0.1, 0.05], [0.417, 0.1, 0.05]])
@@ -59,11 +60,12 @@ def _system(box, n_waters, n_ions, method, charged=True):
     return system, top, np.array(pos)
 
 
+@pytest.mark.parametrize("dtype", [np.float64, np.float32])  # the sampler uses float32
 @pytest.mark.parametrize(
     "box",
     [np.diag([2.4, 2.4, 2.4]), np.array([[2.4, 0, 0], [0.8, 2.3, 0], [-0.9, 0.7, 2.2]])],
 )
-def test_stage1_energy_matches_openmm(box):
+def test_stage1_energy_matches_openmm(box, dtype):
     system, _, pos = _system(box, 6, 20, openmm.NonbondedForce.CutoffPeriodic)
     nb = system.getForce(0)
     params = np.array([[x._value for x in nb.getParticleParameters(i)] for i in range(len(pos))])
@@ -81,20 +83,23 @@ def test_stage1_energy_matches_openmm(box):
         return total
 
     def stage1(xyz, w, own_start):
-        args = (TIP3P, xyz, params, real, np.array([own_start]), box, 1.0, 78.3)
-        return water_interaction_energy(np, xyz[w][None], *args)[0]
+        xyz = xyz.astype(dtype)
+        args = (TIP3P.astype(dtype), xyz, params.astype(dtype), real, np.array([own_start]))
+        return water_interaction_energy(np, xyz[w][None], *args, box.astype(dtype), 1.0, 78.3)[0]
+
+    tol = {"rel": 1e-7, "abs": 1e-6} if dtype == np.float64 else {"abs": 1e-2}
 
     water = [np.arange(len(pos)) // 3 == w for w in range(6)]
     real = ~water[0]  # water 0 is the ghost
     rng = np.random.default_rng(1)
     for w in (1, 2, 3):  # deletion: a real water, its own atoms left out
         expected = openmm_interaction(pos, real, water[w])
-        assert stage1(pos, water[w], 3 * w) == pytest.approx(expected, rel=1e-7, abs=1e-6)
+        assert stage1(pos, water[w], 3 * w) == pytest.approx(expected, **tol)
     for _ in range(3):  # insertion: the ghost at a random place and orientation
         new = pos.copy()
         new[water[0]] = rng.random(3) @ box + GEOMETRY @ np.linalg.qr(rng.normal(size=(3, 3)))[0]
         expected = openmm_interaction(new, np.ones_like(real), water[0])
-        assert stage1(new, water[0], NONE) == pytest.approx(expected, rel=1e-7, abs=1e-6)
+        assert stage1(new, water[0], NONE) == pytest.approx(expected, **tol)
 
 
 def _gcmc(charged, n_waters, n_ghosts, platform="Reference", **settings):
@@ -110,15 +115,20 @@ def _gcmc(charged, n_waters, n_ghosts, platform="Reference", **settings):
     return sampler, ctx
 
 
+@pytest.mark.parametrize("perturbed", [False, True])
 @pytest.mark.parametrize("batch_size", [1, 16])
-def test_ideal_gas_is_poisson(batch_size):
+def test_ideal_gas_is_poisson(batch_size, perturbed, monkeypatch):
+    """With ``perturbed``, stage 1 sees a bounded fake energy, so stage 2 must correct it."""
     assert GCMCSettings(sphere_radius_a=4.2).b == pytest.approx(-7.9589, abs=1e-3)  # grand, BPTI
+    if perturbed:
+        fake = lambda xp, sites, *a: 2 * np.sin(20 * sites[:, 0, 0]) + 3  # noqa: E731
+        monkeypatch.setattr(opensqm.gcmc.sampler, "water_interaction_energy", fake)
     lam = 2.5
     sampler, ctx = _gcmc(False, 16, 16, "CPU", adams=math.log(lam), batch_size=batch_size)
     sampler.move(ctx, 8000)
     n = np.array(sampler.Ns[500:], float)
     n_eff = len(n) / timeseries.statisticalInefficiency(n)
-    assert sampler.n_stage2_rejected == 0
+    assert (sampler.n_stage2_rejected > 0) == perturbed
     assert abs(n.mean() - lam) < 4 * math.sqrt(lam / n_eff)
     assert abs(n.var() - lam) < 4 * math.sqrt((lam + 2 * lam**2) / n_eff)
 

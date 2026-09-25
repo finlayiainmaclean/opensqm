@@ -7,7 +7,9 @@ screens the whole batch at once with a cheap reaction-field energy (numpy or
 cupy). Stage 2 evaluates each survivor with the exact OpenMM energy and corrects
 for the stage-1 approximation (Gelb, J. Chem. Phys. 2003, doi:10.1063/1.1563597).
 The first stage-2 acceptance ends the batch, and the next batch starts from the
-new state, so the chain is the same as one trial at a time.
+new state, so the chain is the same as a one-trial-at-a-time two-stage (delayed
+acceptance) chain. That chain has grand's stationary distribution, but its
+acceptance per trial is never more than grand's.
 """
 
 import math
@@ -124,7 +126,10 @@ class GCMCSampler:
         forces = system.getForces()
         if any("Barostat" in type(f).__name__ for f in forces):
             raise ValueError("GCMC needs constant volume; remove the barostat")
-        self.nb = next(f for f in forces if isinstance(f, openmm.NonbondedForce))
+        nb = next((f for f in forces if isinstance(f, openmm.NonbondedForce)), None)
+        if nb is None:
+            raise ValueError("GCMC needs a NonbondedForce")
+        self.nb = nb
         if self.nb.getNonbondedMethod() != openmm.NonbondedForce.PME:
             raise ValueError("GCMC needs PME electrostatics")
         residues = list(topology.residues())
@@ -132,7 +137,10 @@ class GCMCSampler:
         self.water_atoms = np.array([[a.index for a in residues[w].atoms()] for w in self.waters])
         if (np.diff(self.water_atoms, axis=1) != 1).any():
             raise ValueError("the atoms of each water must be contiguous")
-        self.ref = [r if isinstance(r, int) else _find_atom(topology, r) for r in reference_atoms]
+        self.ref = [
+            i for r in reference_atoms
+            for i in (_find_atoms(topology, r) if isinstance(r, dict) else [int(r)])
+        ]  # fmt: skip
 
         # customiseForces from grand (Samways, Melling; MIT)
         custom = openmm.CustomNonbondedForce(SOFTCORE)
@@ -194,6 +202,9 @@ class GCMCSampler:
                 self.status[i] = 0
         self._update_context()
         state = context.getState(getPositions=True, getEnergy=True, enforcePeriodicBox=True)
+        box = state.getPeriodicBoxVectors(asNumpy=True).value_in_unit(NM)
+        if self.settings.sphere_radius_a / 10 > 0.5 * box.diagonal().min():
+            raise ValueError("GCMC sphere radius cannot be larger than half a box length")
         self.energy = state.getPotentialEnergy().value_in_unit(KJ)
         pos = state.getPositions(asNumpy=True).value_in_unit(NM)
         self.template = pos[self.water_atoms[0]] - pos[self.water_atoms[0, 0]]
@@ -262,6 +273,8 @@ class GCMCSampler:
             ghosts = np.flatnonzero(self.status == 0)
             if len(ghosts) == 0:
                 raise RuntimeError("no ghost water left for an insertion; add more ghost waters")
+            # ponytail: the first ghost, where grand picks a random one; the same, since ghosts
+            # do not interact and the new sites replace the ghost's positions.
             pick = int(ghosts[0])
             new_pos = self.pos.copy()
             new_pos[self.water_atoms[pick]] = sites
@@ -314,14 +327,15 @@ class GCMCSampler:
         self._box = self.xp.asarray(box, np.float32)
 
 
-def _find_atom(topology: app.Topology, ref: dict) -> int:
-    """Index of the atom a grand-style reference dict names."""
-    for atom in topology.atoms():
-        res = atom.residue
-        if (
-            (atom.name, res.name) == (ref["name"], ref["resname"])
-            and ref.get("resid", res.id) == res.id
-            and ref.get("chain", res.chain.index) == res.chain.index
-        ):
-            return atom.index
-    raise ValueError(f"reference atom {ref} not found")
+def _find_atoms(topology: app.Topology, ref: dict) -> list[int]:
+    """Return the index of every atom a grand-style reference dict matches, as grand does."""
+    found = [
+        atom.index
+        for atom in topology.atoms()
+        if (atom.name, atom.residue.name) == (ref["name"], ref["resname"])
+        and ref.get("resid", atom.residue.id) == atom.residue.id
+        and ref.get("chain", atom.residue.chain.index) == atom.residue.chain.index
+    ]
+    if not found:
+        raise ValueError(f"reference atom {ref} not found")
+    return found

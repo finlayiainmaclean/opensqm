@@ -2,7 +2,7 @@
 
 from typing import Any
 
-ONE_4PI_EPS0 = 138.935456  # kJ nm / (mol e^2), the value OpenMM uses
+ONE_4PI_EPS0 = 138.93545764438198  # kJ nm / (mol e^2), the value OpenMM 8.5 uses
 
 
 def min_image(xp: Any, d: Any, box: Any) -> Any:
@@ -74,6 +74,8 @@ def water_interaction_energy(
     atom_index = xp.arange(xyz.shape[0])
     chunk = max(1, max_elements // (3 * n_sites * xyz.shape[0]))
     out = []
+    # ponytail: every trial against every atom, O(trials x atoms); a cell list around the
+    # sphere is the upgrade when the system is large.
     for i in range(0, n_trials, chunk):
         d = min_image(xp, xyz[None, None] - sites[i : i + chunk, :, None], box)
         r2 = (d * d).sum(-1)

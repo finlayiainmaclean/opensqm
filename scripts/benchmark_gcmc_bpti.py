@@ -7,6 +7,12 @@ waters, a 4.2 A sphere on the CA atoms of TYR10 and ASN43, 298 K. ``--mode md``
 does ``--md-steps`` of Langevin MD before each GCMC cycle; ``--mode frozen`` does
 only GCMC. The run directory gets settings.json, Ns.npy (N after every trial),
 cycles.csv, timing.json and, in md mode, traj.dcd and ghosts.txt (grand's format).
+Ns.npy and timing.json are rewritten after every cycle, so a killed run keeps its data.
+
+grand's insertion orientation is not uniform over SO(3) (grand.utils.random_rotation_matrix),
+so a grand-vs-parallel difference is not by itself evidence against the batched sampler.
+For a like-for-like check, run grand with ``--grand-haar`` (uniform rotations), or
+compare parallel at ``--batch-size 1`` with parallel at a large batch size.
 
     python scripts/benchmark_gcmc_bpti.py --sampler parallel --mode frozen --out runs/p0
 """
@@ -20,6 +26,7 @@ import click
 import numpy as np
 import openmm
 from openmm import app, unit
+from scipy.spatial.transform import Rotation
 
 from opensqm.gcmc import GCMCSampler, GCMCSettings, add_ghost_waters
 
@@ -48,6 +55,7 @@ RADIUS_A, TEMPERATURE = 4.2, 298.0 * unit.kelvin
 @click.option("--batch-size", default=64)
 @click.option("--seed", default=0)
 @click.option("--empty-sphere", is_flag=True, help="Switch off every water in the sphere first.")
+@click.option("--grand-haar", is_flag=True, help="Give grand uniform insertion rotations.")
 @click.option("--platform", default="CUDA")
 @click.option("--out", type=click.Path(path_type=Path), required=True)
 def main(
@@ -60,6 +68,7 @@ def main(
     batch_size,
     seed,
     empty_sphere,
+    grand_haar,
     platform,
     out,
 ):
@@ -87,18 +96,20 @@ def main(
             temperature=TEMPERATURE,
             referenceAtoms=REF_ATOMS,
             sphereRadius=RADIUS_A * unit.angstrom,
-            ghostFile=str(out / "grand-ghosts.txt"),
+            ghostFile=str(out / "ghosts.txt"),
             log=str(out / "gcmc.log"),
             overwrite=True,
         )
-        adams, ghost_resids = float(sampler.B), lambda: sampler.getWaterStatusResids(0)
+        if grand_haar:  # Rotation.random draws from numpy's global generator, seeded above
+            grand.samplers.random_rotation_matrix = lambda: Rotation.random().as_matrix()
+        adams, write_ghosts = float(sampler.B), sampler.writeGhostWaterResids
     else:
         device = "cuda" if platform == "CUDA" else "cpu"
         settings = GCMCSettings(
             sphere_radius_a=RADIUS_A, batch_size=batch_size, seed=seed, device=device
         )
         sampler = GCMCSampler(system, top, REF_ATOMS, settings)
-        adams, ghost_resids = settings.b, lambda: sampler.ghost_resids
+        adams, write_ghosts = settings.b, lambda: sampler.write_ghost_line(out / "ghosts.txt")
     integrator = openmm.LangevinMiddleIntegrator(
         TEMPERATURE, 1 / unit.picosecond, 2 * unit.femtosecond
     )
@@ -117,17 +128,18 @@ def main(
         "sampler": which, "mode": mode, "pdb": str(pdb), "n_cycles": n_cycles,
         "trials_per_cycle": trials_per_cycle, "md_steps": md_steps if mode == "md" else 0,
         "batch_size": batch_size if which == "parallel" else 1, "seed": seed,
-        "empty_sphere": empty_sphere, "platform": platform, "adams": adams,
+        "empty_sphere": empty_sphere, "grand_haar": grand_haar and which == "grand",
+        "platform": platform, "adams": adams,
         "n_atoms": system.getNumParticles(), "ghosts": ghosts, "ref_atoms": REF_ATOMS,
         "sphere_radius_a": RADIUS_A, "temperature_k": TEMPERATURE.value_in_unit(unit.kelvin),
     }  # fmt: skip
     (out / "settings.json").write_text(json.dumps(run, indent=2))
 
-    ghost_file, dcd = out / "ghosts.txt", None
+    dcd = None
     if mode == "md":
-        ghost_file.write_text("")
+        (out / "ghosts.txt").write_text("")
         dcd_file = (out / "traj.dcd").open("wb")
-        dcd = app.DCDFile(dcd_file, top, 0.002 * md_steps, interval=md_steps)
+        dcd = app.DCDFile(dcd_file, top, 0.002, interval=md_steps)  # dt is one MD step (ps)
     gcmc_s = md_s = 0.0
     start = time.perf_counter()
     with (out / "cycles.csv").open("w") as csv:
@@ -148,29 +160,28 @@ def main(
                 dcd.writeModel(
                     state.getPositions(), periodicBoxVectors=state.getPeriodicBoxVectors()
                 )
-                with ghost_file.open("a") as f:
-                    f.write(",".join(map(str, ghost_resids())) + "\n")
+                write_ghosts()
             wall = time.perf_counter() - start
             csv.write(f"{cycle},{sampler.N},{sampler.n_moves},{sampler.n_accepted},{wall:.3f}\n")
             csv.flush()
             click.echo(
                 f"cycle {cycle}: N={sampler.N} trials={sampler.n_moves} acc={sampler.n_accepted}"
             )
+            np.save(out / "Ns.npy", np.asarray(sampler.Ns, np.int8))
+            timing = {
+                "gcmc_ms_per_trial": 1000 * gcmc_s / sampler.n_moves,
+                "gcmc_s": gcmc_s,
+                "md_s": md_s,
+                "md_ms_per_step": 1000 * md_s / ((cycle + 1) * md_steps) if dcd else None,
+                "wall_s": time.perf_counter() - start,
+                "n_moves": sampler.n_moves,
+                "n_accepted": sampler.n_accepted,
+                "n_stage1_accepted": getattr(sampler, "n_stage1_accepted", None),
+                "n_stage2_rejected": getattr(sampler, "n_stage2_rejected", None),
+            }
+            (out / "timing.json").write_text(json.dumps(timing, indent=2))
     if dcd is not None:
         dcd_file.close()
-    np.save(out / "Ns.npy", np.asarray(sampler.Ns, np.int8))
-    timing = {
-        "gcmc_ms_per_trial": 1000 * gcmc_s / sampler.n_moves,
-        "gcmc_s": gcmc_s,
-        "md_s": md_s,
-        "md_ms_per_step": 1000 * md_s / max(1, n_cycles * md_steps) if dcd is not None else None,
-        "wall_s": time.perf_counter() - start,
-        "n_moves": sampler.n_moves,
-        "n_accepted": sampler.n_accepted,
-        "n_stage1_accepted": getattr(sampler, "n_stage1_accepted", None),
-        "n_stage2_rejected": getattr(sampler, "n_stage2_rejected", None),
-    }
-    (out / "timing.json").write_text(json.dumps(timing, indent=2))
     click.echo(json.dumps(timing, indent=2))
 
 

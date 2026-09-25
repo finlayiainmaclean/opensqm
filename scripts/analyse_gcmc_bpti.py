@@ -2,14 +2,23 @@
 """Compare run directories of benchmark_gcmc_bpti.py.
 
 Per run: mean N after burn-in, statistical inefficiency g, effective sample size,
-standard error and P(N). Per mode: grand against parallel, as a difference of
-pooled means with a z-score and a chi-square test on P(N) with effective counts.
+standard error, P(N), accepted moves per trial and wall time per effective sample.
+Runs of one sampler, batch size and start are pooled; each pair of pools with the
+same mode and start is compared as a difference of means with a z-score and a
+chi-square test on P(N) with effective counts. The pooled SE is the larger of the
+within-run SE and the SE of the per-run means across seeds. A run with fewer than
+MIN_CHANGES changes of N has not mixed: it is flagged and left out of the pools.
 In md mode, if grand is importable, grand's own cluster analysis runs on each
 trajectory. Writes summary.md and pn.png to --out.
+
+grand's insertion orientation is not uniform over SO(3), so a grand-vs-parallel
+difference is not by itself evidence against the batched sampler. Compare
+grand-haar with parallel, or parallel at batch size 1 with a large batch size.
 
     python scripts/analyse_gcmc_bpti.py runs/* --out runs/summary
 """
 
+import itertools
 import json
 import math
 from pathlib import Path
@@ -32,29 +41,40 @@ try:
 except ImportError:
     plt = None
 
+MIN_CHANGES = 20
+CAVEAT = (
+    "grand's insertion orientation is not uniform over SO(3). A difference between grand "
+    "(without -haar) and parallel is not by itself evidence against the batched sampler."
+)
+
 
 def _run(path, burn_in, series):
     settings = json.loads((path / "settings.json").read_text())
-    ns = np.load(path / "Ns.npy").astype(float)
     if series == "cycle":
         ns = pd.read_csv(path / "cycles.csv")["N"].to_numpy(float)
+    else:
+        ns = np.load(path / "Ns.npy").astype(float)
     ns = ns[int(burn_in * len(ns)) :]
     try:
         g = timeseries.statisticalInefficiency(ns)
-    except timeseries.ParameterError:  # a constant series
-        g = float(len(ns))
+        se = ns.std() * math.sqrt(g / len(ns))
+    except timeseries.ParameterError:  # a constant series: the error is unknown
+        g, se = float(len(ns)), math.nan
     n_eff = len(ns) / g
     p = np.bincount(ns.astype(int)) / len(ns)
-    label = (
-        f"{settings['sampler']}-{settings['mode']}-b{settings['batch_size']}-s{settings['seed']}"
-    )
+    haar = "-haar" * settings.get("grand_haar", False)
+    group = f"{settings['sampler']}{haar}-b{settings['batch_size']}"
     key = (settings["mode"], settings["empty_sphere"])
-    timing = json.loads((path / "timing.json").read_text())
+    t = path / "timing.json"
+    timing = json.loads(t.read_text()) if t.exists() else {}
     return {
-        "label": label + "-empty" * key[1], "sampler": settings["sampler"], "key": key,
-        "n": len(ns),
-        "mean": ns.mean(), "g": g, "n_eff": n_eff, "se": ns.std() / math.sqrt(n_eff), "p": p,
-        "ms_per_trial": timing["gcmc_ms_per_trial"], "path": path, "settings": settings,
+        "label": f"{group}-{settings['mode']}-s{settings['seed']}" + "-empty" * key[1],
+        "group": group, "key": key, "n": len(ns), "changes": int(np.count_nonzero(np.diff(ns))),
+        "mean": ns.mean(), "g": g, "n_eff": n_eff, "se": se, "p": p,
+        "ms_per_trial": timing.get("gcmc_ms_per_trial", math.nan),
+        "acc_per_trial": timing.get("n_accepted", math.nan) / timing.get("n_moves", math.nan),
+        "s_per_eff": (timing.get("gcmc_s", math.nan) + (timing.get("md_s") or 0)) / n_eff,
+        "path": path, "settings": settings,
     }  # fmt: skip
 
 
@@ -92,43 +112,52 @@ def _pn(p):
 def main(runs, burn_in, series, out):
     out.mkdir(parents=True, exist_ok=True)
     rows = [_run(r, burn_in, series) for r in runs]
-    md = [f"# GCMC comparison\n\nBurn-in {burn_in:.0%}, N per {series}.\n"]
-    md.append("| run | samples | mean N | g | n_eff | SE | ms/trial | P(N) |\n" + "|---" * 8 + "|")
+    md = [f"# GCMC comparison\n\n{CAVEAT}\n\nBurn-in {burn_in:.0%}, N per {series}.\n"]
+    md.append(
+        "| run | samples | changes | mean N | g | n_eff | SE | ms/trial | acc/trial "
+        "| s per eff. sample | P(N) |\n" + "|---" * 11 + "|"
+    )
     for r in rows:
+        flag = " (not mixed, left out)" * (r["changes"] < MIN_CHANGES)
         md.append(
-            f"| {r['label']} | {r['n']} | {r['mean']:.3f} | {r['g']:.1f} | {r['n_eff']:.0f} "
-            f"| {r['se']:.3f} | {r['ms_per_trial']:.3f} | {_pn(r['p'])} |"
+            f"| {r['label']}{flag} | {r['n']} | {r['changes']} | {r['mean']:.3f} | {r['g']:.1f} "
+            f"| {r['n_eff']:.0f} | {r['se']:.3f} | {r['ms_per_trial']:.3f} "
+            f"| {r['acc_per_trial']:.4f} | {r['s_per_eff']:.3g} | {_pn(r['p'])} |"
         )
-    # Pool runs of one sampler, mode and start (full or empty sphere), weighted by n_eff.
-    for key in sorted({r["key"] for r in rows}):
+    mixed = [r for r in rows if r["changes"] >= MIN_CHANGES]
+    width = max(len(r["p"]) for r in rows)
+    for key in sorted({r["key"] for r in mixed}):
+        # Pool the runs of one group (sampler and batch size), weighted by n_eff.
         pools = {}
-        for name in ("grand", "parallel"):
-            pool = [r for r in rows if r["key"] == key and r["sampler"] == name]
-            if pool:
-                w = np.array([r["n_eff"] for r in pool])
-                mean = sum(wi * r["mean"] for wi, r in zip(w, pool, strict=True)) / w.sum()
-                se = (
-                    math.sqrt(sum((wi * r["se"]) ** 2 for wi, r in zip(w, pool, strict=True)))
-                    / w.sum()
-                )
-                counts = np.zeros(max(len(r["p"]) for r in rows))
-                for r in pool:
-                    counts[: len(r["p"])] += r["p"] * r["n_eff"]
-                pools[name] = (mean, se, counts)
-        if len(pools) < 2:
-            continue
-        (mg, sg, cg), (mp, sp, cp) = pools["grand"], pools["parallel"]
-        se = math.hypot(sg, sp)
-        z = (mg - mp) / se if se > 0 else math.nan  # nan: both series constant
-        table = np.array([cg, cp])[:, (cg + cp) > 0]
-        chi2, pval, dof, _ = stats.chi2_contingency(table) if table.shape[1] > 1 else (0, 1, 0, 0)
+        for group in sorted({r["group"] for r in mixed if r["key"] == key}):
+            pool = [r for r in mixed if r["key"] == key and r["group"] == group]
+            w = np.array([r["n_eff"] for r in pool])
+            means, ses = np.array([r["mean"] for r in pool]), np.array([r["se"] for r in pool])
+            within = math.sqrt(((w * ses) ** 2).sum()) / w.sum()
+            between = means.std(ddof=1) / math.sqrt(len(pool)) if len(pool) > 1 else 0.0
+            counts = np.zeros(width)
+            for r in pool:
+                counts[: len(r["p"])] += r["p"] * r["n_eff"]
+            pools[group] = ((w * means).sum() / w.sum(), np.max([within, between]), counts)
         start = "empty sphere" if key[1] else "full sphere"
-        md.append(
-            f"\n## {key[0]}, {start}: grand vs parallel\n\n- mean N: grand {mg:.3f} +- {sg:.3f}, "
-            f"parallel {mp:.3f} +- {sp:.3f}\n- difference {mg - mp:+.3f} +- {se:.3f}, "
-            f"z = {z:+.2f}\n- P(N), effective counts: chi2 = {chi2:.2f}, dof = {dof}, "
-            f"p = {pval:.3g}"
-        )
+        for a, b in itertools.combinations(pools, 2):
+            (ma, sa, ca), (mb, sb, cb) = pools[a], pools[b]
+            se = math.hypot(sa, sb)
+            z = (ma - mb) / se if se > 0 else math.nan  # nan: an SE is unknown
+            table = np.array([ca, cb])[:, (ca + cb) > 0]
+            chi = "not done (one bin)"
+            if table.shape[1] > 1:
+                chi2, pval, dof, expected = stats.chi2_contingency(table)
+                chi = (
+                    f"chi2 = {chi2:.2f}, dof = {dof}, p = {pval:.3g}"
+                    if expected.min() >= 5
+                    else "not done (an expected effective count is below 5)"
+                )
+            md.append(
+                f"\n## {key[0]}, {start}: {a} vs {b}\n\n- mean N: {a} {ma:.3f} +- {sa:.3f}, "
+                f"{b} {mb:.3f} +- {sb:.3f}\n- difference {ma - mb:+.3f} +- {se:.3f}, "
+                f"z = {z:+.2f}\n- P(N), effective counts: {chi}"
+            )
     for r in rows:
         occ = _clusters(r)
         if occ is not None:

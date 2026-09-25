@@ -56,6 +56,11 @@ RADIUS_A, TEMPERATURE = 4.2, 298.0 * unit.kelvin
 @click.option("--seed", default=0)
 @click.option("--empty-sphere", is_flag=True, help="Switch off every water in the sphere first.")
 @click.option("--grand-haar", is_flag=True, help="Give grand uniform insertion rotations.")
+@click.option(
+    "--equil-trials",
+    default=0,
+    help="Refill on a near-static structure first (grand's equil-uvt1 uses 110000).",
+)
 @click.option("--platform", default="CUDA")
 @click.option("--out", type=click.Path(path_type=Path), required=True)
 def main(
@@ -69,6 +74,7 @@ def main(
     seed,
     empty_sphere,
     grand_haar,
+    equil_trials,
     platform,
     out,
 ):
@@ -129,11 +135,32 @@ def main(
         "trials_per_cycle": trials_per_cycle, "md_steps": md_steps if mode == "md" else 0,
         "batch_size": batch_size if which == "parallel" else 1, "seed": seed,
         "empty_sphere": empty_sphere, "grand_haar": grand_haar and which == "grand",
+        "equil_trials": equil_trials,
         "platform": platform, "adams": adams,
         "n_atoms": system.getNumParticles(), "ghosts": ghosts, "ref_atoms": REF_ATOMS,
         "sphere_radius_a": RADIUS_A, "temperature_k": TEMPERATURE.value_in_unit(unit.kelvin),
     }  # fmt: skip
     (out / "settings.json").write_text(json.dumps(run, indent=2))
+
+    if equil_trials:
+        # grand's equil-uvt1: refill the emptied sphere on a near-static structure, 10,000
+        # trials then blocks of 1,000 trials with 5 MD steps after each, before any real MD.
+        blocks = [10000] + [1000] * ((equil_trials - 10000) // 1000)
+        with (out / "equil.csv").open("w") as f:
+            f.write("block,N,trials,accepted,wall_s\n")
+            t0 = time.perf_counter()
+            for i, n in enumerate(blocks):
+                sampler.move(sim.context, n)
+                if i:
+                    sim.step(5)
+                f.write(f"{i},{sampler.N},{sampler.n_moves},{sampler.n_accepted},")
+                f.write(f"{time.perf_counter() - t0:.3f}\n")
+                f.flush()
+        if which == "grand":
+            sampler.reset()
+        else:
+            sampler.Ns, sampler.n_moves, sampler.n_accepted = [], 0, 0
+            sampler.n_stage1_accepted = sampler.n_stage2_rejected = 0
 
     dcd = None
     if mode == "md":

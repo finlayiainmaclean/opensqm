@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Run grand's StandardGCMCSphereSampler or the batched GCMCSampler on grand's BPTI system.
+"""Run grand's StandardGCMCSphereSampler or the batched GCMCSampler on a grand example system.
 
 Both samplers get the same System, built once with grand's BPTI protocol:
 amber14-all + amber14/tip3p, PME, 12 A cutoff, 10 A switch, HBonds, 15 ghost
@@ -7,6 +7,8 @@ waters, a 4.2 A sphere on the CA atoms of TYR10 and ASN43, 298 K. ``--mode md``
 does ``--md-steps`` of Langevin MD before each GCMC cycle; ``--mode frozen`` does
 only GCMC. The run directory gets settings.json, Ns.npy (N after every trial),
 cycles.csv, timing.json and, in md mode, traj.dcd and ghosts.txt (grand's format).
+``--system water`` uses grand's 40 A TIP3P box instead, with the sphere fixed at the box
+centre; there the mean N should be close to V_sphere / V_standard.
 Ns.npy and timing.json are rewritten after every cycle, so a killed run keeps its data.
 
 grand's insertion orientation is not uniform over SO(3) (grand.utils.random_rotation_matrix),
@@ -35,20 +37,27 @@ try:
 except ImportError:
     grand = None
 
-PDB_URL = (
-    "https://raw.githubusercontent.com/essex-lab/grand/9659ed2/examples/bpti/prod/bpti-equil.pdb"
-)
-REF_ATOMS = [
-    {"name": "CA", "resname": "TYR", "resid": "10"},
-    {"name": "CA", "resname": "ASN", "resid": "43"},
-]
+GRAND_URL = "https://raw.githubusercontent.com/essex-lab/grand/9659ed2/examples/"
+# system -> (input PDB under GRAND_URL, force-field files, reference atoms; none = box centre)
+SYSTEMS = {
+    "bpti": (
+        "bpti/prod/bpti-equil.pdb",
+        ("amber14-all.xml", "amber14/tip3p.xml"),
+        [
+            {"name": "CA", "resname": "TYR", "resid": "10"},
+            {"name": "CA", "resname": "ASN", "resid": "43"},
+        ],
+    ),
+    "water": ("water/water_box-eq.pdb", ("amber14/tip3p.xml",), []),
+}
 RADIUS_A, TEMPERATURE = 4.2, 298.0 * unit.kelvin
 
 
 @click.command()
 @click.option("--sampler", "which", type=click.Choice(["grand", "parallel"]), required=True)
+@click.option("--system", "name", type=click.Choice(sorted(SYSTEMS)), default="bpti")
 @click.option("--mode", type=click.Choice(["frozen", "md"]), default="frozen")
-@click.option("--pdb", type=click.Path(path_type=Path), default=Path("bpti-equil.pdb"))
+@click.option("--pdb", type=click.Path(path_type=Path), help="Default: download grand's file.")
 @click.option("--n-cycles", default=100)
 @click.option("--trials-per-cycle", default=1000)
 @click.option("--md-steps", default=1000)
@@ -65,6 +74,7 @@ RADIUS_A, TEMPERATURE = 4.2, 298.0 * unit.kelvin
 @click.option("--out", type=click.Path(path_type=Path), required=True)
 def main(
     which,
+    name,
     mode,
     pdb,
     n_cycles,
@@ -79,14 +89,18 @@ def main(
     out,
 ):
     out.mkdir(parents=True, exist_ok=True)
+    path, ff_files, ref_atoms = SYSTEMS[name]
+    pdb = pdb or Path(Path(path).name)
     if not pdb.exists():
-        urllib.request.urlretrieve(PDB_URL, pdb)
+        urllib.request.urlretrieve(GRAND_URL + path, pdb)
     np.random.seed(seed)  # grand draws from numpy's global generator
     src = app.PDBFile(str(pdb))
     top, pos, ghosts = add_ghost_waters(src.topology, src.positions, 15, seed=seed)
     with (out / "topology.pdb").open("w") as f:
         app.PDBFile.writeFile(top, pos, f, keepIds=True)
-    system = app.ForceField("amber14-all.xml", "amber14/tip3p.xml").createSystem(
+    box = np.array(top.getPeriodicBoxVectors().value_in_unit(unit.nanometer))
+    centre = None if ref_atoms else tuple(float(x) for x in box.sum(axis=0) / 2)
+    system = app.ForceField(*ff_files).createSystem(
         top,
         nonbondedMethod=app.PME,
         nonbondedCutoff=12 * unit.angstrom,
@@ -100,7 +114,10 @@ def main(
             system=system,
             topology=top,
             temperature=TEMPERATURE,
-            referenceAtoms=REF_ATOMS,
+            referenceAtoms=ref_atoms or None,
+            sphereCentre=None
+            if centre is None
+            else unit.Quantity(np.array(centre), unit.nanometer),
             sphereRadius=RADIUS_A * unit.angstrom,
             ghostFile=str(out / "ghosts.txt"),
             log=str(out / "gcmc.log"),
@@ -112,9 +129,13 @@ def main(
     else:
         device = "cuda" if platform == "CUDA" else "cpu"
         settings = GCMCSettings(
-            sphere_radius_a=RADIUS_A, batch_size=batch_size, seed=seed, device=device
+            sphere_radius_a=RADIUS_A,
+            batch_size=batch_size,
+            seed=seed,
+            device=device,
+            sphere_centre_nm=centre,
         )
-        sampler = GCMCSampler(system, top, REF_ATOMS, settings)
+        sampler = GCMCSampler(system, top, ref_atoms, settings)
         adams, write_ghosts = settings.b, lambda: sampler.write_ghost_line(out / "ghosts.txt")
     integrator = openmm.LangevinMiddleIntegrator(
         TEMPERATURE, 1 / unit.picosecond, 2 * unit.femtosecond
@@ -137,7 +158,8 @@ def main(
         "empty_sphere": empty_sphere, "grand_haar": grand_haar and which == "grand",
         "equil_trials": equil_trials,
         "platform": platform, "adams": adams,
-        "n_atoms": system.getNumParticles(), "ghosts": ghosts, "ref_atoms": REF_ATOMS,
+        "n_atoms": system.getNumParticles(), "ghosts": ghosts, "ref_atoms": ref_atoms,
+        "system": name, "sphere_centre_nm": centre,
         "sphere_radius_a": RADIUS_A, "temperature_k": TEMPERATURE.value_in_unit(unit.kelvin),
     }  # fmt: skip
     (out / "settings.json").write_text(json.dumps(run, indent=2))

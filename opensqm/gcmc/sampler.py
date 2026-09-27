@@ -45,7 +45,9 @@ class GCMCSettings(BaseModel):
     the Adams value B directly; if it is None, B is mu'/kT + ln(V_sphere/V_standard).
     ``batch_size`` trials are proposed from one state and screened together on
     ``device``: "cuda" uses cupy, "cpu" uses numpy. ``seed`` seeds the one numpy
-    Generator that draws every random number of the sampler.
+    Generator that draws every random number of the sampler. ``sphere_centre_nm``
+    fixes the sphere in space (grand's ``sphereCentre``); then ``reference_atoms``
+    may be empty.
     """
 
     sphere_radius_a: float
@@ -57,6 +59,7 @@ class GCMCSettings(BaseModel):
     seed: int = 0
     device: Literal["cuda", "cpu"] = "cuda"
     rf_dielectric: float = 78.3
+    sphere_centre_nm: tuple[float, float, float] | None = None
 
     @property
     def kt(self) -> float:
@@ -141,6 +144,8 @@ class GCMCSampler:
             i for r in reference_atoms
             for i in (_find_atoms(topology, r) if isinstance(r, dict) else [int(r)])
         ]  # fmt: skip
+        if not self.ref and settings.sphere_centre_nm is None:
+            raise ValueError("give reference_atoms or settings.sphere_centre_nm")
 
         # customiseForces from grand (Samways, Melling; MIT)
         custom = openmm.CustomNonbondedForce(SOFTCORE)
@@ -314,8 +319,11 @@ class GCMCSampler:
         """Read positions, sphere centre and water statuses, and copy them to the device."""
         self.pos = state.getPositions(asNumpy=True).value_in_unit(NM)
         box = state.getPeriodicBoxVectors(asNumpy=True).value_in_unit(NM)
-        ref = self.pos[self.ref]
-        self.centre = ref[0] + min_image(np, ref - ref[0], box).mean(axis=0)
+        if self.settings.sphere_centre_nm is not None:
+            self.centre = np.array(self.settings.sphere_centre_nm)
+        else:
+            ref = self.pos[self.ref]
+            self.centre = ref[0] + min_image(np, ref - ref[0], box).mean(axis=0)
         oxygen = min_image(np, self.pos[self.water_atoms[:, 0]] - self.centre, box)
         inside = np.linalg.norm(oxygen, axis=1) <= self.settings.sphere_radius_a / 10
         self.status = np.where(self.status == 0, 0, np.where(inside, 1, 2))

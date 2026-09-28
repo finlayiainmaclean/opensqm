@@ -4,7 +4,8 @@ Defaults reproduce Shekhar et al. (bioRxiv 2026, doi:10.64898/2026.02.05.703972)
 and its reference PLUMED input: well-tempered metadynamics on the ligand RMSD
 from the docked pose, 1.75 kJ/mol hills every 1 ps with sigma 0.015 nm and bias
 factor 10, 5 ns per replica, and a ligand called unbound once its RMSD holds
-above 6 A for 200 ps.
+above 6 A for 200 ps. One deliberate change: replicas integrate at 4 fs with 4 Da
+hydrogens (bonds to H constrained), which halves the cost of a nanosecond.
 """
 
 from __future__ import annotations
@@ -39,7 +40,10 @@ class CTMDSettings(BaseModel):
 
     # --- Sampling ---
     temperature: OpenMMQuantity[unit.kelvin] = 300.0 * unit.kelvin
-    integrator_step_size: OpenMMQuantity[unit.picosecond] = 0.002 * unit.picoseconds
+    # 4 fs is stable only with heavy hydrogens: hydrogen_mass is repartitioned from the
+    # bonded heavy atom, on the metadynamics system alone (see build_metadynamics).
+    integrator_step_size: OpenMMQuantity[unit.picosecond] = 0.004 * unit.picoseconds
+    hydrogen_mass: OpenMMQuantity[unit.dalton] = 4.0 * unit.dalton
     friction: OpenMMQuantity[unit.picosecond**-1] = 1.0 / unit.picosecond  # type: ignore
     n_replicas: int = 10
     n_score_replicas: int = 3
@@ -91,6 +95,7 @@ class CTMDSettings(BaseModel):
         conf_dict = {
             "temperature": str(self.temperature),
             "integrator_step_size": str(self.integrator_step_size),
+            "hydrogen_mass": str(self.hydrogen_mass),
             "n_replicas": self.n_replicas,
             "n_score_replicas": self.n_score_replicas,
             "frame_interval": str(self.frame_interval),

@@ -178,7 +178,7 @@ def generate_ligand_reference(
         logger.info(f"Skipping {main_name} ({xxhash_str}): cached at {cache_path}")
         cached = TitratableResidueReference.load(cache_path)
         if list(cached.ring_flip_bonds) != user_ring_flip_bonds:
-            cached = cached.copy(update={"ring_flip_bonds": user_ring_flip_bonds})
+            cached = cached.model_copy(update={"ring_flip_bonds": user_ring_flip_bonds})
             cached.save(cache_path)
         return cached
 
@@ -353,7 +353,7 @@ def generate_residue_reference_dict(
             # whatever ``MODEL_COMPOUNDS`` currently declares even when
             # loading legacy caches written before the field existed.
             if list(cached.ring_flip_bonds) != ring_flip_bonds:
-                cached = cached.copy(update={"ring_flip_bonds": ring_flip_bonds})
+                cached = cached.model_copy(update={"ring_flip_bonds": ring_flip_bonds})
                 cached.save(reference_path)
             references[residue_name] = cached
             continue

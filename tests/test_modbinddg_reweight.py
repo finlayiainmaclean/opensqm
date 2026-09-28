@@ -70,7 +70,7 @@ def test_frame_rate_factor_scales_with_unbound_exponent() -> None:
         n_replicas=1,
         unbound_frame_interval=10.0 * unit.picoseconds,  # equal -> factor 1
     )
-    fine = base.copy(update={"unbound_frame_interval": 1.0 * unit.picoseconds})
+    fine = base.model_copy(update={"unbound_frame_interval": 1.0 * unit.picoseconds})
     rt = rt_kcal(300.0)
     pop_base = compute_delta_g(occ_b, occ_u, config=base, rt=rt)["unbound_population"]
     pop_fine = compute_delta_g(occ_b, occ_u, config=fine, rt=rt)["unbound_population"]
@@ -117,6 +117,6 @@ def test_delta_g_invariant_to_replica_count_explicit() -> None:
     dg1 = compute_delta_g(bound_one, unbound_one, config=config, rt=rt)["delta_g"]
     assert math.isfinite(dg1)
     for n in (2, 4, 8, 16):
-        cfg_n = config.copy(update={"n_replicas": n})
+        cfg_n = config.model_copy(update={"n_replicas": n})
         dg_n = compute_delta_g(bound_one * n, unbound_one * n, config=cfg_n, rt=rt)["delta_g"]
         assert dg_n == pytest.approx(dg1), f"dG drifted at N={n}: {dg_n} vs {dg1}"

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from openmm.unit import kilojoules_per_mole
-from pydantic import BaseModel, Field, root_validator
+from pydantic import BaseModel, Field, model_validator
 
 from opensqm.md.terminal_ring_mc import RING_FLIP_BONDS
 
@@ -144,8 +144,9 @@ class TitratableResidueReference(BaseModel):
     transitions: list[Transition]
     ring_flip_bonds: list[tuple[str, str]] = Field(default_factory=list)
 
-    @root_validator(pre=True)
-    def _migrate_legacy(cls, values: dict[str, Any]) -> dict[str, Any]:  # noqa: N805 -- pydantic v1 root_validator receives cls
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy(cls, values: Any) -> Any:
         """Backfill ``transitions``/``charges`` from the legacy ``micro_pkas`` schema.
 
         Earlier versions of this file stored a flat ``micro_pkas`` list of
@@ -210,8 +211,9 @@ class TitratableResidueReference(BaseModel):
                 values["ring_flip_bonds"] = []
         return values
 
-    @root_validator
-    def _check_consistency(cls, values: dict[str, Any]) -> dict[str, Any]:  # noqa: N805 -- pydantic v1 root_validator receives cls
+    @model_validator(mode="after")
+    def _check_consistency(self) -> "TitratableResidueReference":
+        values = dict(self)
         variants = values.get("variants") or []
         variant_names = values.get("variant_names") or []
         main_variant = values.get("main_variant")
@@ -277,7 +279,7 @@ class TitratableResidueReference(BaseModel):
                     f"ring_flip_bonds entry {entry!r} has equal anchor and pivot "
                     f"atom names; the rotation axis would be degenerate"
                 )
-        return values
+        return self
 
     @property
     def reference_energies(self) -> list:
@@ -315,7 +317,7 @@ class TitratableResidueReference(BaseModel):
 
     def save(self, path: Path) -> None:
         """Write the reference data to ``path`` as JSON."""
-        Path(path).write_text(self.json(indent=2))
+        Path(path).write_text(self.model_dump_json(indent=2))
 
     @classmethod
     def load(cls, path: Path) -> "TitratableResidueReference":
@@ -324,7 +326,7 @@ class TitratableResidueReference(BaseModel):
         Transparently migrates legacy JSON files that still use the old
         ``micro_pkas`` schema; see :meth:`_migrate_legacy`.
         """
-        return cls.parse_raw(Path(path).read_text())
+        return cls.model_validate_json(Path(path).read_text())
 
 
 __all__ = ["TitratableResidueReference", "Transition"]

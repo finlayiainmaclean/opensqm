@@ -212,7 +212,9 @@ def run_ctmd(
                     mmgbsa_scores[key] = value
             # The backbone restraints this attaches are what pin the reference
             # frame, so the lab-frame ligand RMSD is the protein-aligned one.
-            state = build_bound_state_from_state(mmgbsa_result.snapshot)
+            state = build_bound_state_from_state(
+                mmgbsa_result.snapshot, hydrogen_mass=4.0 * unit.dalton
+            )
             save_prepared_state(state, equil_dir, "bound")
             scores_path.write_text(json.dumps(mmgbsa_scores))
 

@@ -1,6 +1,7 @@
 """SQM module."""
 
 import hashlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -78,17 +79,19 @@ class SQMOutput(BaseModel):
 @ray.remote
 def run_sqm_wrapper(inp: SQMConfig, output_dir: Path) -> SQMOutput | None:
     """Run SQM on a protein and ligand with caching."""
-    config_hash = hashlib.sha256(inp.json(sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    # sort_keys keeps the cache key stable; pydantic 2 dropped it from model_dump_json.
+    canonical = json.dumps(inp.model_dump(mode="json"), sort_keys=True)
+    config_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
     output_json = output_dir / f"{config_hash}.json"
 
     if output_json.exists():
         logger.info(f"Output existing for {inp.complex.complex_id}")
-        return SQMOutput.parse_raw(output_json.read_text())
+        return SQMOutput.model_validate_json(output_json.read_text())
 
     logger.info(f"Running SQM for {inp.complex.complex_id}")
     try:
         output = run_sqm(inp)
-        output_json.write_text(output.json(sort_keys=True))
+        output_json.write_text(json.dumps(output.model_dump(mode="json"), sort_keys=True))
         return output
     except Exception as e:
         logger.error(f"Error running SQM for {inp.complex.complex_id}: {e}")
@@ -276,7 +279,7 @@ def cli(
         complex_id = str(row.id)  # type: ignore
         if not overwrite and complex_id in db:
             result_json = db[complex_id]
-            all_results[complex_id] = SQMOutput.parse_raw(result_json)
+            all_results[complex_id] = SQMOutput.model_validate_json(result_json)
             continue
 
         inputs_to_run.append(
@@ -300,7 +303,7 @@ def cli(
 
         for inp, result in zip(inputs_to_run, new_results, strict=False):
             all_results[inp.complex.complex_id] = result
-            db[inp.complex.complex_id] = result.json(sort_keys=True)
+            db[inp.complex.complex_id] = json.dumps(result.model_dump(mode="json"), sort_keys=True)
 
     db.close()
 

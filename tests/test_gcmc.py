@@ -127,7 +127,7 @@ def test_ideal_gas_is_poisson(batch_size, perturbed, monkeypatch):
     sampler, ctx = _gcmc(False, 16, 16, "CPU", adams=math.log(lam), batch_size=batch_size)
     sampler.move(ctx, 8000)
     n = np.array(sampler.Ns[500:], float)
-    n_eff = len(n) / timeseries.statisticalInefficiency(n)
+    n_eff = len(n) / timeseries.statistical_inefficiency(n)
     assert (sampler.n_stage2_rejected > 0) == perturbed
     assert abs(n.mean() - lam) < 4 * math.sqrt(lam / n_eff)
     assert abs(n.var() - lam) < 4 * math.sqrt((lam + 2 * lam**2) / n_eff)

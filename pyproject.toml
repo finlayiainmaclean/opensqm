@@ -39,6 +39,9 @@ channels = ["conda-forge"]
 platforms = ["linux-64", "osx-arm64"]
 
 [tool.pixi.dependencies]
+# cupy needs numpy 2, and numpy 2 would otherwise let the solver move Python to 3.13 and
+# rebuild every compiled package for it.
+python = "3.12.*"
 mopac = "*"
 pdbfixer = "*"
 openff-toolkit = "*"
@@ -49,7 +52,8 @@ pydantic-units = "*"
 xtb-python = "*"
 ambertools = "*"
 mdtraj = "*"
-pymbar = "<4"
+# 4 for numpy 2, which cupy needs. 4 renamed the timeseries API to snake_case.
+pymbar = ">=4"
 xmltodict = ">=1.0.2,<2"
 pytest = ">=9.0.3,<10"
 openmm-ml = "*"
@@ -64,6 +68,10 @@ pytorch = ">=2.4"
 # osx-arm64 has no CUDA. Widen this once the pods' driver moves past CUDA 13.0.
 cuda-version = "13.0.*"
 cuda-nvrtc = "13.0.*"
+# GPU arrays for GCMC trial energies (opensqm.gcmc), which fall back to numpy without it.
+# From conda-forge rather than PyPI's cupy-cuda13x[ctk], so it resolves against the
+# cuda-version pin above instead of bringing its own, newer NVRTC.
+cupy = ">=14.2,<15"
 
 
 [tool.pixi.pypi-dependencies]

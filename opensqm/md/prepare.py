@@ -368,8 +368,14 @@ def create_system(
     rest_ligand: bool = False,
     *,
     implicit_solvent: bool = False,
+    hydrogen_mass: unit.Quantity = 4.0 * unit.dalton,
 ) -> System:
-    """Create an OpenMM System from the forcefield and topology."""
+    """Create an OpenMM System from the forcefield and topology.
+
+    ``hydrogen_mass`` applies to explicit solvent. 4 Da (taken from the bonded atom) keeps
+    the 4 fs steps of equilibration, MMGBSA production and CTMD stable. ModBind passes
+    2 Da: its readout is an escape time, and masses change kinetics.
+    """
     if implicit_solvent:
         system = forcefield.createSystem(
             topology,
@@ -385,7 +391,7 @@ def create_system(
             # switchDistance=8.0 * unit.angstroms,
             constraints=app.HBonds,
             rigidWater=True,
-            hydrogenMass=2.0 * unit.dalton,
+            hydrogenMass=hydrogen_mass,
         )
 
     if rest_ligand:

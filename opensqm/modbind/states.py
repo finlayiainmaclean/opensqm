@@ -54,8 +54,12 @@ def _ligand_heavy_atom_indices(topology: Topology) -> list[int]:
 
 def build_bound_state_from_state(
     state: SystemState,
+    hydrogen_mass: unit.Quantity = 2.0 * unit.dalton,
 ) -> PreparedState:
     """Build the restrained bound-state system from a pre-equilibrated snapshot.
+
+    ``hydrogen_mass`` defaults to the 2 Da ModBind's escape times were calibrated on;
+    CTMD passes 4 Da for its 4 fs replicas.
 
     ``state`` is a CpH lowest-energy frame of the solvated ligand-protein
     complex - already equilibrated and carrying its periodic box - so its
@@ -78,7 +82,7 @@ def build_bound_state_from_state(
         solvent_mode="explicit",
     )
 
-    system = create_system(forcefield, topology)
+    system = create_system(forcefield, topology, hydrogen_mass=hydrogen_mass)
     # Restrain protein backbone distal to the ligand so it stays folded at high
     # temperature while the ligand escapes. Paper: flat-bottom sigma = 3.0 A on
     # backbone atoms, except residues within 6 A of the binding site (left free).
@@ -131,7 +135,8 @@ def build_unbound_state(
         config=equilibration_config,
     )
 
-    system = create_system(forcefield, topology)
+    # ModBind's escape times are kinetic, so it keeps the 2 Da it was calibrated on.
+    system = create_system(forcefield, topology, hydrogen_mass=2.0 * unit.dalton)
 
     return PreparedState(
         topology=topology,

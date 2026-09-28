@@ -18,7 +18,6 @@ from opensqm.ctmd.metad import (
     ct_from_bias,
     image_ligand_with_protein,
     ligand_rmsd_force,
-    repartition_hydrogen_mass,
     run_ctmd_replica,
 )
 from opensqm.ctmd.run_ctmd import collect_replicas
@@ -346,33 +345,3 @@ def test_the_cv_survives_a_protein_that_has_drifted() -> None:
         xyz = drifted.copy()
         xyz[state.ligand_indices] += np.array([displacement, 0.0, 0.0])
         assert _read_cv(state, xyz) == pytest.approx(_kabsch_ligand_rmsd(state, xyz), abs=0.02)
-
-
-def test_hydrogen_mass_moves_from_the_bonded_atom_and_skips_water() -> None:
-    """4 fs needs 4 Da hydrogens; the mass comes from the bonded heavy atom, not from nowhere."""
-    system = openmm.System()
-    topology = app.Topology()
-    chain = topology.addChain()
-    # A ligand C-H already at opensqm's 2 Da, and a water O-H at natural mass.
-    residues = (("LIG", (("C", 11.008), ("H", 2.0))), ("HOH", (("O", 15.999), ("H", 1.008))))
-    for resname, spec in residues:
-        residue = topology.addResidue(resname, chain)
-        pair = []
-        for symbol, mass in spec:
-            system.addParticle(mass * unit.dalton)
-            pair.append(topology.addAtom(symbol, app.element.Element.getBySymbol(symbol), residue))
-        topology.addBond(*pair)
-    state = PreparedState(
-        topology=topology,
-        positions=np.zeros((4, 3)) * unit.nanometer,
-        system=system,
-        ligand_indices=[0, 1],
-        is_bound=True,
-    )
-    total = sum(system.getParticleMass(i).value_in_unit(unit.dalton) for i in range(4))
-
-    repartition_hydrogen_mass(system, state, 4.0 * unit.dalton)
-
-    masses = [system.getParticleMass(i).value_in_unit(unit.dalton) for i in range(4)]
-    assert masses == pytest.approx([9.008, 4.0, 15.999, 1.008])
-    assert sum(masses) == pytest.approx(total)

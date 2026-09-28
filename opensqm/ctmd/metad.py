@@ -151,31 +151,6 @@ def image_ligand_with_protein(system: System, state: PreparedState) -> CustomCen
     return force
 
 
-WATER_RESIDUES = frozenset({"HOH", "WAT", "SOL"})
-
-
-def repartition_hydrogen_mass(system: System, state: PreparedState, mass: unit.Quantity) -> None:
-    """Set every non-water hydrogen to ``mass``, taking the difference from its bonded atom.
-
-    Total mass is unchanged. Water stays as it is, as OpenMM's own ``hydrogenMass`` does:
-    it is rigid, so its hydrogens set no time-step limit.
-    """
-    target = mass.value_in_unit(unit.dalton)
-    for a, b in state.topology.bonds():
-        for hydrogen, heavy in ((a, b), (b, a)):
-            if (
-                hydrogen.element is not None
-                and hydrogen.element.symbol == "H"
-                and heavy.element is not None
-                and heavy.element.symbol != "H"
-                and hydrogen.residue.name not in WATER_RESIDUES
-            ):
-                delta = target - system.getParticleMass(hydrogen.index).value_in_unit(unit.dalton)
-                system.setParticleMass(hydrogen.index, target * unit.dalton)
-                heavy_mass = system.getParticleMass(heavy.index).value_in_unit(unit.dalton)
-                system.setParticleMass(heavy.index, (heavy_mass - delta) * unit.dalton)
-
-
 def build_metadynamics(
     state: PreparedState, config: CTMDSettings
 ) -> tuple[PreparedState, Metadynamics]:
@@ -187,7 +162,6 @@ def build_metadynamics(
     biasing it in place would poison that cache.
     """
     system = copy.deepcopy(state.system)
-    repartition_hydrogen_mass(system, state, config.hydrogen_mass)
     image_ligand_with_protein(system, state)
     variable = BiasVariable(
         ligand_rmsd_force(state),

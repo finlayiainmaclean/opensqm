@@ -40,10 +40,8 @@ class CTMDSettings(BaseModel):
 
     # --- Sampling ---
     temperature: OpenMMQuantity[unit.kelvin] = 300.0 * unit.kelvin
-    # 4 fs is stable only with heavy hydrogens: hydrogen_mass is repartitioned from the
-    # bonded heavy atom, on the metadynamics system alone (see build_metadynamics).
+    # 4 fs, stable with the 4 Da hydrogens opensqm.md.prepare.create_system gives.
     integrator_step_size: OpenMMQuantity[unit.picosecond] = 0.004 * unit.picoseconds
-    hydrogen_mass: OpenMMQuantity[unit.dalton] = 4.0 * unit.dalton
     friction: OpenMMQuantity[unit.picosecond**-1] = 1.0 / unit.picosecond  # type: ignore
     n_replicas: int = 10
     n_score_replicas: int = 3
@@ -95,7 +93,6 @@ class CTMDSettings(BaseModel):
         conf_dict = {
             "temperature": str(self.temperature),
             "integrator_step_size": str(self.integrator_step_size),
-            "hydrogen_mass": str(self.hydrogen_mass),
             "n_replicas": self.n_replicas,
             "n_score_replicas": self.n_score_replicas,
             "frame_interval": str(self.frame_interval),

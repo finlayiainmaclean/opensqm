@@ -26,22 +26,20 @@ from opensqm.md.prepare import get_ligand_forcefield
 
 
 def _openmm_atom_lookup_key(atom: Any) -> tuple[Any, ...]:
+    """Identify an atom across two topologies of one system.
+
+    The insertion code is part of the key: without it, residues 129, 129A and 129B of one
+    residue name collide (chymotrypsin numbering, as in thrombin).
+    """
     rid = atom.residue.id
     try:
         rid_i = int(rid)
     except (TypeError, ValueError):
         rid_i = rid
-    return (str(atom.residue.chain.id).strip(), rid_i, atom.residue.name.strip(), atom.name.strip())
-
-
-def _mdtraj_atom_lookup_key(atom: Any) -> tuple[Any, ...]:
-    ch = atom.residue.chain
-    cid = getattr(ch, "chain_id", None)
-    if cid is None:
-        cid = str(ch.index)
     return (
-        str(cid).strip(),
-        int(atom.residue.resSeq),
+        str(atom.residue.chain.id).strip(),
+        rid_i,
+        (atom.residue.insertionCode or "").strip(),
         atom.residue.name.strip(),
         atom.name.strip(),
     )
@@ -203,7 +201,9 @@ def get_interaction_energy(
     # Map each OpenMM modeller atom (protein → retained waters → ligand) to a static
     # mdtraj index in the full trajectory. Waters use -1 and are filled per-frame from
     # the closest n water molecules so coordinates match modeller.topology order.
-    ref_key_to_idx = {_mdtraj_atom_lookup_key(a): a.index for a in ref.topology.atoms}
+    # Keys come from OpenMM's reading of the same PDB, not mdtraj's: mdtraj drops insertion
+    # codes. Both read atoms in file order, so the OpenMM index is the mdtraj index.
+    ref_key_to_idx = {_openmm_atom_lookup_key(a): a.index for a in complex.topology.atoms()}
     n_omm = modeller.topology.getNumAtoms()
     ref_by_omm = np.full(n_omm, -1, dtype=np.int64)
     for omm_atom in modeller.topology.atoms():

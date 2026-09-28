@@ -47,7 +47,7 @@ class EquilibrationSettings(BaseModel):
     gcmc: bool = True
     gcmc_padding: OpenMMQuantity[unit.angstrom] = 3.0 * unit.angstrom
     gcmc_refill_trials: int = 110_000
-    gcmc_uvt_time: OpenMMQuantity[unit.picosecond] = 100 * unit.picoseconds
+    gcmc_uvt_time: OpenMMQuantity[unit.picosecond] = 500 * unit.picoseconds
     gcmc_trials_per_ps: int = 1000
 
 

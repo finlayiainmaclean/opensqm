@@ -99,7 +99,7 @@ dev = [
 
 [tool.ty.analysis]
 # OpenMM stack is a Pixi/conda dependency; uv's default venv often lacks these packages.
-allowed-unresolved-imports = ["openmm", "openmm.**", "openmmforcefields", "openmmforcefields.**", "pdbfixer", "pdbfixer.**", "pdb2pqr", "pdb2pqr.**", "simtk", "simtk.**"]
+allowed-unresolved-imports = ["openmm", "openmm.**", "openmmforcefields", "openmmforcefields.**", "pdbfixer", "pdbfixer.**", "pdb2pqr", "pdb2pqr.**", "simtk", "simtk.**", "cupy", "cupy.**"]
 
 [tool.pyrefly]
 python-interpreter = ".pixi/envs/default/bin/python"

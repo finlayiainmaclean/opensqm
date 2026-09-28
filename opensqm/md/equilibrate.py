@@ -1,5 +1,6 @@
 """Module containing equilibration protocol."""
 
+import math
 import time
 
 import mdtraj as md
@@ -17,13 +18,24 @@ from pydantic_units import OpenMMQuantity
 from pymbar import timeseries
 from tqdm import tqdm
 
+from opensqm.gcmc.energy import min_image
+from opensqm.gcmc.sampler import GCMCSampler, GCMCSettings, add_ghost_waters, cp
 from opensqm.md.platforms import make_simulation
 from opensqm.md.prepare import create_integrator, create_system
 from opensqm.md.restraints import add_restraints
 
 
 class EquilibrationSettings(BaseModel):
-    """Settings for the optimisation process."""
+    """Settings for ``equilibrate``: NVT warmup, uVT, NPT, uVT.
+
+    With ``gcmc`` (the default) and a protein-ligand complex in explicit water, grand
+    canonical water moves in a sphere on the ligand (its extent plus ``gcmc_padding``)
+    hydrate the pocket at 300 K: first with backbone and ligand restrained,
+    ``gcmc_refill_trials`` trials in blocks of 1,000 with 5 MD steps after each; then,
+    after NPT and without restraints, ``gcmc_uvt_time`` of MD with
+    ``gcmc_trials_per_ps`` trials after every picosecond. The excess chemical potential
+    and standard volume are grand's TIP3P values (298 K, 12 A cutoff).
+    """
 
     model_config = ConfigDict(frozen=True)
     integrator_step_size: OpenMMQuantity[unit.picosecond] = 0.004 * unit.picoseconds
@@ -32,6 +44,11 @@ class EquilibrationSettings(BaseModel):
     restraint_force: OpenMMQuantity[unit.kilocalories_per_mole / unit.angstroms**2] = (
         4.0 * unit.kilocalories_per_mole / unit.angstroms**2
     )
+    gcmc: bool = True
+    gcmc_padding: OpenMMQuantity[unit.angstrom] = 3.0 * unit.angstrom
+    gcmc_refill_trials: int = 110_000
+    gcmc_uvt_time: OpenMMQuantity[unit.picosecond] = 500 * unit.picoseconds
+    gcmc_trials_per_ps: int = 1000
 
 
 def _check_volume_plateau(
@@ -100,6 +117,70 @@ def _recenter_ligand_positions(
     return traj.xyz[0] * unit.nanometer
 
 
+def _uvt(
+    topology: Topology,
+    positions: unit.Quantity,
+    box: unit.Quantity,
+    forcefield: ForceField,
+    config: EquilibrationSettings,
+    *,
+    restrained: bool,
+) -> tuple[Topology, unit.Quantity]:
+    """One uVT stage (grand's protocol): water GCMC in a sphere on the ligand, at 300 K.
+
+    Ghost waters are added for the stage and removed after it, together with every
+    water the stage deleted, so the water count of the returned topology can change.
+    """
+    lig = [a.index for a in topology.atoms() if a.residue.name == "LIG" and a.element.symbol != "H"]
+    xyz = np.array(positions.value_in_unit(unit.nanometer))
+    box_nm = np.array(box.value_in_unit(unit.nanometer))
+    d = min_image(np, xyz[lig] - xyz[lig[0]], box_nm)
+    extent_a = 10 * float(np.linalg.norm(d - d.mean(axis=0), axis=1).max())
+    # ponytail: the sphere is capped below half the box, so a ligand in a small box may
+    # leave part of its pocket outside it.
+    radius_a = min(
+        extent_a + config.gcmc_padding.value_in_unit(unit.angstrom), 4.9 * box_nm.diagonal().min()
+    )
+    n_ghosts = 15 + int(4 / 3 * math.pi * radius_a**3 / 30.345 / 2)
+    top, pos, ghosts = add_ghost_waters(topology, positions, n_ghosts)
+    system = create_system(forcefield, top)
+    if restrained:
+        system, _ = add_restraints(
+            system, pos, top.atoms(), config.restraint_force, restraints=("backbone", "ligand")
+        )
+    device = "cuda" if cp is not None and cp.cuda.is_available() else "cpu"
+    settings = GCMCSettings(
+        sphere_radius_a=radius_a, temperature_k=300.0, batch_size=1024, device=device
+    )
+    sampler = GCMCSampler(system, top, lig, settings)
+    simulation = make_simulation(top, system, create_integrator(config.integrator_step_size))
+    simulation.context.setPeriodicBoxVectors(*box)
+    simulation.context.setPositions(pos)
+    sampler.initialise(simulation.context, ghosts)
+    # After initialise: setting velocities before it can make the system go NaN.
+    simulation.context.setVelocitiesToTemperature(300 * unit.kelvin)
+    if restrained:
+        blocks = [10000] + [1000] * ((config.gcmc_refill_trials - 10000) // 1000)
+        for i, n in enumerate(tqdm(blocks, desc="uVT refill", unit="block")):
+            sampler.move(simulation.context, n)
+            if i:
+                simulation.step(5)
+    else:
+        steps = int(1 * unit.picosecond / config.integrator_step_size)
+        for _ in tqdm(range(int(config.gcmc_uvt_time / unit.picosecond)), desc="uVT", unit="ps"):
+            simulation.step(steps)
+            sampler.move(simulation.context, config.gcmc_trials_per_ps)
+    logger.info(
+        f"uVT ({'restrained' if restrained else 'free'}): {sampler.N} waters in the "
+        f"{radius_a:.1f} A sphere, {sampler.n_accepted}/{sampler.n_moves} moves accepted"
+    )
+    state = simulation.context.getState(getPositions=True, enforcePeriodicBox=True)
+    modeller = app.Modeller(top, state.getPositions())
+    residues = list(top.residues())
+    modeller.delete([residues[i] for i in sampler.ghost_resids])
+    return modeller.topology, modeller.positions
+
+
 def equilibrate(
     topology: Topology,
     positions: unit.Quantity,
@@ -109,7 +190,10 @@ def equilibrate(
     implicit_solvent: bool = False,
 ) -> tuple[Topology, unit.Quantity]:
     """
-    Equilibrate a molecular system through NVT warmup and NPT equilibration.
+    Equilibrate a molecular system: NVT warmup, uVT, NPT, uVT.
+
+    The two uVT stages run only with ``config.gcmc`` on a protein-ligand complex in
+    explicit water (see ``EquilibrationSettings``); otherwise this is NVT warmup + NPT.
 
     Args:
         topology: OpenMM topology
@@ -182,6 +266,16 @@ def equilibrate(
     warmup_state = simulation.context.getState(getPositions=True, enforcePeriodicBox=periodic)
     warmup_positions = warmup_state.getPositions()
     warmup_box = warmup_state.getPeriodicBoxVectors() if periodic else None
+
+    has_ligand = any(r.name == "LIG" for r in topology.residues())
+    has_protein = any(
+        r.name != "LIG" and any(a.name == "CA" for a in r.atoms()) for r in topology.residues()
+    )
+    gcmc = config.gcmc and periodic and has_ligand and has_protein
+    if gcmc:
+        topology, warmup_positions = _uvt(
+            topology, warmup_positions, warmup_box, forcefield, config, restrained=True
+        )
 
     # Create new system for production equilibration
     system = create_system(
@@ -272,6 +366,11 @@ def equilibrate(
         topology.setPeriodicBoxVectors(final_state.getPeriodicBoxVectors())
 
     positions = final_state.getPositions()
+    if gcmc:
+        topology, positions = _uvt(
+            topology, positions, final_state.getPeriodicBoxVectors(), forcefield, config,
+            restrained=False,
+        )  # fmt: skip
     if periodic:
         positions = _recenter_ligand_positions(topology, positions)
 

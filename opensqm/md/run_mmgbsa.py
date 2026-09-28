@@ -45,6 +45,7 @@ from pydantic_units import OpenMMQuantity
 from rdkit import Chem, RDLogger
 from scipy.spatial.distance import cdist
 from unipka import UnipKa
+from unipka.unipka import EnumerationError
 
 from opensqm.cph.reference_energy import build_protonation_states
 from opensqm.cph.run_cph import SystemState
@@ -141,7 +142,20 @@ def _enumerate_protomers(
     increasing intrinsic free energy (dominant first).
     """
     molecule_rdmol = set_residue_info(Chem.MolFromMolFile(str(ligand_path), removeHs=False))
-    distribution = unipka.get_distribution(molecule_rdmol, pH=ph).reset_index(drop=True)
+    try:
+        distribution = unipka.get_distribution(molecule_rdmol, pH=ph).reset_index(drop=True)
+    except EnumerationError as exc:
+        # A ligand with no ionisable site has one charge state, and uniKa cannot
+        # enumerate microstates across it. Score the input protonation alone.
+        logger.warning(f"uniKa enumerated no protomers ({exc}); scoring the input protonation only")
+        return [
+            _ProtomerCandidate(
+                mol=molecule_rdmol,
+                smiles=Chem.MolToSmiles(Chem.RemoveHs(molecule_rdmol)),
+                charge=Chem.GetFormalCharge(molecule_rdmol),
+                intrinsic_kcal=0.0,
+            )
+        ]
     within_window = distribution[
         distribution["relative_ph_adjusted_free_energy"] < penalty_kcal
     ].sort_values("relative_ph_adjusted_free_energy")

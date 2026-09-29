@@ -86,7 +86,8 @@ class MMGBSASettings(BaseModel):
     model_config = ConfigDict(frozen=True)
     n_closest_waters: int = 5
     ligand_resname: str = "LIG"
-    # pH at which the ligand's protomers are enumerated (uniKa).
+    # pH for both the protein titration states (PROPKA) and the ligand protomers
+    # (uniKa); run_mmgbsa_implicit protonates both at this value.
     protomer_ph: float = 7.0
     # Every ligand protomer whose uniKa solution free energy is within this
     # window of the dominant one is scored; the winner minimises
@@ -1025,7 +1026,7 @@ def run_mmgbsa(
     "--ph",
     default=7.0,
     show_default=True,
-    help="pH at which the ligand protomers are enumerated.",
+    help="pH for both the protein PROPKA titration states and the ligand protomers.",
 )
 @click.option(
     "--protonation-penalty",

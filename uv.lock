@@ -2634,7 +2634,7 @@ wheels = [
 [[package]]
 name = "unipka"
 version = "0.0.7"
-source = { git = "https://github.com/finlayiainmaclean/unipka.git#eced11c5316f85e78f3a70e6ae301f56bf2e166f" }
+source = { git = "https://github.com/finlayiainmaclean/unipka.git#b4e764d993ff643580b65c82e67af1341ed37215" }
 dependencies = [
     { name = "anywidget" },
     { name = "matplotlib" },
